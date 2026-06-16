@@ -4,16 +4,28 @@
 
 ### See how many tokens your AI coding agents *really* burned.
 
-A fast, **100% local** command-line tool that reads your [Claude Code](https://claude.com/claude-code) session history and shows you exactly how many tokens — and how many dollars — you've spent. No account, no sign-up, no upload. Nothing ever leaves your machine.
+A fast CLI that reads your [Claude Code](https://claude.com/claude-code) usage and shows exactly how many tokens — and how many dollars — you've burned.
 
 [![CI](https://github.com/amiinwani/whoburnedmore.com/actions/workflows/ci.yml/badge.svg)](https://github.com/amiinwani/whoburnedmore.com/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-3ddc84.svg)](./LICENSE)
 [![Node](https://img.shields.io/badge/node-%E2%89%A520-brightgreen.svg)](https://nodejs.org)
-[![Data: 100% local](https://img.shields.io/badge/data-100%25%20local-ff8a3d.svg)](#-privacy)
-
-**[whoburnedmore.com](https://whoburnedmore.com)** &nbsp;·&nbsp; the hosted leaderboard
+[![Leaderboard](https://img.shields.io/badge/leaderboard-whoburnedmore.com-ff8a3d.svg)](https://whoburnedmore.com)
 
 </div>
+
+## ▶ Get started in one command
+
+No install, no sign-up — just run:
+
+```sh
+npx whoburnedmore
+```
+
+See your burn in seconds — **then land on the global leaderboard at [whoburnedmore.com](https://whoburnedmore.com)**, where developers around the world compare who's burned the most across Claude Code, Codex, Cursor and more.
+
+> ### 🏆 Think you've burned the most?
+>
+> Run **`npx whoburnedmore`** and find out where you rank. Only your **daily token totals** are shared to the board — never your prompts or your code. Make your entry private or remove it anytime — or stay fully offline with the open-source edition below.
 
 ---
 
@@ -43,18 +55,20 @@ A fast, **100% local** command-line tool that reads your [Claude Code](https://c
 
 ## ✨ Features
 
-- **🔒 Completely local.** Reads the transcripts already on your disk. Makes **zero** network requests — no telemetry, no account, no API keys.
+- **🔒 Local-first.** The open-source edition reads the transcripts already on your disk and makes **zero** network requests — no telemetry, no account, no API keys.
 - **💸 Real cost estimates.** Turns raw token counts into dollar figures using a transparent, editable [pricing table](./src/pricing.ts).
 - **🧩 Breakdowns that matter.** See your burn split **by model** and **by project**, so you know exactly where the tokens went.
 - **⚡ Prompt-cache insight.** Surfaces your cache read-hit rate — the single biggest lever on what you actually pay.
 - **🖼️ Beautiful HTML dashboard.** `--html` writes a self-contained, offline dashboard you can open in any browser or share.
 - **🪶 Tiny & dependency-free at runtime.** A ~15 KB bundle with no runtime dependencies. Nothing to trust but the code you can read here.
 
-## 🚀 Quick start
+## 🧑‍💻 Run from source — the open-source local edition
+
+The quickest way in is `npx whoburnedmore` above. **This repository is the open-source, 100% local edition**: it produces the same burn report but runs entirely offline and uploads nothing — perfect if you want to read every line before you run it, or stay off the leaderboard.
 
 You'll need **[Node.js](https://nodejs.org) 20+** and some [Claude Code](https://claude.com/claude-code) usage on this machine.
 
-### Run it instantly with `npx`
+### Run this edition straight from GitHub
 
 ```bash
 npx github:amiinwani/whoburnedmore.com
@@ -102,18 +116,16 @@ Every assistant turn in those files carries a `usage` block — input tokens, ou
 
 ## 🛡️ Privacy
 
-This tool is **read-only and offline by design.**
+You choose how you run it:
 
-- It only **reads** files; it never writes to your transcripts or deletes anything.
-- It makes **no network requests** of any kind — no analytics, no "phone home," no auto-update.
-- The optional HTML dashboard is fully self-contained: no external fonts, scripts, or trackers.
-- Your prompts and code are **never** parsed for content — only the numeric `usage` counters and the model name are read.
+- **`npx whoburnedmore`** (the hosted product) shows your burn **and** adds you to the public leaderboard. Only your **daily token totals** are uploaded — never your prompts, your code, or any file contents — and you can make your entry private or delete it whenever you like.
+- **This open-source edition** (run from source, above) is **100% local**: it makes zero network requests, has no telemetry, and nothing ever leaves your machine. It only reads files (never writes), and it parses only the numeric `usage` counters and the model name — never the content of your prompts or code.
 
-Want to verify? It's ~400 lines. Read [`src/`](./src), or run with `--json` and inspect exactly what it computes.
+Want to verify the open-source edition? It's ~400 lines — read [`src/`](./src), or run it with `--json` and inspect exactly what it computes.
 
-## 🌐 The hosted version
+## 🌐 The hosted leaderboard
 
-This CLI is the open-source, local-only sibling of **[whoburnedmore.com](https://whoburnedmore.com)** — a public leaderboard where developers compare how much they've burned across Claude Code, Codex, Cursor and more. The website is a separate, hosted product; **this repository contains only the local tool** and none of its backend.
+**[whoburnedmore.com](https://whoburnedmore.com)** is a public leaderboard where developers compare how much they've burned across Claude Code, Codex, Cursor and more. Run **`npx whoburnedmore`** to claim your spot. The website is a separate, hosted product — **this repository contains only the open-source local tool** and none of its backend.
 
 ## 🤝 Contributing
 
