@@ -5,7 +5,54 @@ import {
   anonVisibility,
   boardClaimUrl,
   claimUrl,
+  isOpenableUrl,
+  isTrustedWebUrl,
 } from "../src/api.js";
+
+describe("isTrustedWebUrl — never auto-open a hostile server URL", () => {
+  it("accepts only an https URL on our own web host", () => {
+    expect(isTrustedWebUrl("https://whoburnedmore.com/d/abc-def")).toBe(true);
+    expect(isTrustedWebUrl("https://whoburnedmore.com/boards/xyz")).toBe(true);
+  });
+  it("rejects wrong host, wrong scheme, and dangerous schemes", () => {
+    for (const bad of [
+      "https://evil.com/d/abc", // wrong host
+      "https://whoburnedmore.com.evil.com/d/abc", // look-alike host
+      "http://whoburnedmore.com/d/abc", // downgraded scheme (base is https)
+      "javascript:alert(document.cookie)",
+      "file:///etc/passwd",
+      "data:text/html,<script>alert(1)</script>",
+      "calculator://x",
+      "-a /System/Applications/Calculator.app", // arg-injection into `open`
+      "--background https://evil.com",
+      "",
+      "not a url",
+    ]) {
+      expect(isTrustedWebUrl(bad), bad).toBe(false);
+    }
+  });
+});
+
+describe("isOpenableUrl — what may reach the OS opener", () => {
+  it("allows http(s) and local file URLs only", () => {
+    expect(isOpenableUrl("https://whoburnedmore.com/d/x")).toBe(true);
+    expect(isOpenableUrl("http://localhost:3001/d/x")).toBe(true);
+    expect(isOpenableUrl("file:///home/u/.config/whoburnedmore/dashboard.html")).toBe(true);
+  });
+  it("blocks dangerous schemes and flag-injection", () => {
+    for (const bad of [
+      "javascript:alert(1)",
+      "data:text/html,x",
+      "vbscript:msgbox(1)",
+      "customapp://run",
+      "-a Calculator",
+      "--args evil",
+      "ssh://host",
+    ]) {
+      expect(isOpenableUrl(bad), bad).toBe(false);
+    }
+  });
+});
 
 describe("claimUrl", () => {
   it("appends the anon key as a URL fragment (the claim handoff)", () => {

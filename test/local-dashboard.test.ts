@@ -68,4 +68,14 @@ describe("renderDashboardHtml", () => {
     const empty = renderDashboardHtml([]);
     expect(empty).toContain("no usage found");
   });
+
+  it("escapes a <script>-laden tool name (no raw script tag in the output)", () => {
+    // A user's own transcript could carry an HTML-laden tool/project name; the local
+    // dashboard must never reflect it unescaped (self-XSS when they open the file).
+    const html = renderDashboardHtml([
+      entry({ tool: "<script>alert(1)</script>" }),
+    ]);
+    expect(html).toContain("&lt;script&gt;");
+    expect(html).not.toContain("<script>alert");
+  });
 });

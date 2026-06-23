@@ -13,6 +13,39 @@ export function webBase(): string {
   return process.env.WHOBURNEDMORE_WEB ?? "https://whoburnedmore.com";
 }
 
+/**
+ * True only if `url` is an http(s) URL whose origin matches the configured web base
+ * (https://whoburnedmore.com by default, or WHOBURNEDMORE_WEB for dev). The CLI opens a
+ * dashboard/board URL that comes BACK from the server, so a malicious or MITM'd server
+ * could otherwise return a `javascript:` / `file:` / custom-scheme / wrong-host URL and
+ * make the OS launch an arbitrary handler. Guard the host before ever auto-opening.
+ */
+export function isTrustedWebUrl(url: string): boolean {
+  let u: URL;
+  let base: URL;
+  try {
+    u = new URL(url);
+    base = new URL(webBase());
+  } catch {
+    return false; // not a parseable absolute URL (e.g. "-a foo", "javascript:…")
+  }
+  return (
+    (u.protocol === "https:" || u.protocol === "http:") &&
+    u.protocol === base.protocol &&
+    u.host === base.host
+  );
+}
+
+/**
+ * True only if `url` is safe to hand to the OS opener (`open`/`xdg-open`/`start`): an
+ * http(s) URL or a local `file:` URL. Blocks `javascript:`/`data:`/custom schemes and any
+ * leading-`-` string that the opener would treat as a command-line flag. Second layer under
+ * `isTrustedWebUrl` — used for the locally-built `file://` dashboard too.
+ */
+export function isOpenableUrl(url: string): boolean {
+  return /^(https?|file):\/\//.test(url);
+}
+
 /** Parse a response body as JSON, tolerating empty or non-JSON responses. */
 async function readJson<T>(res: Response): Promise<T> {
   const text = await res.text();

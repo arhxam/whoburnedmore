@@ -16,6 +16,8 @@ import {
   claimUrl,
   apiBase,
   webBase,
+  isTrustedWebUrl,
+  isOpenableUrl,
 } from "./api.js";
 import {
   autoSyncInstalled,
@@ -119,6 +121,9 @@ function startProgress(): { onProgress: ProgressFn; stop: () => void } {
 }
 
 function openBrowser(url: string): void {
+  // Never hand the OS opener anything but an http(s)/file URL — blocks javascript:/data:/
+  // custom-scheme URLs and leading-dash arg-injection a hostile server response could carry.
+  if (!isOpenableUrl(url)) return;
   const os = platform();
   const [cmd, args] =
     os === "darwin"
@@ -260,9 +265,14 @@ async function run(flags: Flags): Promise<void> {
   // way we carry the claim handoff (key + slug) in the URL fragment so signing
   // in on that page claims this machine's submission instead of stranding it as
   // an anonymous row.
+  const baseUrl = result.boardUrl ?? result.dashboardUrl;
   const target = result.boardUrl
     ? boardClaimUrl(result.boardUrl, result.slug, anonKey)
     : claimUrl(result.dashboardUrl, anonKey);
+  // The dashboard/board URL comes BACK from the server. Only auto-open it if it's a real
+  // https URL on our own web host — a malicious or MITM'd response must never make us
+  // launch an arbitrary URL/scheme/handler. Otherwise show it as text; never auto-open.
+  const trusted = isTrustedWebUrl(baseUrl);
   if (!flags.quiet) {
     // No burn report in the terminal. Reassure on security, then hand the user
     // straight to the browser where the dashboard summarises everything — and
@@ -271,8 +281,15 @@ async function run(flags: Flags): Promise<void> {
       pc.green("  ✓ Synced securely.") +
         pc.dim(" Only your daily totals left this machine — never your prompts, code, or file names."),
     );
-    console.log(pc.dim("  Opening your dashboard in your browser…"));
-    openBrowser(target);
+    if (trusted) {
+      console.log(pc.dim("  Opening your dashboard in your browser…"));
+      openBrowser(target);
+    } else {
+      console.log(
+        pc.dim("  The server returned an unexpected dashboard address, so it was NOT auto-opened. Open it yourself only if you trust it:"),
+      );
+      console.log(`  ${baseUrl}`);
+    }
   }
   // Destination + the single next step (sign in + add X). No usage numbers —
   // the dashboard summarises the burn. Built by a pure helper so it stays testable.
