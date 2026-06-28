@@ -7,8 +7,9 @@ be able to verify it before running it.
 
 ## What leaves your machine
 Only bounded aggregates: per day/tool/model token counts, estimated cost, and optional
-session/tool/skill/project **names + counts**. Never your prompts, code, file contents, or
-file paths. `--dry-run` prints the exact payload; `--local` uploads nothing at all.
+session/tool/skill **names + counts**. Never your prompts, code, file contents, file paths,
+project/repo names, or conversation titles. `--dry-run` prints the exact payload;
+`--local` uploads nothing at all.
 
 ## Threat model & mitigations
 - **Server-controlled URLs.** The dashboard/board URL comes back from the server. The CLI
@@ -28,7 +29,15 @@ file paths. `--dry-run` prints the exact payload; `--local` uploads nothing at a
   mode `0600`, re-asserted on every write.
 - **Local dashboard.** `--local` writes a self-contained HTML file; all user-derived values
   are HTML-escaped.
-- **Supply chain.** Runtime dependencies are exact-pinned and audited.
+- **Bounded network.** Every server request has a 30s timeout, so a slow or unreachable
+  server can never hang the CLI or the background sync indefinitely. All traffic is HTTPS
+  to the pinned API host (overridable only via `WHOBURNEDMORE_API` for local dev).
+- **Supply chain & auto-update.** Runtime dependencies are exact-pinned and audited. The
+  optional background sync runs `npm exec --yes --ignore-scripts --package whoburnedmore@latest`
+  every 15 minutes, so it always runs the latest published release — which means you are
+  trusting the npm publishing pipeline of this package over time, not just the version you
+  first installed. That pipeline is protected by npm 2FA + a scoped publish token; uninstall
+  the sync (`whoburnedmore uninstall-sync`) or run `--local` if you'd rather not auto-update.
 
 ## Reporting a vulnerability
 Please report privately via **GitHub Security Advisories**

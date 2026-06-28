@@ -10,6 +10,21 @@ export function formatUSD(n: number): string {
 }
 
 /**
+ * Strip terminal control bytes (C0, DEL, C1) from any string that came BACK from
+ * the server before it is printed. A hostile, compromised, or MITM'd API response
+ * (or a user-pointed WHOBURNEDMORE_API) could otherwise embed ANSI/OSC escape
+ * sequences — OSC 52 clipboard writes, window-title rewrites, hyperlink spoofing,
+ * cursor games — that take effect the moment the line is printed. The background
+ * sync prints these unattended every 15 minutes, so escaping at the print
+ * boundary matters. Printable text (URLs, handles, codes) is left intact; only the
+ * escape bytes are removed.
+ */
+export function sanitizeServerText(s: string): string {
+  // eslint-disable-next-line no-control-regex -- the whole point is to remove control bytes
+  return s.replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
+}
+
+/**
  * The post-submit "next steps" lines printed by the CORE (online) command. This
  * is intentionally free of any usage numbers — the web dashboard is where a user
  * reviews their burn. It returns the destination URL plus the single next step
@@ -27,14 +42,14 @@ export function submitNextStepLines(result: {
     const code =
       result.boardCode ?? result.boardUrl.split("/").filter(Boolean).pop() ?? "";
     return [
-      `  🤝 You're on the board: ${result.boardUrl}`,
+      `  🤝 You're on the board: ${sanitizeServerText(result.boardUrl)}`,
       "  → Open it to see who burned more.",
-      `  → Get a friend on it — have them run: npx whoburnedmore --board=${code}`,
+      `  → Get a friend on it — have them run: npx whoburnedmore --board=${sanitizeServerText(code)}`,
       "  → Sign in on the page and add your X to claim your spot and own your rank.",
     ];
   }
   return [
-    `  Your dashboard: ${result.dashboardUrl}`,
+    `  Your dashboard: ${sanitizeServerText(result.dashboardUrl)}`,
     "  → Sign in and add your X on the page to get on the leaderboard and claim your rank.",
     "  Private until you do. Manage anytime: `npx whoburnedmore private` · `public` · `remove`.",
   ];

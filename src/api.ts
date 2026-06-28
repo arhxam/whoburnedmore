@@ -83,6 +83,9 @@ async function post<T>(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
+      // Bound the request so a slow/black-holing/hostile server can't hang the CLI
+      // — or the unattended 15-minute background sync — indefinitely.
+      signal: AbortSignal.timeout(30_000),
     });
   } catch {
     throw new Error(
@@ -180,6 +183,7 @@ export async function anonRemove(anonKey: string): Promise<void> {
     method: "DELETE",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ anonKey }),
+    signal: AbortSignal.timeout(30_000),
   });
   if (res.status !== 200) {
     const b = (await res.json().catch(() => ({}))) as { error?: string };

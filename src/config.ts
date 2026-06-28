@@ -4,6 +4,8 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  renameSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -57,14 +59,29 @@ export function saveConfig(
 ): void {
   mkdirSync(dir, { recursive: true });
   const file = join(dir, "config.json");
-  writeFileSync(file, JSON.stringify(config, null, 2), { mode: 0o600 });
-  // writeFileSync's `mode` only applies when the file is freshly created; if the
-  // config already existed with looser permissions it would keep them. This file
-  // holds the anonKey secret, so re-assert owner-only (0600) on every save.
+  // Write owner-only to a fresh temp file, then atomically rename it over the
+  // target. This file holds the anonKey secret, so writing in place would (a) leave
+  // a brief world-readable window when the config already existed with looser perms
+  // — writeFileSync's `mode` only applies to a freshly-created inode — and (b) follow
+  // a symlink an attacker may have planted at config.json. The fresh-inode + rename
+  // avoids both: the secret only ever exists at 0600, and the rename can't traverse a
+  // symlink at the destination.
+  const tmp = join(dir, `config.json.${process.pid}.tmp`);
   try {
-    chmodSync(file, 0o600);
-  } catch {
-    /* best-effort: some filesystems (e.g. Windows) don't support POSIX modes */
+    writeFileSync(tmp, JSON.stringify(config, null, 2), { mode: 0o600 });
+    try {
+      chmodSync(tmp, 0o600);
+    } catch {
+      /* best-effort: some filesystems (e.g. Windows) don't support POSIX modes */
+    }
+    renameSync(tmp, file);
+  } catch (err) {
+    try {
+      rmSync(tmp, { force: true });
+    } catch {
+      /* ignore cleanup failure */
+    }
+    throw err;
   }
 }
 

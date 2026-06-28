@@ -48,7 +48,7 @@ import {
 } from "./config.js";
 import { agentStatusReport } from "./status.js";
 import { renderDashboardHtml } from "./local-dashboard.js";
-import { submitNextStepLines } from "./output.js";
+import { sanitizeServerText, submitNextStepLines } from "./output.js";
 import { publishLocal } from "./publish.js";
 
 const require = createRequire(import.meta.url);
@@ -317,7 +317,7 @@ async function run(flags: Flags): Promise<void> {
       console.log(
         pc.dim("  The server returned an unexpected dashboard address, so it was NOT auto-opened. Open it yourself only if you trust it:"),
       );
-      console.log(`  ${baseUrl}`);
+      console.log(`  ${sanitizeServerText(baseUrl)}`);
     }
   }
   // Destination + the single next step (sign in + add X). No usage numbers —
@@ -361,10 +361,11 @@ async function linkServerInstall(token: string | undefined): Promise<void> {
   }
   const anonKey = ensureAnonKey();
   const linked = await redeemServerInstall(token, anonKey);
+  const handle = sanitizeServerText(linked.handle);
   console.log(
     linked.alreadyLinked
-      ? `  This machine is already linked to @${linked.handle}.`
-      : `  Linked this machine to @${linked.handle}.`,
+      ? `  This machine is already linked to @${handle}.`
+      : `  Linked this machine to @${handle}.`,
   );
   if (linked.mergedDays > 0) {
     console.log(pc.dim(`  Merged ${linked.mergedDays} existing usage day${linked.mergedDays === 1 ? "" : "s"} from this machine.`));
@@ -390,7 +391,7 @@ async function linkServerInstall(token: string | undefined): Promise<void> {
     console.log(pc.dim("  Linked, but background sync could not be installed automatically. Run `npx whoburnedmore install-sync` to retry."));
   }
 
-  console.log(`  Profile: ${linked.profileUrl}`);
+  console.log(`  Profile: ${sanitizeServerText(linked.profileUrl)}`);
 }
 
 /** Sleep for `ms`, resolving early if `signal` aborts (prompt SIGTERM exit). */

@@ -1,5 +1,6 @@
 import type { AnonSubmitResponse, SubmitPayload } from "./shared.js";
-import { claimUrl } from "./api.js";
+import { claimUrl, isTrustedWebUrl } from "./api.js";
+import { sanitizeServerText } from "./output.js";
 
 export interface PublishDeps {
   confirm: (question: string) => Promise<boolean>;
@@ -25,8 +26,15 @@ export async function publishLocal(
   }
   const key = deps.ensureAnonKey();
   const res = await deps.anonSubmit(key, payload);
-  deps.log(`  Published — you're on the board: ${res.dashboardUrl}`);
-  deps.openBrowser(claimUrl(res.dashboardUrl, key));
+  deps.log(`  Published — you're on the board: ${sanitizeServerText(res.dashboardUrl)}`);
+  // The dashboard URL comes BACK from the server. Only auto-open it when it's a real
+  // https URL on our own web host (same gate the core submit path uses) — a malicious
+  // or MITM'd response must never make the OS launch an arbitrary handler.
+  if (isTrustedWebUrl(res.dashboardUrl)) {
+    deps.openBrowser(claimUrl(res.dashboardUrl, key));
+  } else {
+    deps.log("  (The server returned an unexpected address, so it was not auto-opened.)");
+  }
   deps.log(
     "  Sign in there to claim it, or `npx whoburnedmore private` to hide it again.",
   );
