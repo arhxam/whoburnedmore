@@ -45,6 +45,7 @@ import {
   loadConfig,
   recordLaunchNotificationDelivered,
   recordSync,
+  loadEnv,
 } from "./config.js";
 import { agentStatusReport } from "./status.js";
 import { renderDashboardHtml } from "./local-dashboard.js";
@@ -459,6 +460,7 @@ async function runDaemon(): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  loadEnv();
   const major = Number(process.versions.node.split(".")[0]);
   if (major < 20) {
     console.error(`whoburnedmore needs Node 20+ (you have ${process.versions.node})`);

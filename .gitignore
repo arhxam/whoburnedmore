@@ -10,3 +10,7 @@ CLAUDE.md
 GEMINI.md
 AGENTS.md
 docs/superpowers/
+
+# Local environment files
+.env
+

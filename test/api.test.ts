@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { loadEnv } from "../src/config.js";
+loadEnv();
+
 import {
   anonRemove,
   anonSubmit,

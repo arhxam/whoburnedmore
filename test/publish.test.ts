@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+import { loadEnv } from "../src/config.js";
+loadEnv();
+
 import type { SubmitPayload } from "../src/shared.js";
 import { publishLocal, type PublishDeps } from "../src/publish.js";
 

@@ -13,8 +13,8 @@ export type Tenant =
   | { kind: "subdomain"; slug: string }
   | { kind: "custom"; host: string };
 
-/** The production root domain. Overridable for tests / preview environments. */
-export const ROOT_DOMAIN = "whoburnedmore.com";
+/** The production root domain. Overridable for tests / preview environments / env variables. */
+export const ROOT_DOMAIN = process.env.WHOBURNEDMORE_ROOT_DOMAIN || "whoburnedmore.com";
 
 /**
  * Subdomains that must always resolve to the apex app, never to an org — these

@@ -116,3 +116,34 @@ export function recordLaunchNotificationDelivered(
   const config = loadConfig(dir) ?? {};
   saveConfig(dir, { ...config, launchNotificationDeliveredAt: when });
 }
+
+export function loadEnv(): void {
+  const dirs = [process.cwd(), defaultConfigDir()];
+  for (const dir of dirs) {
+    const file = join(dir, ".env");
+    if (!existsSync(file)) continue;
+    try {
+      const content = readFileSync(file, "utf8");
+      for (const line of content.split("\n")) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith("#")) continue;
+        const index = trimmed.indexOf("=");
+        if (index === -1) continue;
+        const key = trimmed.slice(0, index).trim();
+        let val = trimmed.slice(index + 1).trim();
+        if (
+          (val.startsWith('"') && val.endsWith('"')) ||
+          (val.startsWith("'") && val.endsWith("'"))
+        ) {
+          val = val.slice(1, -1);
+        }
+        if (!process.env[key]) {
+          process.env[key] = val;
+        }
+      }
+    } catch {
+      /* best-effort */
+    }
+  }
+}
+

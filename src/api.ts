@@ -9,21 +9,29 @@ export interface ServerInstallRedeemResponse {
 }
 
 export function apiBase(): string {
-  return process.env.WHOBURNEDMORE_API ?? "https://api.whoburnedmore.com";
+  const url = process.env.WHOBURNEDMORE_API;
+  if (!url) {
+    throw new Error("WHOBURNEDMORE_API is not set in the environment.");
+  }
+  return url;
 }
 
 /**
- * The web app origin (whoburnedmore.com). The local dashboard bakes this into
+ * The web app origin. The local dashboard bakes this into
  * its "Connect your account" form so the file:// page can hand its data off to
  * the website. Overridable for local dev / tests.
  */
 export function webBase(): string {
-  return process.env.WHOBURNEDMORE_WEB ?? "https://whoburnedmore.com";
+  const url = process.env.WHOBURNEDMORE_WEB;
+  if (!url) {
+    throw new Error("WHOBURNEDMORE_WEB is not set in the environment.");
+  }
+  return url;
 }
 
 /**
  * True only if `url` is an http(s) URL whose origin matches the configured web base
- * (https://whoburnedmore.com by default, or WHOBURNEDMORE_WEB for dev). The CLI opens a
+ * (`WHOBURNEDMORE_WEB`). The CLI opens a
  * dashboard/board URL that comes BACK from the server, so a malicious or MITM'd server
  * could otherwise return a `javascript:` / `file:` / custom-scheme / wrong-host URL and
  * make the OS launch an arbitrary handler. Guard the host before ever auto-opening.
