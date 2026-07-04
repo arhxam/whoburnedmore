@@ -39,6 +39,20 @@ npx whoburnedmore
 
 > Prefer to stay fully offline? `npx whoburnedmore --local` builds an HTML report on your machine and uploads nothing.
 
+<br>
+
+<div align="center">
+
+## 🛡️ Not sure it's safe to run? Have Claude check it first.
+
+[![▶ Verify this repo with Claude](https://img.shields.io/badge/%F0%9F%94%8D%20VERIFY%20THIS%20REPO%20WITH%20CLAUDE%20%E2%86%92-000000?style=for-the-badge&labelColor=000000)][audit]
+
+**[👉 Click to open Claude and audit this repository in one click 👈][audit]**
+
+<sub>Opens a Claude chat that reads this repo's source and reports exactly what data the CLI collects, what leaves your machine, every server it talks to, and whether it could touch your code, prompts, or secrets — ending with a clear **go / no-go** verdict, *before you run anything.*</sub>
+
+</div>
+
 ---
 
 ## What it reads
