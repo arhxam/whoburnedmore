@@ -17,14 +17,12 @@ import {
   resolveCommand,
 } from "./args.js";
 import {
-  anonSubmit,
-  anonRemove,
-  anonVisibility,
   bindDeviceKey,
   deviceStart,
   devicePoll,
   refreshCliToken,
-  resolveOpenTarget,
+  removeUsage,
+  setVisibility,
   submit as submitSignedInUsage,
   apiBase,
   webBase,
@@ -37,7 +35,6 @@ import {
 import {
   autoSyncInstalled,
   installAutoSync,
-  notifyLaunchLive,
   reconcileAutoSync,
   rotateLogIfLarge,
   syncIntervalLabel,
@@ -54,17 +51,12 @@ import {
   ensureAnonKey,
   loadConfig,
   recordDeviceBound,
-  recordLaunchNotificationDelivered,
   recordSync,
   saveAuth,
 } from "./config.js";
 import { agentStatusReport } from "./status.js";
 import { renderDashboardHtml } from "./local-dashboard.js";
-import {
-  sanitizeServerText,
-  signedInNextStepLines,
-  submitNextStepLines,
-} from "./output.js";
+import { sanitizeServerText, signedInNextStepLines } from "./output.js";
 import { publishLocal } from "./publish.js";
 
 const require = createRequire(import.meta.url);
@@ -190,10 +182,7 @@ function showLocalDashboard(payload: SubmitPayload): void {
   const file = join(dir, "dashboard.html");
   writeFileSync(
     file,
-    renderDashboardHtml(payload.entries, new Date(), {
-      payload,
-      webBaseUrl: webBase(),
-    }),
+    renderDashboardHtml(payload.entries, new Date(), { webBaseUrl: webBase() }),
   );
   console.log();
   console.log(`  Local dashboard: ${pc.cyan(`file://${file}`)}`);
@@ -265,12 +254,32 @@ async function run(flags: Flags): Promise<void> {
     // points you there. Like the online command, the burn is reviewed in the
     // dashboard, never dumped into the terminal.
     showLocalDashboard(payload);
-    // --local stays offline by default, but offer to publish from here.
+    // --local stays offline by default, but offer to publish from here. The
+    // anonymous publish path is retired, so publishing = sign in + the same
+    // authenticated submit a normal run does (plus the rotation-proofing
+    // bookkeeping, so this machine self-heals like any signed-in one).
     if (!flags.quiet && process.stdin.isTTY) {
       await publishLocal(payload, {
         confirm,
-        ensureAnonKey,
-        anonSubmit,
+        signIn: ensureSignedIn,
+        submit: async (token, p) => {
+          const result = await submitSignedInUsage(token, p);
+          try {
+            recordSync();
+          } catch {
+            /* best-effort */
+          }
+          try {
+            const cfgNow = loadConfig();
+            if (!cfgNow?.deviceBoundAt) {
+              const key = ensureAnonKey();
+              if (await bindDeviceKey(token, key)) recordDeviceBound();
+            }
+          } catch {
+            /* best-effort */
+          }
+          return result;
+        },
         openBrowser,
         log: (line) => console.log(pc.dim(line)),
       });
@@ -773,6 +782,121 @@ async function runVerify(): Promise<void> {
   }
 }
 
+/**
+ * Resolve a signed-in CLI token for a self-management command: stored token →
+ * silent device-key refresh → interactive device sign-in (TTY only). Returns
+ * null (after printing guidance) when the machine can't authenticate here.
+ */
+async function requireSignedIn(
+  commandName: string,
+): Promise<{ token: string; handle: string } | null> {
+  const cfg = loadConfig();
+  if (cfg?.cliToken) return { token: cfg.cliToken, handle: cfg.handle ?? "" };
+  const healed = await refreshCliTokenFromConfig();
+  if (healed) {
+    saveAuth(undefined, { cliToken: healed.token, handle: healed.handle });
+    return healed;
+  }
+  if (process.stdout.isTTY) return ensureSignedIn();
+  console.log(
+    pc.yellow(
+      `  Sign in first — run \`npx whoburnedmore ${commandName}\` in an interactive terminal.`,
+    ),
+  );
+  return null;
+}
+
+/** `npx whoburnedmore private` / `public`: flip the leaderboard listing. */
+async function runVisibility(listed: boolean): Promise<void> {
+  const auth = await requireSignedIn(listed ? "public" : "private");
+  if (!auth) return;
+  let res;
+  try {
+    res = await setVisibility(auth.token, listed);
+  } catch (err) {
+    if (err instanceof UnauthorizedError) {
+      clearAuth();
+      console.log(
+        pc.yellow(
+          `  Your sign-in expired — run \`npx whoburnedmore ${listed ? "public" : "private"}\` again to retry.`,
+        ),
+      );
+      return;
+    }
+    throw err;
+  }
+  if (!listed) {
+    console.log("  ✓ You're off the public leaderboard. `npx whoburnedmore public` puts you back.");
+    return;
+  }
+  if (res.listed) {
+    console.log("  ✓ You're back on the public leaderboard.");
+  } else if (!res.eligible) {
+    console.log(
+      pc.yellow("  You're signed in, but not on the leaderboard yet — it lists accounts with a social handle."),
+    );
+    console.log(
+      pc.dim("  Add your X, GitHub or Instagram on your profile at whoburnedmore.com, then you're on."),
+    );
+  } else {
+    console.log("  ✓ Leaderboard listing is on.");
+  }
+}
+
+/**
+ * `npx whoburnedmore remove`: delete the signed-in account's usage data from
+ * the leaderboard. Confirms on a TTY and refuses without one; also turns off
+ * this machine's background sync (else the next 15-min tick would resubmit the
+ * full local snapshot) and drops the local sign-in. Account deletion itself
+ * lives on the web dashboard — a machine token can't destroy the account.
+ */
+async function runRemove(): Promise<void> {
+  if (!process.stdin.isTTY) {
+    console.log(
+      pc.yellow("  `remove` deletes data, so it needs an interactive terminal to confirm."),
+    );
+    console.log(pc.dim("  Run `npx whoburnedmore remove` in a real terminal."));
+    process.exitCode = 1;
+    return;
+  }
+  const auth = await requireSignedIn("remove");
+  if (!auth) return;
+  const who = auth.handle ? `@${sanitizeServerText(auth.handle)}` : "your account";
+  console.log(
+    `  This deletes ALL usage data stored for ${who} on whoburnedmore.com and turns off this machine's background sync.`,
+  );
+  console.log(
+    pc.dim("  Your local logs are untouched, and the account itself survives (delete it from your dashboard settings on the web)."),
+  );
+  if (!(await confirm("  Delete your usage data?"))) {
+    console.log(pc.dim("  Cancelled — nothing was deleted."));
+    return;
+  }
+  let res;
+  try {
+    res = await removeUsage(auth.token);
+  } catch (err) {
+    if (err instanceof UnauthorizedError) {
+      clearAuth();
+      console.log(
+        pc.yellow("  Your sign-in expired — run `npx whoburnedmore remove` again to retry."),
+      );
+      return;
+    }
+    throw err;
+  }
+  try {
+    uninstallAutoSync();
+  } catch {
+    /* best-effort — the deletion already happened; sync would just re-add data */
+  }
+  clearAuth();
+  console.log(
+    pc.green(`  ✓ Deleted your usage data (${res.deletedDays} day${res.deletedDays === 1 ? "" : "s"}) and turned off background sync.`),
+  );
+  console.log(pc.dim("  Run `npx whoburnedmore` anytime to start fresh."));
+}
+
 async function main(): Promise<void> {
   const major = Number(process.versions.node.split(".")[0]);
   if (major < 20) {
@@ -826,30 +950,12 @@ async function main(): Promise<void> {
       break;
     }
     case "private":
-    case "public": {
-      const cfg = loadConfig();
-      if (!cfg?.anonKey) {
-        console.log("  No anonymous dashboard on this machine — run `npx whoburnedmore` first.");
-        break;
-      }
-      await anonVisibility(cfg.anonKey, command === "public");
-      console.log(
-        command === "public"
-          ? "  Your dashboard is public on the leaderboard again."
-          : "  Your dashboard is now private — off the public leaderboard.",
-      );
+    case "public":
+      await runVisibility(command === "public");
       break;
-    }
-    case "remove": {
-      const cfg = loadConfig();
-      if (!cfg?.anonKey) {
-        console.log("  No anonymous dashboard on this machine — nothing to remove.");
-        break;
-      }
-      await anonRemove(cfg.anonKey);
-      console.log("  Removed your anonymous dashboard and all its data.");
+    case "remove":
+      await runRemove();
       break;
-    }
     case "install-sync":
       console.log(`  ${installAutoSync()}`);
       break;
@@ -882,9 +988,9 @@ function printHelp(): void {
     npx whoburnedmore --no-submit  collect locally, send nothing (no dashboard)
     npx whoburnedmore link --token=TOKEN  link this server/VM to your signed-in account
     npx whoburnedmore daemon       keep syncing in the foreground (VMs/containers with no cron)
-    npx whoburnedmore private      hide your dashboard from the leaderboard
-    npx whoburnedmore public       put it back on the leaderboard
-    npx whoburnedmore remove       delete your dashboard and its data
+    npx whoburnedmore private      take yourself off the public leaderboard
+    npx whoburnedmore public       put yourself back on it
+    npx whoburnedmore remove       delete your usage data and stop background sync
     npx whoburnedmore verify       delisted? re-verify your usage to get back on (sends a detailed breakdown)
     npx whoburnedmore status       check background-sync health (last sync, staleness)
     npx whoburnedmore uninstall-sync   turn off the background sync

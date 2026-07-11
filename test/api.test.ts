@@ -1,16 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  anonRemove,
-  anonSubmit,
-  anonVisibility,
   bindDeviceKey,
-  boardClaimUrl,
-  claimUrl,
   isOpenableUrl,
   isTrustedWebUrl,
   redeemServerInstall,
   refreshCliToken,
-  resolveOpenTarget,
+  removeUsage,
+  setVisibility,
+  submit,
+  UnauthorizedError,
 } from "../src/api.js";
 
 describe("isTrustedWebUrl — never auto-open a hostile server URL", () => {
@@ -58,125 +56,112 @@ describe("isOpenableUrl — what may reach the OS opener", () => {
   });
 });
 
-describe("claimUrl", () => {
-  it("appends the anon key as a URL fragment (the claim handoff)", () => {
-    expect(claimUrl("https://whoburnedmore.com/d/abc-def", "secretkey123")).toBe(
-      "https://whoburnedmore.com/d/abc-def#k=secretkey123",
-    );
-  });
-
-  it("URL-encodes the key", () => {
-    expect(claimUrl("http://x/d/s", "a b/c")).toBe("http://x/d/s#k=a%20b%2Fc");
-  });
-});
-
-describe("boardClaimUrl", () => {
-  it("carries the claim key AND the dashboard slug as fragment params", () => {
-    expect(
-      boardClaimUrl(
-        "https://whoburnedmore.com/boards/AB12",
-        "molten-goblin-482",
-        "secretkey123",
-      ),
-    ).toBe(
-      "https://whoburnedmore.com/boards/AB12#k=secretkey123&u=molten-goblin-482",
-    );
-  });
-
-  it("URL-encodes both the key and the slug", () => {
-    expect(boardClaimUrl("http://x/boards/c", "a b", "a b/c")).toBe(
-      "http://x/boards/c#k=a%20b%2Fc&u=a%20b",
-    );
-  });
-});
-
-describe("resolveOpenTarget — a run with --org lands on the org board", () => {
-  const anonKey = "deadbeefcafef00d";
-  it("opens the ORG board (with claim handoff) when the server returned one", () => {
-    const { baseUrl, target } = resolveOpenTarget(
-      {
-        orgBoardUrl: "https://whoburnedmore.com/o/inventionnovelty/board",
-        dashboardUrl: "https://whoburnedmore.com/d/cool-fox-12",
-        slug: "cool-fox-12",
-      },
-      anonKey,
-    );
-    expect(baseUrl).toBe("https://whoburnedmore.com/o/inventionnovelty/board");
-    expect(target).toContain("/o/inventionnovelty/board");
-    expect(target).toContain(`#k=${anonKey}`);
-  });
-  it("prefers the org board over a friends board", () => {
-    const { target } = resolveOpenTarget(
-      {
-        orgBoardUrl: "https://whoburnedmore.com/o/acme/board",
-        boardUrl: "https://whoburnedmore.com/boards/xyz",
-        dashboardUrl: "https://whoburnedmore.com/d/cool-fox-12",
-        slug: "cool-fox-12",
-      },
-      anonKey,
-    );
-    expect(target).toContain("/o/acme/board");
-    expect(target).not.toContain("/boards/xyz");
-  });
-  it("falls back to friends board, then the dashboard claim URL", () => {
-    expect(
-      resolveOpenTarget(
-        {
-          boardUrl: "https://whoburnedmore.com/boards/xyz",
-          dashboardUrl: "https://whoburnedmore.com/d/cool-fox-12",
-          slug: "cool-fox-12",
-        },
-        anonKey,
-      ).target,
-    ).toContain("/boards/xyz");
-    expect(
-      resolveOpenTarget(
-        { dashboardUrl: "https://whoburnedmore.com/d/cool-fox-12", slug: "cool-fox-12" },
-        anonKey,
-      ).target,
-    ).toContain("/d/cool-fox-12");
-  });
-});
-
-describe("anon visibility + remove", () => {
+describe("signed-in visibility (`private`/`public`)", () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it("POSTs to /v1/anon/visibility with the key + listed flag", async () => {
+  it("POSTs the listed flag with the bearer token to /v1/cli/visibility", async () => {
     const fetchMock = vi.fn(
-      async () => new Response(JSON.stringify({ ok: true }), { status: 200 }),
+      async () =>
+        new Response(JSON.stringify({ ok: true, listed: false, eligible: true }), {
+          status: 200,
+        }),
     );
     vi.stubGlobal("fetch", fetchMock);
-    await anonVisibility("k".repeat(32), false);
+    const res = await setVisibility("cli-jwt", false);
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(String(url)).toMatch(/\/v1\/anon\/visibility$/);
+    expect(String(url)).toMatch(/\/v1\/cli\/visibility$/);
     expect(init.method).toBe("POST");
-    expect(JSON.parse(init.body as string)).toEqual({
-      anonKey: "k".repeat(32),
-      listed: false,
-    });
-  });
-
-  it("DELETEs /v1/anon with the key", async () => {
-    const fetchMock = vi.fn(
-      async () => new Response(JSON.stringify({ ok: true }), { status: 200 }),
+    expect((init.headers as Record<string, string>).Authorization).toBe(
+      "Bearer cli-jwt",
     );
-    vi.stubGlobal("fetch", fetchMock);
-    await anonRemove("k".repeat(32));
-    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(String(url)).toMatch(/\/v1\/anon$/);
-    expect(init.method).toBe("DELETE");
-    expect(JSON.parse(init.body as string)).toEqual({ anonKey: "k".repeat(32) });
+    expect(JSON.parse(init.body as string)).toEqual({ listed: false });
+    expect(res).toEqual({ listed: false, eligible: true });
   });
 
-  it("throws with the server error on non-200", async () => {
+  it("reports an ineligible (no-social) account instead of claiming success", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(
         async () =>
-          new Response(JSON.stringify({ error: "nope" }), { status: 404 }),
+          new Response(
+            JSON.stringify({ ok: true, listed: false, eligible: false }),
+            { status: 200 },
+          ),
       ),
     );
-    await expect(anonRemove("k".repeat(32))).rejects.toThrow("nope");
+    expect(await setVisibility("cli-jwt", true)).toEqual({
+      listed: false,
+      eligible: false,
+    });
+  });
+
+  it("throws UnauthorizedError on a 401 so the caller can re-sign-in", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ error: "invalid CLI token" }), {
+            status: 401,
+          }),
+      ),
+    );
+    await expect(setVisibility("dead-jwt", true)).rejects.toBeInstanceOf(
+      UnauthorizedError,
+    );
+  });
+
+  it("throws with the server error on other non-200s", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ error: "nope" }), { status: 400 }),
+      ),
+    );
+    await expect(setVisibility("cli-jwt", true)).rejects.toThrow("nope");
+  });
+});
+
+describe("signed-in usage removal (`remove`)", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("DELETEs /v1/cli/usage with the bearer token and returns the deleted count", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ ok: true, deletedDays: 42 }), {
+          status: 200,
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const res = await removeUsage("cli-jwt");
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(String(url)).toMatch(/\/v1\/cli\/usage$/);
+    expect(init.method).toBe("DELETE");
+    expect((init.headers as Record<string, string>).Authorization).toBe(
+      "Bearer cli-jwt",
+    );
+    expect(res).toEqual({ deletedDays: 42 });
+  });
+
+  it("throws UnauthorizedError on a 401 and the server error otherwise", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ error: "invalid CLI token" }), {
+            status: 401,
+          }),
+      ),
+    );
+    await expect(removeUsage("dead-jwt")).rejects.toBeInstanceOf(UnauthorizedError);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ error: "nope" }), { status: 400 }),
+      ),
+    );
+    await expect(removeUsage("cli-jwt")).rejects.toThrow("nope");
   });
 });
 
@@ -333,7 +318,7 @@ describe("network resilience", () => {
       ),
     );
     // Must throw a clean message, not a raw JSON 'Unexpected token <' parse error.
-    await expect(anonSubmit("k".repeat(32), payload)).rejects.toThrow(
+    await expect(submit("cli-jwt", payload)).rejects.toThrow(
       /temporarily unavailable/,
     );
   });
@@ -345,7 +330,7 @@ describe("network resilience", () => {
         throw new TypeError("fetch failed");
       }),
     );
-    await expect(anonSubmit("k".repeat(32), payload)).rejects.toThrow(
+    await expect(submit("cli-jwt", payload)).rejects.toThrow(
       /couldn't reach the leaderboard server/,
     );
   });

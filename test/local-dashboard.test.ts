@@ -33,28 +33,22 @@ describe("renderDashboardHtml", () => {
     expect(html).not.toContain("href=\"http");
   });
 
-  it("renders a Connect form that POSTs the base64 payload to the web /connect route", () => {
+  it("renders a leaderboard CTA with the run command — never a payload form POST", () => {
     const entries = [entry()];
-    const payload = { cliVersion: "9.9.9", entries };
     const html = renderDashboardHtml(entries, new Date(), {
-      payload,
       webBaseUrl: "https://whoburnedmore.com",
     });
-    expect(html).toContain("Connect your account");
-    expect(html).toContain('method="POST"');
-    expect(html).toContain('action="https://whoburnedmore.com/connect"');
-    // tells the user to run the plain command for background sync
+    expect(html).toContain("Claim your spot on the public leaderboard");
+    // The handoff is the command itself — the retired /connect payload form is gone.
     expect(html).toContain("npx whoburnedmore");
-    // payload is embedded as base64 and round-trips back to the original JSON
-    const m = html.match(/name="payload" value="([^"]+)"/);
-    expect(m).not.toBeNull();
-    const decoded = JSON.parse(Buffer.from(m![1], "base64").toString("utf8"));
-    expect(decoded).toEqual(payload);
+    expect(html).not.toContain('method="POST"');
+    expect(html).not.toContain('name="payload"');
+    expect(html).toContain('href="https://whoburnedmore.com"');
   });
 
-  it("omits the Connect form when no connect options are given", () => {
+  it("omits the leaderboard CTA when no connect options are given", () => {
     const html = renderDashboardHtml([entry()]);
-    expect(html).not.toContain("Connect your account");
+    expect(html).not.toContain("Claim your spot");
     expect(html).not.toContain("/connect");
   });
 

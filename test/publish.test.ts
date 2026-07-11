@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { SubmitPayload } from "../src/shared.js";
+import type { SubmitPayload, SubmitResponse } from "../src/shared.js";
 import { publishLocal, type PublishDeps } from "../src/publish.js";
 
 const payload: SubmitPayload = {
@@ -20,61 +20,80 @@ const payload: SubmitPayload = {
   ],
 };
 
+function response(profileUrl: string): SubmitResponse {
+  return {
+    ok: true,
+    upserted: 1,
+    totalTokens: 2,
+    totalCostUSD: 0,
+    rank: 7,
+    profileUrl,
+  };
+}
+
 function deps(
   accept: boolean,
-  dashboardUrl = "https://whoburnedmore.com/d/s-l-u-g",
+  opts?: { profileUrl?: string; signedIn?: boolean },
 ): PublishDeps & {
-  anonSubmit: ReturnType<typeof vi.fn>;
+  signIn: ReturnType<typeof vi.fn>;
+  submit: ReturnType<typeof vi.fn>;
   openBrowser: ReturnType<typeof vi.fn>;
   log: ReturnType<typeof vi.fn>;
 } {
+  const profileUrl = opts?.profileUrl ?? "https://whoburnedmore.com/u/alice";
+  const signedIn = opts?.signedIn ?? true;
   return {
     confirm: vi.fn(async () => accept),
-    ensureAnonKey: vi.fn(() => "a".repeat(32)),
-    anonSubmit: vi.fn(async () => ({
-      ok: true as const,
-      upserted: 1,
-      totalTokens: 2,
-      totalCostUSD: 0,
-      slug: "s-l-u-g",
-      dashboardUrl,
-    })),
+    signIn: vi.fn(async () =>
+      signedIn ? { token: "cli-jwt", handle: "alice" } : null,
+    ),
+    submit: vi.fn(async () => response(profileUrl)),
     openBrowser: vi.fn(),
     log: vi.fn(),
   };
 }
 
-describe("publishLocal", () => {
-  it("submits anonymously and opens the dashboard with the claim handoff on accept", async () => {
+describe("publishLocal (signed-in — anonymous publish is retired)", () => {
+  it("signs in, submits with the minted token, and opens the profile on accept", async () => {
     const d = deps(true);
     const published = await publishLocal(payload, d);
     expect(published).toBe(true);
-    expect(d.anonSubmit).toHaveBeenCalledOnce();
-    expect(d.openBrowser).toHaveBeenCalledWith(
-      expect.stringContaining("#k="),
-    );
+    expect(d.signIn).toHaveBeenCalledOnce();
+    expect(d.submit).toHaveBeenCalledWith("cli-jwt", payload);
+    expect(d.openBrowser).toHaveBeenCalledWith("https://whoburnedmore.com/u/alice");
   });
 
-  it("stays offline on decline — never submits or opens a browser", async () => {
+  it("stays offline on decline — never signs in, submits, or opens a browser", async () => {
     const d = deps(false);
     const published = await publishLocal(payload, d);
     expect(published).toBe(false);
-    expect(d.anonSubmit).not.toHaveBeenCalled();
+    expect(d.signIn).not.toHaveBeenCalled();
+    expect(d.submit).not.toHaveBeenCalled();
     expect(d.openBrowser).not.toHaveBeenCalled();
   });
 
-  it("never auto-opens a dashboard URL on an untrusted host (hostile/MITM'd server)", async () => {
-    // A malicious or MITM'd server returns an off-host URL; we still publish but
-    // must NOT hand it to the OS opener — same host gate as the core submit path.
-    const d = deps(true, "https://evil.example.com/d/s-l-u-g");
+  it("stays offline when sign-in aborts/times out — nothing is submitted", async () => {
+    const d = deps(true, { signedIn: false });
+    const published = await publishLocal(payload, d);
+    expect(published).toBe(false);
+    expect(d.submit).not.toHaveBeenCalled();
+    expect(d.openBrowser).not.toHaveBeenCalled();
+    const printed = d.log.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(printed).toContain("Nothing left your machine");
+  });
+
+  it("never auto-opens a profile URL on an untrusted host (hostile/MITM'd server)", async () => {
+    const d = deps(true, { profileUrl: "https://evil.example.com/u/alice" });
     const published = await publishLocal(payload, d);
     expect(published).toBe(true);
-    expect(d.anonSubmit).toHaveBeenCalledOnce();
+    expect(d.submit).toHaveBeenCalledOnce();
     expect(d.openBrowser).not.toHaveBeenCalled();
   });
 
-  it("strips terminal control bytes from the server dashboard URL before printing", async () => {
-    const d = deps(true, "https://whoburnedmore.com/d/\u001b]0;pwned\u0007x");
+  it("strips terminal control bytes from the server profile URL before printing", async () => {
+    const d = deps(true, {
+      profileUrl: "https://whoburnedmore.com/u/\u001b]0;pwned\u0007x",
+    });
     await publishLocal(payload, d);
     // Concatenate WITHOUT a separator — joining on "\n" would itself inject a
     // 0x0a control byte, so the assertion below could never pass regardless of

@@ -1,22 +1,17 @@
-import {
-  entryTotalTokens,
-  type DailyUsageEntry,
-  type SubmitPayload,
-} from "./shared.js";
+import { entryTotalTokens, type DailyUsageEntry } from "./shared.js";
 import { formatTokens, formatUSD } from "./output.js";
 
 /**
- * The "Connect your account" handoff baked into the local page. `--local` never
- * touches the network, so the page can't POST to the API itself (CORS blocks
- * the file:// origin). Instead the CTA is a plain form POST — which browsers
- * allow as a cross-origin navigation — that carries the whole payload to the
- * website's /connect route, where it's ingested server-side and the existing
- * sign-in → claim flow takes over.
+ * The "get on the leaderboard" CTA baked into the local page. The old version
+ * form-POSTed the whole payload to the website's /connect route to mint an
+ * anonymous dashboard — that ingestion path is retired (submission requires
+ * sign-in), and the data is already ON this machine, so the honest handoff is:
+ * run `npx whoburnedmore` (no flag), which signs you in and submits the same
+ * usage through the authenticated path. Nothing leaves the machine from this
+ * page itself.
  */
 export interface ConnectOptions {
-  /** The full submit payload to hand off when the user connects. */
-  payload: SubmitPayload;
-  /** The web app origin, e.g. https://whoburnedmore.com (form action base). */
+  /** The web app origin, e.g. https://whoburnedmore.com (for the profile link). */
   webBaseUrl: string;
 }
 
@@ -139,21 +134,21 @@ export function renderDashboardHtml(
     )
     .join("");
 
-  // Connect CTA: a form POST (allowed cross-origin from file://) that hands the
-  // whole payload to the website. base64 keeps the JSON attribute-safe.
+  // Leaderboard CTA: this page is offline by design, so the handoff is the
+  // command itself — a plain run signs you in and submits this same local data
+  // through the authenticated path. No payload ever leaves via this page.
   const connectCta = connect
     ? `
-    <form class="connect" method="POST" action="${esc(connect.webBaseUrl)}/connect">
-      <input type="hidden" name="payload" value="${Buffer.from(JSON.stringify(connect.payload)).toString("base64")}">
+    <div class="connect">
       <div class="connect-row">
         <div>
-          <div class="connect-title">Connect your account</div>
-          <div class="connect-sub">Save this dashboard to your account and claim your spot on the public leaderboard. The local numbers above become your starting point — nothing has left your machine yet.</div>
+          <div class="connect-title">Claim your spot on the public leaderboard</div>
+          <div class="connect-sub">Run the command below in your terminal — it signs you in and puts these numbers on <a href="${esc(connect.webBaseUrl)}">whoburnedmore.com</a> under your handle. Nothing has left your machine yet.</div>
         </div>
-        <button type="submit">Connect your account →</button>
+        <code class="connect-cmd">npx whoburnedmore</code>
       </div>
-      <div class="connect-note">After connecting, run <code>npx whoburnedmore</code> (no flag) once so it keeps syncing automatically in the background.</div>
-    </form>`
+      <div class="connect-note">Only daily totals are submitted — never your prompts or code. Background sync keeps your page fresh afterwards.</div>
+    </div>`
     : "";
 
   return `<!doctype html>
@@ -215,8 +210,8 @@ export function renderDashboardHtml(
   @media (min-width: 640px) { .connect-row { flex-direction: row; align-items: center; justify-content: space-between; } }
   .connect-title { font-size: 16px; font-weight: 700; }
   .connect-sub { color: #d6d3d1; font-size: 13px; margin-top: 4px; max-width: 60ch; }
-  .connect button { flex-shrink: 0; cursor: pointer; border: 0; border-radius: 10px; background: #ea580c; color: #fff; font-size: 14px; font-weight: 600; padding: 11px 18px; font-family: inherit; transition: background .15s; }
-  .connect button:hover { background: #f97316; }
+  .connect-cmd { flex-shrink: 0; display: inline-block; border-radius: 10px; background: rgba(0,0,0,.35); border: 1px solid rgba(234,88,12,.5); color: #fed7aa; font-size: 14px; font-weight: 600; padding: 11px 18px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; user-select: all; }
+  .connect-sub a { color: #fed7aa; }
   .connect-note { color: #a8a29e; font-size: 12px; margin-top: 14px; padding-top: 12px; border-top: 1px solid rgba(234,88,12,.25); }
   .connect-note code { color: #fed7aa; background: rgba(0,0,0,.25); padding: 1px 6px; border-radius: 5px; }
 </style>

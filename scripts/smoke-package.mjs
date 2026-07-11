@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -53,6 +53,18 @@ assert(
     !missingToken.stderr.includes("unknown command"),
   "link should dispatch to server-link validation, not unknown-command help",
   missingToken,
+);
+
+// Fresh-machine background `sync` must stay COMPLETELY silent: no prompt, no
+// output, no submit attempt, exit 0 — an unattended scheduler tick on a machine
+// that never on-boarded must never nag or write anywhere.
+rmSync(join(root, ".smoke-tmp"), { recursive: true, force: true });
+const freshSync = run(["sync"]);
+assert(freshSync.status === 0, "fresh-machine sync should exit 0", freshSync);
+assert(
+  freshSync.stdout.trim() === "" && freshSync.stderr.trim() === "",
+  "fresh-machine sync must produce no output (background silence)",
+  freshSync,
 );
 
 console.log(`package smoke passed for whoburnedmore ${pkg.version}`);

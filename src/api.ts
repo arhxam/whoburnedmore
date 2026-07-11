@@ -1,5 +1,4 @@
 import type {
-  AnonSubmitResponse,
   DeviceCodeResponse,
   DeviceTokenResponse,
   SubmitPayload,
@@ -83,7 +82,8 @@ async function readJson<T>(res: Response): Promise<T> {
   }
 }
 
-async function post<T>(
+async function send<T>(
+  method: "POST" | "DELETE",
   path: string,
   body: unknown,
   token?: string,
@@ -96,9 +96,9 @@ async function post<T>(
   let res: Response;
   try {
     res = await fetch(`${apiBase()}${path}`, {
-      method: "POST",
+      method,
       headers,
-      body: JSON.stringify(body),
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       // Bound the request so a slow/black-holing/hostile server can't hang the CLI
       // — or the unattended 15-minute background sync — indefinitely.
       signal: AbortSignal.timeout(30_000),
@@ -109,6 +109,14 @@ async function post<T>(
     );
   }
   return { status: res.status, body: await readJson<T>(res) };
+}
+
+async function post<T>(
+  path: string,
+  body: unknown,
+  token?: string,
+): Promise<{ status: number; body: T }> {
+  return send<T>("POST", path, body, token);
 }
 
 /**
@@ -133,31 +141,6 @@ export async function verifyUsage(
     throw new Error(`${err.error ?? "verification failed"}${details}`);
   }
   return body as VerifyResponse;
-}
-
-/**
- * Surfaced when the server has retired an anonymous endpoint (410). Anonymous
- * submission/management no longer exists; the user must sign in (or `link` a
- * server) to submit or manage usage.
- */
-export const ANON_RETIRED_MESSAGE =
-  "Anonymous mode has been retired. Run `npx whoburnedmore` and sign in, or `npx whoburnedmore link --token=…` for a server/CI, to put your usage on the leaderboard.";
-
-/** Submit anonymously: RETIRED server-side (410). Kept for --local publish + tests. */
-export async function anonSubmit(
-  anonKey: string,
-  payload: SubmitPayload,
-): Promise<AnonSubmitResponse> {
-  const { status, body } = await post<
-    AnonSubmitResponse | { error: string; details?: string[] }
-  >("/v1/anon/submit", { ...payload, anonKey });
-  if (status === 410) throw new Error(ANON_RETIRED_MESSAGE);
-  if (status !== 200) {
-    const err = body as { error: string; details?: string[] };
-    const details = err.details?.length ? `\n  - ${err.details.join("\n  - ")}` : "";
-    throw new Error(`${err.error ?? `submit failed (HTTP ${status})`}${details}`);
-  }
-  return body as AnonSubmitResponse;
 }
 
 /** Thrown by `submit` when the server rejects the CLI token (expired/invalid). */
@@ -288,85 +271,46 @@ export async function submit(
 }
 
 /**
- * Append this machine's owner key to its dashboard URL as a fragment. The CLI
- * opens this so the browser can offer "claim" — the fragment is never sent to
- * the server or leaked in referrers/logs.
+ * Show or hide the signed-in account on the public leaderboard
+ * (`npx whoburnedmore private` / `public`). Same semantics as the web toggle:
+ * opting out is sticky, and opting back IN only lists an eligible account —
+ * `eligible:false` means a social handle is still missing, and the CLI explains
+ * that instead of claiming success.
  */
-export function claimUrl(dashboardUrl: string, anonKey: string): string {
-  return `${dashboardUrl}#k=${encodeURIComponent(anonKey)}`;
-}
-
-/**
- * Open a freshly-joined friends board with the same claim handoff a solo run
- * gets on /d/<slug>: the owner key plus this device's dashboard slug, both as
- * URL fragment params (never sent to the server / leaked in referrers). The
- * board page reads them so signing in there CLAIMS this machine's submission —
- * merging the usage and carrying the board membership onto the account — so the
- * joiner shows up as a real, named row instead of "anonymous". The `u=<slug>`
- * also lets the board highlight "that's you" and surface the claim prompt.
- */
-export function boardClaimUrl(
-  boardUrl: string,
-  slug: string,
-  anonKey: string,
-): string {
-  return `${boardUrl}#k=${encodeURIComponent(anonKey)}&u=${encodeURIComponent(slug)}`;
-}
-
-/**
- * Decide where a finished run should send the user, and the exact URL to open.
- * Priority: the ORG board they just joined (the brief — a run with `--org` always
- * lands on the org leaderboard), then a friends board, then their own dashboard.
- * The org/board URLs carry the claim handoff (#k=&u=) so a not-yet-indexed runner
- * signs in + adds a social on arrival; the dashboard gets the plain claim handoff.
- * Pure + unit-testable; `index.ts` opens `target` and prints `baseUrl` on distrust.
- */
-export function resolveOpenTarget(
-  result: {
-    orgBoardUrl?: string;
-    boardUrl?: string;
-    dashboardUrl: string;
-    slug: string;
-  },
-  anonKey: string,
-): { baseUrl: string; target: string } {
-  const baseUrl = result.orgBoardUrl ?? result.boardUrl ?? result.dashboardUrl;
-  const target = result.orgBoardUrl
-    ? boardClaimUrl(result.orgBoardUrl, result.slug, anonKey)
-    : result.boardUrl
-      ? boardClaimUrl(result.boardUrl, result.slug, anonKey)
-      : claimUrl(result.dashboardUrl, anonKey);
-  return { baseUrl, target };
-}
-
-/** Show or hide this machine's anonymous dashboard on the public leaderboard. */
-export async function anonVisibility(
-  anonKey: string,
+export async function setVisibility(
+  token: string,
   listed: boolean,
-): Promise<void> {
-  const { status, body } = await post<{ error?: string }>(
-    "/v1/anon/visibility",
-    { anonKey, listed },
-  );
-  if (status === 410) throw new Error(ANON_RETIRED_MESSAGE);
+): Promise<{ listed: boolean; eligible: boolean }> {
+  const { status, body } = await post<{
+    ok?: boolean;
+    listed?: boolean;
+    eligible?: boolean;
+    error?: string;
+  }>("/v1/cli/visibility", { listed }, token);
+  if (status === 401) throw new UnauthorizedError();
   if (status !== 200) {
     throw new Error(body.error ?? `failed (HTTP ${status})`);
   }
+  return { listed: body.listed === true, eligible: body.eligible === true };
 }
 
-/** Permanently delete this machine's anonymous dashboard and its usage. */
-export async function anonRemove(anonKey: string): Promise<void> {
-  const res = await fetch(`${apiBase()}/v1/anon`, {
-    method: "DELETE",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ anonKey }),
-    signal: AbortSignal.timeout(30_000),
-  });
-  if (res.status === 410) throw new Error(ANON_RETIRED_MESSAGE);
-  if (res.status !== 200) {
-    const b = (await res.json().catch(() => ({}))) as { error?: string };
-    throw new Error(b.error ?? `failed (HTTP ${res.status})`);
+/**
+ * Permanently delete the signed-in account's usage data from the leaderboard
+ * (`npx whoburnedmore remove`). The account itself survives — deleting it stays
+ * on the web dashboard behind a web session, so a machine token can never
+ * destroy the account.
+ */
+export async function removeUsage(token: string): Promise<{ deletedDays: number }> {
+  const { status, body } = await send<{
+    ok?: boolean;
+    deletedDays?: number;
+    error?: string;
+  }>("DELETE", "/v1/cli/usage", undefined, token);
+  if (status === 401) throw new UnauthorizedError();
+  if (status !== 200) {
+    throw new Error(body.error ?? `failed (HTTP ${status})`);
   }
+  return { deletedDays: body.deletedDays ?? 0 };
 }
 
 /** Redeem a one-time install token generated from the signed-in profile page. */

@@ -25,37 +25,6 @@ export function sanitizeServerText(s: string): string {
 }
 
 /**
- * The post-submit "next steps" lines printed by the CORE (online) command. This
- * is intentionally free of any usage numbers — the web dashboard is where a user
- * reviews their burn. It returns the destination URL plus the single next step
- * that gets them onto the leaderboard (sign in + add X). Pure + side-effect-free
- * so it can be asserted in tests.
- */
-export function submitNextStepLines(result: {
-  dashboardUrl: string;
-  boardUrl?: string | null;
-  boardCode?: string | null;
-}): string[] {
-  if (result.boardUrl) {
-    // Derive the join command's code from the explicit field, falling back to the
-    // last URL segment, so we can hand the user the exact thing to send a friend.
-    const code =
-      result.boardCode ?? result.boardUrl.split("/").filter(Boolean).pop() ?? "";
-    return [
-      `  🤝 You're on the board: ${sanitizeServerText(result.boardUrl)}`,
-      "  → Open it to see who burned more.",
-      `  → Get a friend on it — have them run: npx whoburnedmore --board=${sanitizeServerText(code)}`,
-      "  → Sign in on the page and add your X to claim your spot and own your rank.",
-    ];
-  }
-  return [
-    `  Your dashboard: ${sanitizeServerText(result.dashboardUrl)}`,
-    "  → Sign in and add your X on the page to get on the leaderboard and claim your rank.",
-    "  Private until you do. Manage anytime: `npx whoburnedmore private` · `public` · `remove`.",
-  ];
-}
-
-/**
  * Post-submit "next steps" for a SIGNED-IN run. The user is already on the
  * leaderboard (no "sign in + add X" funnel), so this just points them at the
  * destination — org board, friends board, or their own profile. Free of usage
