@@ -1026,6 +1026,60 @@ export interface OrgAdminSummary {
   ownerOrgCount?: number;
 }
 
+/**
+ * Translate an internal anti-cheat reason string (the raw operator/detector text
+ * stored in `suppressedReason`/`flagReasons`, e.g. "covered daily total (…) is
+ * 45.2x its own cross-tool session rollup …") into ONE plain-English sentence a
+ * normal user can act on. The raw strings are engineering diagnostics — useful in
+ * the admin queue, confusing and slightly accusatory on a user's own screen.
+ *
+ * Matching is substring-based on the stable phrases the detectors emit
+ * (validation.ts / reconcile.ts / anomaly.ts / history-integrity.ts). Anything
+ * unrecognized — or a null/empty reason — falls back to a safe, non-blaming
+ * default keyed on the moderation state, so a blank reason never renders as a
+ * bare "you were delisted" with no cause. Pure + deterministic (unit-tested).
+ */
+export function friendlyModerationReason(
+  rawReason: string | null | undefined,
+  state: { suppressed?: boolean; blocked?: boolean; flagged?: boolean } = {},
+): string {
+  const r = (rawReason ?? "").toLowerCase();
+  const has = (...needles: string[]) => needles.some((n) => r.includes(n));
+
+  if (r) {
+    // Cross-rollup / provenance mismatches — the most common suppression.
+    if (has("cross-tool session rollup", "its own rollups", "possible inflation"))
+      return "Your daily totals didn't line up with your session history from the same runs. Re-sync with the latest CLI or run a verify so we can match them up.";
+    if (has("no rollups", "no request fingerprints", "carries no provenance", "no provenance", "must emit provenance"))
+      return "This submission didn't carry the usage details we use to confirm it's real. Run a verify from the machine where you actually use your AI tools and you'll be back on.";
+    if (has("sustained near-ceiling", "fabricated drip"))
+      return "You've logged many very large days but none have carried verifiable usage details yet. One verify (or a sync with the latest CLI) will confirm them.";
+    // Volume / anomaly spikes.
+    if (has("extreme high-volume", "anomalous spike", "prior peak", "typical day"))
+      return "One of your days was far larger than your usual pattern, so it's held off the board until you verify it. If it's real, a verify puts it back.";
+    // Economic-floor / round-number / fabricated-cost.
+    if (has("cost floor", "fabricated cost", "below any real model"))
+      return "The cost reported for your tokens was below what any real model charges, so we couldn't accept it as-is. Re-sync with the latest CLI, which computes cost for you.";
+    if (has("round-number", "suspiciously round"))
+      return "Your numbers landed on suspiciously round values, which real usage almost never does. A fresh sync or verify will clear it.";
+    // History rewrite.
+    if (has("history rewrite", "retroactively inflated", "back-dated"))
+      return "A past day was re-stated much higher than we'd previously recorded. If that was a legitimate late-arriving sync, verify to confirm it.";
+    // Admin/manual action.
+    if (has("admin", "manual"))
+      return "Your account was reviewed by our team. If you think this is a mistake, tell us below and we'll take another look.";
+  }
+
+  // Fallback by state — never a bare, cause-less accusation.
+  if (state.blocked)
+    return "Your account is blocked, so new usage isn't being accepted. If you think this is a mistake, make your case below and we'll review it.";
+  if (state.suppressed)
+    return "We couldn't automatically confirm your recent numbers, so you're off the public board for now. The fastest way back is to run a verify from the command line.";
+  if (state.flagged)
+    return "Your recent numbers are being reviewed. Running a verify now confirms them and keeps you on the board.";
+  return "Your account is under review. Run a verify from the command line to confirm your usage.";
+}
+
 export { ROOT_DOMAIN, normalizeHost, resolveTenant } from "./tenant.js";
 export type { Tenant } from "./tenant.js";
 // Re-export the locally-imported set (used by RESERVED_SLUGS above) so it stays
