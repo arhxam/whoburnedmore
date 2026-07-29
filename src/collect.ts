@@ -21,6 +21,12 @@ import {
 } from "./native/claude.js";
 import { collectCodexNative } from "./native/codex.js";
 import { loadLivePricing } from "./pricing-live.js";
+import {
+  loadProvenanceStore,
+  provenanceStorePath,
+  reconcileProvenance,
+  saveProvenanceStore,
+} from "./provenance-store.js";
 
 /** Sources ccusage can read, in the order we probe them. */
 export const SOURCES = [
@@ -412,6 +418,30 @@ export type ProgressFn = (done: number, total: number, label: string) => void;
 /** Total number of collection stages (sources + sessions/blocks/cursor/logs). */
 export const COLLECT_STAGES = SOURCES.length + 4;
 
+/**
+ * A run is AUTHORITATIVE — safe to lower a stored requestCount fingerprint —
+ * only when the attribution scan finished AND neither native fingerprint reader
+ * bailed. A reader bails either by timing out or by THROWING (its catch-fallback
+ * sets `timedOut: true`); both mean its fingerprints are missing for days that
+ * may still be submitted from ccusage, so trusting the current scan would emit a
+ * zero requestCount that reads as forgery. When not authoritative, the caller
+ * runs the partial-run anti-regression guard, which only ever holds/raises a
+ * stored fingerprint, never lowers it. A genuinely-empty reader (found:false
+ * with no timeout/throw) stays authoritative — it shares ccusage's data source,
+ * so "nothing here" is real, not a bailed read.
+ */
+export function isAuthoritativeScan(
+  attributionComplete: boolean,
+  nativeClaude: Pick<NativeCollectResult, "timedOut">,
+  nativeCodex: Pick<NativeCollectResult, "timedOut">,
+): boolean {
+  return (
+    attributionComplete &&
+    nativeClaude.timedOut !== true &&
+    nativeCodex.timedOut !== true
+  );
+}
+
 /** Run ccusage for every known source, add Cursor, and merge the results. */
 export async function collectAll(onProgress?: ProgressFn): Promise<CollectResult> {
   // Freshen the pricing table BEFORE any reader prices an entry (24h disk
@@ -434,11 +464,18 @@ export async function collectAll(onProgress?: ProgressFn): Promise<CollectResult
   // ccusage's over/under-count and add the request-id fingerprint the server
   // uses for anti-fraud. ccusage remains the fallback (and the only reader for
   // every other source).
+  // A THROW here is a bailed scan, not "no data" — the reader may have crashed
+  // mid-parse on a day ccusage can still read, so its fingerprint is missing for
+  // days that DO get submitted. Mark it like a timeout (`timedOut: true`) so the
+  // anti-regression guard below treats the run as partial and re-attaches the
+  // last-good requestCount instead of emitting a zero that reads as forgery.
   const nativeClaudeTask = collectClaudeNative().catch(
-    () => ({ entries: [], found: false, filesScanned: 0 }) as NativeCollectResult,
+    () =>
+      ({ entries: [], found: false, filesScanned: 0, timedOut: true }) as NativeCollectResult,
   );
   const nativeCodexTask = collectCodexNative().catch(
-    () => ({ entries: [], found: false, filesScanned: 0 }) as NativeCollectResult,
+    () =>
+      ({ entries: [], found: false, filesScanned: 0, timedOut: true }) as NativeCollectResult,
   );
 
   const sourceTasks = SOURCES.map(async (source) => {
@@ -524,19 +561,34 @@ export async function collectAll(onProgress?: ProgressFn): Promise<CollectResult
     };
   });
 
+  // Re-attach last-good provenance so a partial/timed-out run never regresses a
+  // day's requestCount fingerprint (or the agent rollup) below a value a prior
+  // run already established. "Full snapshot" here is conservative: the
+  // attribution scan finished AND neither native reader bailed — if either
+  // scan bailed, treat the run as partial so the anti-regression guard engages.
+  const scanComplete = isAuthoritativeScan(complete, nativeClaude, nativeCodex);
+  const storePath = provenanceStorePath();
+  const reconciled = reconcileProvenance(
+    dedupeDaily(entries),
+    agent,
+    scanComplete,
+    loadProvenanceStore(storePath),
+  );
+  saveProvenanceStore(storePath, reconciled.store);
+
   return {
     // Cap each array to the server's accepted maximum (the shared SubmitPayload
     // schema: entries ≤ 20000, sessions/blocks ≤ 10000), keeping the
     // highest-token rows. Without this, a power user with >10000 distinct sessions
     // would have their ENTIRE submit rejected with a 400 instead of a capped one.
     // tools/skills are already bounded upstream (attribution caps).
-    entries: capByTokens(dedupeDaily(entries), 20000, entryTokens),
+    entries: capByTokens(reconciled.entries, 20000, entryTokens),
     sessions: capByTokens(dedupedSessions, 10000, entryTokens),
     blocks: capByTokens(dedupeBlocks(blocks), 10000, (b) => b.totalTokens),
     toolsFound,
     tools,
     skills,
-    agent,
+    agent: reconciled.agent,
     attributionComplete: complete,
   };
 }

@@ -5,6 +5,7 @@ import {
   dedupeBlocks,
   dedupeDaily,
   dedupeSessions,
+  isAuthoritativeScan,
   mapCcusageBlocks,
   mapCcusageDaily,
   mapCcusageSessions,
@@ -44,6 +45,43 @@ const found = (entries: DailyUsageEntry[]): NativeCollectResult => ({
   filesScanned: entries.length,
 });
 const notFound: NativeCollectResult = { entries: [], found: false, filesScanned: 0 };
+
+describe("isAuthoritativeScan (anti-regression guard gating)", () => {
+  const ok = { timedOut: false };
+  const bailed = { timedOut: true };
+  // A thrown native reader's catch-fallback in collectAll() (found:false,
+  // timedOut:true) — a bailed scan, NOT genuine emptiness.
+  const threw: Pick<NativeCollectResult, "timedOut"> = { timedOut: true };
+  // A genuinely-empty reader returns found:false with no timedOut.
+  const empty: Pick<NativeCollectResult, "timedOut"> = {};
+
+  it("is authoritative when attribution finished and neither reader bailed", () => {
+    expect(isAuthoritativeScan(true, ok, ok)).toBe(true);
+  });
+
+  it("is NOT authoritative when the attribution scan is partial", () => {
+    expect(isAuthoritativeScan(false, ok, ok)).toBe(false);
+  });
+
+  it("is NOT authoritative when a native reader timed out", () => {
+    expect(isAuthoritativeScan(true, bailed, ok)).toBe(false);
+    expect(isAuthoritativeScan(true, ok, bailed)).toBe(false);
+  });
+
+  it("is NOT authoritative when a native reader THREW (catch sets timedOut:true)", () => {
+    // The regression this guards: a mid-parse throw on data ccusage can still
+    // read must not be trusted as a full snapshot, or the day's requestCount
+    // fingerprint regresses to zero and reads as forgery.
+    expect(isAuthoritativeScan(true, threw, ok)).toBe(false);
+    expect(isAuthoritativeScan(true, ok, threw)).toBe(false);
+  });
+
+  it("stays authoritative for a genuinely-empty reader (found:false, no bail)", () => {
+    // No timeout/throw → "nothing here" is real (shares ccusage's data source),
+    // so the run may legitimately refresh a fingerprint down.
+    expect(isAuthoritativeScan(true, empty, empty)).toBe(true);
+  });
+});
 
 describe("selectSourceEntries", () => {
   it("prefers the native reader for claude/codex when it found transcripts", () => {

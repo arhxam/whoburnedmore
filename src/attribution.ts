@@ -1,7 +1,9 @@
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { AgentStat, SkillStat, ToolStat } from "./shared.js";
+import { NATIVE_READ_BUDGET_MS } from "./native/claude.js";
+import { nativeCachePath, readFilesWithCache } from "./native/file-cache.js";
 
 // ccusage gives tokens by tool/model, but not which tools/skills/MCP servers you
 // actually invoke, how much runs inside subagents, or how reliable your tools
@@ -15,11 +17,21 @@ import type { AgentStat, SkillStat, ToolStat } from "./shared.js";
 const CLAUDE_PROJECTS = join(homedir(), ".claude", "projects");
 const CODEX_SESSIONS = join(homedir(), ".codex", "sessions");
 const MAX_FILES = 5000;
-const MAX_FILE_BYTES = 64 * 1024 * 1024;
-// Bounded so a huge ~/.claude never makes the CLI drag. The scan yields to the
-// event loop between files (see collectAttribution) so the loading bar keeps
-// animating even while we're chewing through transcripts.
-const TIME_BUDGET_MS = 12_000;
+/**
+ * Wall-clock budget for the whole attribution scan. It used to be 12s and re-read
+ * the ENTIRE transcript corpus on every run with no cache — so under the launchd
+ * `Background` process type (macOS throttles CPU/IO several-fold) it chronically
+ * timed out, `attributionComplete` dropped, and a heavy user's agent/tools/skills
+ * rollups came back partial run after run. It now reads through the SAME
+ * persistent per-file cache the native readers use (see `collectAttribution`),
+ * so a steady-state run only parses today's changed files; this budget therefore
+ * effectively gates only the cold first pass. Matched to the native readers'
+ * value (imported, not re-declared, so the two never drift apart).
+ */
+export const TIME_BUDGET_MS = NATIVE_READ_BUDGET_MS;
+/** Bump when the per-file attribution parse/rollup shape changes — invalidates
+ *  the persistent per-file cache (loadCache drops a mismatched version). */
+export const ATTRIBUTION_CACHE_VERSION = 1;
 const MAX_STATS = 300;
 
 /**
@@ -397,20 +409,108 @@ export function processCodexRecord(
   }
 }
 
-/** Read a transcript file's lines, bounded by size; [] on any failure. */
-function readLines(file: string): string[] {
-  let size = 0;
-  try {
-    size = statSync(file).size;
-  } catch {
-    return [];
+/** Split a file's content into lines without allocating an intermediate array
+ *  (mirrors the native readers' generator). */
+function* splitLines(content: string): Generator<string> {
+  let start = 0;
+  for (let i = 0; i < content.length; i++) {
+    if (content[i] === "\n") {
+      yield content.slice(start, i);
+      start = i + 1;
+    }
   }
-  if (size > MAX_FILE_BYTES) return [];
-  try {
-    return readFileSync(file, "utf8").split("\n");
-  } catch {
-    return [];
+  if (start < content.length) yield content.slice(start);
+}
+
+/**
+ * Compact, JSON-serializable rollup of ONE transcript file — the cache stores
+ * these per file. Tuples (not objects) keep the on-disk cache small:
+ *  tools:   [name, count, errors, tokens]
+ *  skills:  [name, count, tokens]
+ *  agent:   [messageCount, subagentMessages, subagentTokens, totalTokens, userMessageCount]
+ *  sessions:[sessionId, assistantMessageCount]
+ * Every field is additive across files, so merging a set of per-file rollups is
+ * exactly equivalent to folding every record into one accumulator (the tool-error
+ * matching that needs within-file ordering already happens per file, before this
+ * serialization — the same property the native readers rely on).
+ */
+export interface AttrFileAgg {
+  tools: Array<[string, number, number, number]>;
+  skills: Array<[string, number, number]>;
+  agent: [number, number, number, number, number];
+  sessions: Array<[string, number]>;
+}
+
+/** Serialize a per-file accumulator into its cacheable rollup. */
+function serializeAcc(acc: Accumulator): AttrFileAgg {
+  return {
+    tools: [...acc.tools].map(([n, v]) => [n, v.count, v.errors, v.tokens]),
+    skills: [...acc.skills].map(([n, v]) => [n, v.count, v.tokens]),
+    agent: [
+      acc.agent.messageCount,
+      acc.agent.subagentMessages,
+      acc.agent.subagentTokens,
+      acc.agent.totalTokens,
+      acc.agent.userMessageCount,
+    ],
+    sessions: [...acc.sessionMessages].map(([s, c]) => [s, c]),
+  };
+}
+
+/** Fold one file's cached rollup into the shared cross-file accumulator. */
+function mergeAgg(acc: Accumulator, agg: AttrFileAgg): void {
+  for (const [n, count, errors, tokens] of agg.tools) {
+    const cur = acc.tools.get(n) ?? { count: 0, errors: 0, tokens: 0 };
+    cur.count += count;
+    cur.errors += errors;
+    cur.tokens += tokens;
+    acc.tools.set(n, cur);
   }
+  for (const [n, count, tokens] of agg.skills) {
+    const cur = acc.skills.get(n) ?? { count: 0, tokens: 0 };
+    cur.count += count;
+    cur.tokens += tokens;
+    acc.skills.set(n, cur);
+  }
+  acc.agent.messageCount += agg.agent[0];
+  acc.agent.subagentMessages += agg.agent[1];
+  acc.agent.subagentTokens += agg.agent[2];
+  acc.agent.totalTokens += agg.agent[3];
+  acc.agent.userMessageCount += agg.agent[4];
+  for (const [s, c] of agg.sessions) {
+    acc.sessionMessages.set(s, (acc.sessionMessages.get(s) ?? 0) + c);
+  }
+}
+
+/** Parse ONE Claude Code transcript file into its cacheable rollup (single-element
+ *  array so it fits the generic per-file cache's `T[]` item contract). */
+export function parseClaudeAttrFile(content: string): AttrFileAgg[] {
+  const acc = createAccumulator();
+  const ctx = createFileContext();
+  for (const line of splitLines(content)) {
+    if (!line) continue;
+    try {
+      processRecord(JSON.parse(line), acc, ctx);
+    } catch {
+      /* malformed line — skip */
+    }
+  }
+  return [serializeAcc(acc)];
+}
+
+/** Parse ONE Codex rollout file into its cacheable rollup. */
+export function parseCodexAttrFile(content: string): AttrFileAgg[] {
+  const acc = createAccumulator();
+  const ctx = createCodexContext();
+  for (const line of splitLines(content)) {
+    if (!line) continue;
+    try {
+      processCodexRecord(JSON.parse(line), acc, ctx);
+    } catch {
+      /* malformed line — skip */
+    }
+  }
+  return [serializeAcc(acc)];
 }
 
 /** Claude Code transcript roots, including config-dir overrides (best-effort). */
@@ -463,56 +563,53 @@ function listTranscripts(dir: string): string[] {
  * names (`cwd`) or conversation titles. Returns empties when nothing is
  * available — never throws.
  */
-export async function collectAttribution(): Promise<AttributionResult> {
+export async function collectAttribution(
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<AttributionResult> {
   const acc = createAccumulator();
+  // ONE shared deadline for the whole scan (Claude + Codex), so raising the
+  // budget doesn't accidentally double it: readFilesWithCache checks this same
+  // absolute timestamp, so the Codex pass sees whatever budget the Claude pass
+  // left. With the per-file cache a warm run reads only changed files and never
+  // approaches the deadline; a cold run that DOES time out persists its progress
+  // and the next tick resumes (mirrors the native readers). `complete` still
+  // means "full snapshot" for the server's no-shrink guard — unchanged.
   const deadline = Date.now() + TIME_BUDGET_MS;
   let complete = true;
-  // Hand the event loop back every few files so the spinner/loading bar keeps
-  // painting (and concurrent ccusage children keep draining) instead of freezing
-  // while a big transcript folder is parsed on the main thread.
-  let sinceYield = 0;
-  const breathe = async () => {
-    if (++sinceYield >= 8) {
-      sinceYield = 0;
-      await new Promise((r) => setImmediate(r));
+
+  const mergeInto = (items: AttrFileAgg[][] | null): void => {
+    if (!items) {
+      complete = false; // timed out — progress persisted, resume next tick
+      return;
     }
+    for (const perFile of items) for (const agg of perFile) mergeAgg(acc, agg);
   };
+
   try {
-    // Claude Code — rich format (tool_use, attributionSkill, isSidechain, cwd).
-    for (const dir of claudeProjectDirs()) {
-      for (const file of listTranscripts(dir)) {
-        if (Date.now() > deadline) {
-          complete = false;
-          break;
-        }
-        const ctx = createFileContext();
-        for (const line of readLines(file)) {
-          if (!line) continue;
-          try {
-            processRecord(JSON.parse(line), acc, ctx);
-          } catch {
-            /* malformed line — skip */
-          }
-        }
-        await breathe();
-      }
+    // Claude Code — rich format (tool_use, attributionSkill, isSidechain).
+    const claudeFiles: string[] = [];
+    for (const dir of claudeProjectDirs()) claudeFiles.push(...listTranscripts(dir));
+    if (claudeFiles.length > 0) {
+      const res = await readFilesWithCache<AttrFileAgg>({
+        files: claudeFiles,
+        cachePath: nativeCachePath("attribution-claude", env),
+        version: ATTRIBUTION_CACHE_VERSION,
+        parseFile: parseClaudeAttrFile,
+        deadline,
+      });
+      mergeInto(res.itemsByFile);
     }
-    // Codex — rollout format (function_call, token_count, session cwd/model).
-    for (const file of listTranscripts(CODEX_SESSIONS)) {
-      if (Date.now() > deadline) {
-        complete = false;
-        break;
-      }
-      const ctx = createCodexContext();
-      for (const line of readLines(file)) {
-        if (!line) continue;
-        try {
-          processCodexRecord(JSON.parse(line), acc, ctx);
-        } catch {
-          /* malformed line — skip */
-        }
-      }
-      await breathe();
+    // Codex — rollout format (function_call, token_count).
+    const codexFiles = listTranscripts(CODEX_SESSIONS);
+    if (codexFiles.length > 0) {
+      const res = await readFilesWithCache<AttrFileAgg>({
+        files: codexFiles,
+        cachePath: nativeCachePath("attribution-codex", env),
+        version: ATTRIBUTION_CACHE_VERSION,
+        parseFile: parseCodexAttrFile,
+        deadline,
+      });
+      mergeInto(res.itemsByFile);
     }
   } catch {
     /* anything unexpected — return whatever we have (mark partial) */
