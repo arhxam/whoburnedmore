@@ -72,26 +72,37 @@ function parseValueFlag(args: string[], name: string): string | undefined {
  * Unknown words are returned verbatim so main() can report "unknown command".
  */
 export function resolveCommand(args: string[]): string {
-  if (args.includes("--help") || args.includes("-h") || args.includes("help")) {
-    return "help";
-  }
-  if (
-    args.includes("--version") ||
-    args.includes("-v") ||
-    args.includes("version")
-  ) {
-    return "version";
-  }
-  // Skip the value token that follows a value-flag (`--board CODE`, `--org SLUG`)
-  // so the space form isn't mistaken for a subcommand.
+  // Partition argv, skipping the value token that follows a value-flag
+  // (`--board CODE`, `--org SLUG`) so a value like `--board help` is never treated
+  // as the help subcommand/flag. `flags` holds dash tokens (their own flags);
+  // `words` holds non-dash tokens that aren't a flag's value.
   const valueFlags = new Set(["--board", "--org", "--token", "--pass", "--code"]);
+  const flags: string[] = [];
+  const words: string[] = [];
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a.startsWith("-")) {
+      flags.push(a);
       if (valueFlags.has(a)) i++; // also skip its value
       continue;
     }
-    return a;
+    words.push(a);
   }
-  return "run";
+  // Help/version FIRST — the flag spellings start with "-", so the old "first
+  // non-dash arg else run" logic never matched them and `whoburnedmore --help`
+  // fell through to a real `run` that PUBLICLY submitted usage. Recognising them
+  // here keeps `--help`/`-h`/`--version`/`-v` (and the bareword forms) side-effect
+  // free — but only when `help`/`version` is a genuine word, not a flag's value.
+  if (flags.includes("--help") || flags.includes("-h") || words.includes("help")) {
+    return "help";
+  }
+  if (
+    flags.includes("--version") ||
+    flags.includes("-v") ||
+    words.includes("version")
+  ) {
+    return "version";
+  }
+  // An explicit subcommand wins; otherwise the default is `run`.
+  return words[0] ?? "run";
 }

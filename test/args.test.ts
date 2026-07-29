@@ -132,6 +132,16 @@ describe("resolveCommand", () => {
     expect(resolveCommand(["--board", "abc123"])).toBe("run");
   });
 
+  it("does not mistake a value-flag's value of 'help'/'version' for that command", () => {
+    // Regression: a board/org literally named "help" or "version" used to trip
+    // the blanket args.includes() scan and show help/version instead of running.
+    expect(resolveCommand(["--board", "help"])).toBe("run");
+    expect(resolveCommand(["--org", "version"])).toBe("run");
+    expect(resolveCommand(["--token", "help"])).toBe("run");
+    // A real explicit subcommand still wins over a value named "help".
+    expect(resolveCommand(["sync", "--board", "help"])).toBe("sync");
+  });
+
   it("maps --help and -h to help — never a silent run/submit", () => {
     // Regression: --help/-h start with '-', so the old first-non-dash-arg
     // resolution fell through to "run" and PUBLICLY SUBMITTED the user's usage.
