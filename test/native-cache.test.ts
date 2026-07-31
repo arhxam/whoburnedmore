@@ -301,7 +301,7 @@ describe("codex native reader through the cache", () => {
       // Cache file landed in the config dir under the expected name.
       const cachePath = nativeCachePath("codex", env);
       const persisted = JSON.parse(await readFile(cachePath, "utf8")) as { v: number };
-      expect(persisted.v).toBe(1);
+      expect(persisted.v).toBe(2);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

@@ -68,6 +68,10 @@ describe("isAuthoritativeScan (anti-regression guard gating)", () => {
     expect(isAuthoritativeScan(true, ok, bailed)).toBe(false);
   });
 
+  it("is NOT authoritative when any additional fingerprint reader timed out", () => {
+    expect(isAuthoritativeScan(true, ok, ok, bailed)).toBe(false);
+  });
+
   it("is NOT authoritative when a native reader THREW (catch sets timedOut:true)", () => {
     // The regression this guards: a mid-parse throw on data ccusage can still
     // read must not be trusted as a full snapshot, or the day's requestCount
@@ -190,6 +194,25 @@ const claudeFixture = {
 };
 
 describe("mapCcusageDaily", () => {
+  it("skips impossible, pre-agent, and far-future dates before they can poison a submission", () => {
+    const entries = mapCcusageDaily(
+      "claude",
+      {
+        daily: [
+          { date: "2026-02-31", inputTokens: 10 },
+          { date: "1970-01-01", inputTokens: 20 },
+          { date: "2099-01-01", inputTokens: 30 },
+          { date: "2026-06-10", inputTokens: 40 },
+        ],
+      },
+      new Date("2026-06-10T12:00:00Z").getTime(),
+    );
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0].date).toBe("2026-06-10");
+    expect(entries[0].inputTokens).toBe(40);
+  });
+
   it("maps one entry per day per model with the tool attached", () => {
     const entries = mapCcusageDaily("claude", claudeFixture);
     expect(entries).toHaveLength(2);

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  CODEX_CACHE_VERSION,
   aggregateCodexSessions,
   parseCodexRollout,
   resolveCodexSessionsDir,
@@ -20,7 +21,9 @@ const tokenCount = (ts: string, total: { input: number; cached?: number; output:
       cached_input_tokens: total.cached ?? 0,
       output_tokens: total.output,
       reasoning_output_tokens: total.reasoning ?? 0,
-      total_tokens: total.input + total.output + (total.reasoning ?? 0),
+      // Real Codex rollouts report reasoning_output_tokens as a BREAKDOWN of
+      // output_tokens; total_tokens is input_tokens + output_tokens.
+      total_tokens: total.input + total.output,
     },
   });
 
@@ -63,7 +66,7 @@ describe("parseCodexRollout — cumulative handling", () => {
     expect(out.reduce((sum, s) => sum + total(s), 0)).toBe(1400);
   });
 
-  it("maps cached input to cache-read and reasoning to output", () => {
+  it("maps cached input separately without double-counting reasoning output", () => {
     const lines = [
       meta("gpt-5-codex"),
       tokenCount("2026-06-10T12:05:00Z", { input: 1000, cached: 600, output: 200, reasoning: 80 }),
@@ -71,8 +74,12 @@ describe("parseCodexRollout — cumulative handling", () => {
     const [s] = parseCodexRollout(lines);
     expect(s.cacheReadTokens).toBe(600);
     expect(s.inputTokens).toBe(400); // 1000 - 600 cached
-    expect(s.outputTokens).toBe(280); // 200 + 80 reasoning
+    expect(s.outputTokens).toBe(200); // reasoning is already included in output
     expect(s.cacheCreationTokens).toBe(0);
+  });
+
+  it("invalidates caches created before reasoning output was de-duplicated", () => {
+    expect(CODEX_CACHE_VERSION).toBe(2);
   });
 
   it("reads the nested info.total_token_usage layout", () => {
@@ -92,6 +99,15 @@ describe("parseCodexRollout — cumulative handling", () => {
 
   it("returns an empty array for a session with no token_count events", () => {
     expect(parseCodexRollout([meta("gpt-5"), turnCtx("gpt-5")])).toEqual([]);
+  });
+
+  it("does not emit a poisonous day when the first timestamp is out of range", () => {
+    expect(
+      parseCodexRollout([
+        meta("gpt-5"),
+        tokenCount("2099-01-01T00:00:00Z", { input: 100, output: 50 }),
+      ]),
+    ).toEqual([]);
   });
 });
 

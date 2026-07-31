@@ -1,13 +1,12 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { platform } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import pc from "picocolors";
-import type { SubmitPayload, VerifyRequestRecord } from "./shared.js";
+import type { SubmitPayload } from "./shared.js";
 import {
   applyScope,
   parseBoard,
@@ -46,6 +45,7 @@ import { daemonLoop } from "./daemon.js";
 import { collectAll, type ProgressFn } from "./collect.js";
 import { antigravityNoticeLines, detectAntigravity } from "./antigravity.js";
 import { collectClaudeRequests } from "./native/claude.js";
+import { prepareVerifyUpload } from "./verify-upload.js";
 import {
   clearAuth,
   defaultConfigDir,
@@ -700,9 +700,9 @@ async function runDaemon(): Promise<void> {
 /**
  * Re-verify a delisted account (`whoburnedmore verify`). Reads the local
  * per-request skeleton (timestamps + token counts, NEVER content), uploads it to
- * the authenticated /v1/verify endpoint, and reports the verdict — relisted, kept
- * off pending a human, or rejected. Requires sign-in (it's tied to the account
- * that was delisted).
+ * the authenticated /v1/verify endpoint, and reports the forensic result for
+ * operator review. Local logs are unsigned, so this evidence never auto-relists
+ * an account by itself. Requires sign-in (it's tied to the moderated account).
  */
 async function runVerify(): Promise<void> {
   printBanner();
@@ -740,7 +740,7 @@ async function runVerify(): Promise<void> {
   }
 
   console.log(pc.dim("  Reading your local Claude Code logs…"));
-  const { requests, found } = await collectClaudeRequests();
+  const { requests, found, timedOut } = await collectClaudeRequests();
   if (!found || requests.length === 0) {
     console.log(
       pc.yellow("  No local Claude Code logs found on this machine to verify."),
@@ -753,23 +753,12 @@ async function runVerify(): Promise<void> {
     return;
   }
 
-  // Bound the upload: send the most-recent CAP requests, flag truncation so the
-  // server treats a sampled upload conservatively.
-  const CAP = 50_000;
-  const sorted = requests.slice().sort((a, b) => b.ts - a.ts);
-  const truncated = sorted.length > CAP;
-  const capped = truncated ? sorted.slice(0, CAP) : sorted;
-  const records: VerifyRequestRecord[] = capped.map((r) => ({
-    date: r.date,
-    ts: r.ts,
-    tool: "claude",
-    model: r.model,
-    inputTokens: r.inputTokens,
-    outputTokens: r.outputTokens,
-    cacheCreationTokens: r.cacheCreationTokens,
-    cacheReadTokens: r.cacheReadTokens,
-    reqHash: createHash("sha256").update(r.key).digest("hex").slice(0, 32),
-  }));
+  // Bound the upload to the most-recent requests. A wall-clock timeout also
+  // means the corpus is partial even when fewer than the numeric cap were read.
+  const { records, truncated } = prepareVerifyUpload(
+    requests,
+    timedOut === true,
+  );
 
   console.log(
     pc.dim(
@@ -804,7 +793,7 @@ async function runVerify(): Promise<void> {
     console.log(result.verdict === "fail" ? pc.yellow(line) : line);
     console.log(
       pc.dim(
-        "  We'll relist you automatically if it checks out — re-run `npx whoburnedmore` anytime to check.",
+        "  A reviewer can clear the moderation after checking this evidence — re-run `npx whoburnedmore` anytime to check.",
       ),
     );
   }
@@ -1025,7 +1014,7 @@ function printHelp(): void {
     npx whoburnedmore private      take yourself off the public leaderboard
     npx whoburnedmore public       put yourself back on it
     npx whoburnedmore remove       delete your usage data and stop background sync
-    npx whoburnedmore verify       delisted? re-verify your usage to get back on (sends a detailed breakdown)
+    npx whoburnedmore verify       submit detailed usage evidence for review (never prompts or code)
     npx whoburnedmore status       check background-sync health (last sync, staleness)
     npx whoburnedmore uninstall-sync   turn off the background sync
     npx whoburnedmore install-sync     turn it back on after uninstalling

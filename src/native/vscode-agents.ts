@@ -34,6 +34,7 @@ import { estimateCostUSD } from "../pricing.js";
 import type { NativeCollectResult } from "./claude.js";
 import { NATIVE_READ_BUDGET_MS } from "./claude.js";
 import { nativeCachePath, readFilesWithCache } from "./file-cache.js";
+import { localUsageDate } from "./usage-date.js";
 
 /** Known Cline-lineage agents that use the globalStorage `tasks/*` layout. */
 export interface VscodeAgent {
@@ -52,16 +53,6 @@ export const VSCODE_AGENTS: VscodeAgent[] = [
 function num(n: unknown): number {
   const v = Math.round(Number(n));
   return Number.isFinite(v) && v > 0 ? v : 0;
-}
-
-/** Epoch-ms → local YYYY-MM-DD, matching every other reader's local bucketing. */
-function localDate(ms: number): string | null {
-  if (!Number.isFinite(ms) || ms <= 0) return null;
-  const d = new Date(ms);
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
 }
 
 interface ParsedRequest {
@@ -85,7 +76,7 @@ function parseApiReqMessage(
   msg: Record<string, unknown>,
 ): ParsedRequest | null {
   if (msg.say !== "api_req_started") return null;
-  const date = localDate(Number(msg.ts));
+  const date = localUsageDate(Number(msg.ts));
   if (!date) return null;
 
   let payload: Record<string, unknown> | null = null;
@@ -266,7 +257,7 @@ async function listTaskFiles(
 }
 
 /** Bump when the parse/aggregate semantics change — invalidates the per-file cache. */
-const VSCODE_CACHE_VERSION = 1;
+export const VSCODE_CACHE_VERSION = 2;
 
 // Compact per-file cache row: [date, model, in, out, cacheCreate, cacheRead, cost, requestCount].
 type CachedRow = [string, string, number, number, number, number, number, number];

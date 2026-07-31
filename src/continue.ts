@@ -24,6 +24,7 @@ import type { DailyUsageEntry } from "./shared.js";
 import type { NativeCollectResult } from "./native/claude.js";
 import { NATIVE_READ_BUDGET_MS } from "./native/claude.js";
 import { nativeCachePath, readFilesWithCache } from "./native/file-cache.js";
+import { localUsageDate } from "./native/usage-date.js";
 import { estimateCostUSD } from "./pricing.js";
 
 function num(n: unknown): number {
@@ -46,15 +47,6 @@ function toEpochMs(ts: unknown): number | null {
     return Number.isFinite(t) ? t : null;
   }
   return null;
-}
-
-/** Epoch-ms → local YYYY-MM-DD, matching every other reader's local bucketing. */
-function localDate(ms: number): string {
-  const d = new Date(ms);
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
 }
 
 interface Bucket {
@@ -85,11 +77,12 @@ export function mapContinueRecords(records: unknown[]): DailyUsageEntry[] {
     if (!model) continue;
     const ms = toEpochMs(rec.timestamp ?? rec.eventTimestamp);
     if (ms === null) continue;
+    const date = localUsageDate(ms);
+    if (!date) continue;
     const inputTokens = num(rec.promptTokens ?? rec.prompt_tokens);
     const outputTokens = num(rec.generatedTokens ?? rec.generated_tokens);
     if (inputTokens + outputTokens === 0) continue;
 
-    const date = localDate(ms);
     const key = `${date}|${model}`;
     let b = byKey.get(key);
     if (!b) {
@@ -153,13 +146,13 @@ async function listJsonl(dir: string): Promise<string[]> {
   for (const d of dirents) {
     const full = join(dir, d.name);
     if (d.isDirectory()) out.push(...(await listJsonl(full)));
-    else if (d.isFile() && d.name.endsWith(".jsonl")) out.push(full);
+    else if (d.isFile() && d.name === "tokensGenerated.jsonl") out.push(full);
   }
   return out;
 }
 
 /** Bump when the parse/aggregate semantics change — invalidates the per-file cache. */
-const CONTINUE_CACHE_VERSION = 1;
+export const CONTINUE_CACHE_VERSION = 2;
 
 // Compact per-file cache row: [date, model, in, out, cost, requestCount].
 type CachedRow = [string, string, number, number, number, number];

@@ -20,20 +20,11 @@ import { join } from "node:path";
 import type { DailyUsageEntry } from "../shared.js";
 import { estimateCostUSD } from "../pricing.js";
 import { nativeCachePath, readFilesWithCache } from "./file-cache.js";
+import { localUsageDate } from "./usage-date.js";
 
 function num(n: unknown): number {
   const v = Math.round(Number(n));
   return Number.isFinite(v) && v > 0 ? v : 0;
-}
-
-function localDate(iso: string): string | null {
-  const t = Date.parse(iso);
-  if (!Number.isFinite(t)) return null;
-  const d = new Date(t);
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
 }
 
 /** Pull the cumulative token fields out of a token_count payload (both layouts). */
@@ -41,7 +32,6 @@ function readTokenFields(payload: Record<string, unknown>): {
   input: number;
   cached: number;
   output: number;
-  reasoning: number;
 } | null {
   // Newer builds nest the running total under info.total_token_usage.
   const info = payload.info as Record<string, unknown> | undefined;
@@ -54,7 +44,6 @@ function readTokenFields(payload: Record<string, unknown>): {
     input: num(input),
     cached: num(src.cached_input_tokens),
     output: num(output),
-    reasoning: num(src.reasoning_output_tokens),
   };
 }
 
@@ -89,7 +78,7 @@ export function parseCodexRollout(lines: Iterable<string>): CodexSession[] {
   // Insertion order follows the (chronological) event stream.
   const perDay = new Map<
     string,
-    { cum: { input: number; cached: number; output: number; reasoning: number }; turns: number }
+    { cum: { input: number; cached: number; output: number }; turns: number }
   >();
   let lastSeenDate: string | null = null;
 
@@ -116,7 +105,7 @@ export function parseCodexRollout(lines: Iterable<string>): CodexSession[] {
       if (!fields) continue;
       // Attribute to the event's own day; if the timestamp is unparseable, carry
       // forward the most recent known day rather than dropping the usage.
-      const parsed: string | null = localDate(String(obj.timestamp ?? ""));
+      const parsed = localUsageDate(Date.parse(String(obj.timestamp ?? "")));
       const day: string | null = parsed ?? lastSeenDate;
       if (!day) continue;
       lastSeenDate = day;
@@ -136,22 +125,21 @@ export function parseCodexRollout(lines: Iterable<string>): CodexSession[] {
   // own usage. Map Codex's cumulative fields onto our four-field schema:
   //  - cache read  = cached input portion
   //  - input       = uncached input (input_tokens already includes the cached part)
-  //  - output      = visible output + reasoning output (both billed as output)
+  //  - output      = output_tokens, which already INCLUDES reasoning output
   //  - cache create= Codex doesn't report a separate cache-write count
   const dates = [...perDay.keys()].sort();
   const out: CodexSession[] = [];
-  let prev = { input: 0, cached: 0, output: 0, reasoning: 0 };
+  let prev = { input: 0, cached: 0, output: 0 };
   for (const date of dates) {
     const { cum, turns } = perDay.get(date)!;
     // Per-day deltas (monotonic cumulative ⇒ non-negative; max(0) guards any reset).
     const dInput = Math.max(0, cum.input - prev.input);
     const dCached = Math.max(0, cum.cached - prev.cached);
     const dOutput = Math.max(0, cum.output - prev.output);
-    const dReasoning = Math.max(0, cum.reasoning - prev.reasoning);
     prev = cum;
     const cacheReadTokens = dCached;
     const inputTokens = Math.max(0, dInput - dCached);
-    const outputTokens = dOutput + dReasoning;
+    const outputTokens = dOutput;
     if (inputTokens + outputTokens + cacheReadTokens === 0) continue; // idle day
     out.push({
       date,
@@ -293,7 +281,7 @@ export interface NativeCollectResult {
 export const NATIVE_READ_BUDGET_MS = 45_000;
 
 /** Bump when parse semantics change — invalidates the per-file cache. */
-const CODEX_CACHE_VERSION = 1;
+export const CODEX_CACHE_VERSION = 2;
 
 /**
  * Compact per-file cache row: [date, model, in, out, cacheCreate, cacheRead,

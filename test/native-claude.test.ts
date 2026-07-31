@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  CLAUDE_CACHE_VERSION,
   accumulateClaudeLines,
   aggregateClaudeLines,
   collectClaudeNative,
@@ -174,6 +175,31 @@ describe("parseClaudeLine", () => {
     expect(
       parseClaudeLine(JSON.stringify({ message: { role: "user" }, timestamp: "2026-06-10T12:00:00Z" })),
     ).toBeNull();
+  });
+
+  it("rejects timestamps that would make the server reject the whole payload", () => {
+    expect(
+      parseClaudeLine(
+        assistantLine({
+          ts: "1970-01-01T00:00:00Z",
+          model: "claude-opus-4-8",
+          output: 1,
+        }),
+      ),
+    ).toBeNull();
+    expect(
+      parseClaudeLine(
+        assistantLine({
+          ts: "2099-01-01T00:00:00Z",
+          model: "claude-opus-4-8",
+          output: 1,
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  it("invalidates caches created before timestamp hardening", () => {
+    expect(CLAUDE_CACHE_VERSION).toBe(2);
   });
 });
 

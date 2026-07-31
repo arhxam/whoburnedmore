@@ -4,6 +4,7 @@ import { createRequire } from "node:module";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
 import type { BlockEntry, DailyUsageEntry } from "./shared.js";
+import { localUsageDate } from "./native/usage-date.js";
 import { collectCursorViaTokscale } from "./tokscale.js";
 
 // Cursor doesn't write ccusage-readable local logs — its usage lives behind the
@@ -107,7 +108,8 @@ export function mapCursorEvents(events: CursorEvent[]): {
     // Bucket by LOCAL calendar day, matching the native readers and ccusage —
     // a UTC slice here put late-evening usage on tomorrow's row for anyone
     // east of UTC, splitting the same physical day across two board days.
-    const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    const date = localUsageDate(ms);
+    if (!date) continue;
     const model = e.model || "cursor";
     const input = num(tu.inputTokens);
     const output = num(tu.outputTokens);

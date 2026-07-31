@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  VSCODE_CACHE_VERSION,
   aggregateVscodeAgentEntries,
   collectVscodeAgent,
   parseVscodeAgentMessages,
@@ -141,6 +142,8 @@ describe("aggregateVscodeAgentEntries — grouping & filtering", () => {
       { ts: TS, type: "say", say: "text", text: "thinking…" }, // assistant chatter
       { ts: TS, type: "say", say: "api_req_started", text: JSON.stringify({ request: "GET…" }) }, // started, no tokens yet
       { ts: TS, type: "say", say: "api_req_started", text: "{not valid json" }, // corrupt
+      apiReq({ ts: 1, tokensIn: 9 }), // 1970, before coding agents
+      apiReq({ ts: Number.MAX_VALUE, tokensIn: 9 }), // invalid Date
       apiReq({ ts: TS, tokensIn: 7 }), // the one real completed request
     ]);
     expect(entries).toHaveLength(1);
@@ -181,6 +184,10 @@ describe("vscodeGlobalStorageRoots", () => {
 });
 
 describe("collectVscodeAgent — reads task dirs on disk", () => {
+  it("invalidates caches created before the hardened date semantics", () => {
+    expect(VSCODE_CACHE_VERSION).toBe(2);
+  });
+
   it("reads <root>/<extId>/tasks/*/ui_messages.json and aggregates, or found:false when absent", async () => {
     const dir = await mkdtemp(join(tmpdir(), "wbm-vscode-"));
     const extId = "saoudrizwan.claude-dev";

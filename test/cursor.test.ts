@@ -45,6 +45,19 @@ describe("mapCursorEvents", () => {
     expect(mapCursorEvents([{ model: "x" }]).entries).toEqual([]);
     expect(mapCursorEvents([{ tokenUsage: { inputTokens: 5 } }]).entries).toEqual([]);
   });
+
+  it("skips impossible timestamps instead of throwing or poisoning the payload", () => {
+    const bad = [
+      { timestamp: "1", model: "x", tokenUsage: { inputTokens: 5 } },
+      {
+        timestamp: String(Number.MAX_VALUE),
+        model: "x",
+        tokenUsage: { inputTokens: 5 },
+      },
+    ];
+    expect(() => mapCursorEvents(bad)).not.toThrow();
+    expect(mapCursorEvents(bad)).toEqual({ entries: [], blocks: [] });
+  });
 });
 
 describe("cursorCookie", () => {

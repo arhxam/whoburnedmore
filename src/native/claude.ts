@@ -29,6 +29,7 @@ import { join } from "node:path";
 import type { DailyUsageEntry } from "../shared.js";
 import { estimateCostUSD } from "../pricing.js";
 import { nativeCachePath, readFilesWithCache } from "./file-cache.js";
+import { localUsageDate } from "./usage-date.js";
 
 /** One deduped provider request extracted from a transcript line. */
 export interface ParsedRequest {
@@ -70,16 +71,6 @@ function reqTokens(r: {
  * user's local timezone, and the rest of our pipeline (leaderboard, anti-cheat
  * future-date skew) already assumes local dates, so we match that here.
  */
-function localDate(iso: string): string | null {
-  const t = Date.parse(iso);
-  if (!Number.isFinite(t)) return null;
-  const d = new Date(t);
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
-
 let syntheticCounter = 0;
 
 /**
@@ -104,10 +95,10 @@ export function parseClaudeLine(raw: string): ParsedRequest | null {
   // guard anyway in case a non-assistant line ever sprouts a usage stub.
   if (message.role !== undefined && message.role !== "assistant") return null;
 
-  const date = localDate(String(obj.timestamp ?? ""));
-  if (!date) return null;
   const tsParsed = Date.parse(String(obj.timestamp ?? ""));
-  const ts = Number.isFinite(tsParsed) ? tsParsed : 0;
+  const date = localUsageDate(tsParsed);
+  if (!date) return null;
+  const ts = tsParsed;
 
   const messageId = typeof message.id === "string" ? message.id : "";
   const requestId = typeof obj.requestId === "string" ? obj.requestId : "";
@@ -291,7 +282,7 @@ export interface NativeCollectResult {
 export const NATIVE_READ_BUDGET_MS = 45_000;
 
 /** Bump when parse/dedup semantics change — invalidates the per-file cache. */
-const CLAUDE_CACHE_VERSION = 1;
+export const CLAUDE_CACHE_VERSION = 2;
 
 /**
  * Compact per-file cache row: [key, hasRealId, date, model, in, out, cacheCreate,

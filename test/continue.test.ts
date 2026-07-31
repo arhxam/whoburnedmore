@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  CONTINUE_CACHE_VERSION,
   collectContinue,
   mapContinueRecords,
   parseContinueJsonl,
@@ -88,6 +89,8 @@ describe("mapContinueRecords — grouping & filtering", () => {
       { promptTokens: 5, generatedTokens: 5, timestamp: ISO }, // no model
       { model: "gpt-5", promptTokens: 5, generatedTokens: 5 }, // no timestamp
       { model: "gpt-5", promptTokens: 0, generatedTokens: 0, timestamp: ISO }, // no tokens
+      { model: "gpt-5", promptTokens: 5, generatedTokens: 5, timestamp: 1 }, // 1970, before coding agents
+      { model: "gpt-5", promptTokens: 5, generatedTokens: 5, timestamp: Number.MAX_VALUE }, // invalid Date
       { model: "gpt-5", promptTokens: 9, generatedTokens: 1, timestamp: ISO }, // the one real event
     ]);
     expect(entries).toHaveLength(1);
@@ -122,6 +125,10 @@ describe("parseContinueJsonl", () => {
 });
 
 describe("collectContinue — reads dev_data on disk", () => {
+  it("invalidates caches created before the hardened file/date semantics", () => {
+    expect(CONTINUE_CACHE_VERSION).toBe(2);
+  });
+
   it("reads dev_data/**/tokensGenerated.jsonl and aggregates, or found:false when absent", async () => {
     const dir = await mkdtemp(join(tmpdir(), "wbm-continue-"));
     const dataDir = join(dir, "dev_data", "0.2.0");
@@ -129,6 +136,12 @@ describe("collectContinue — reads dev_data on disk", () => {
     await writeFile(
       join(dataDir, "tokensGenerated.jsonl"),
       JSON.stringify({ model: "claude-sonnet-4-5", promptTokens: 100, generatedTokens: 20, timestamp: ISO }) + "\n",
+    );
+    // A sibling legacy event file can have token-like fields but no eventName.
+    // Discovery must only read the purpose-built tokensGenerated ledger.
+    await writeFile(
+      join(dataDir, "autocomplete.jsonl"),
+      JSON.stringify({ model: "claude-sonnet-4-5", promptTokens: 999, generatedTokens: 999, timestamp: ISO }) + "\n",
     );
     const env = { WHOBURNEDMORE_CONFIG_DIR: dir } as NodeJS.ProcessEnv;
     try {

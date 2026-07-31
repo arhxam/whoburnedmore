@@ -21,6 +21,7 @@ import {
   type NativeCollectResult,
 } from "./native/claude.js";
 import { collectCodexNative } from "./native/codex.js";
+import { plausibleUsageDate } from "./native/usage-date.js";
 import { collectVscodeAgent, VSCODE_AGENTS } from "./native/vscode-agents.js";
 import { loadLivePricing } from "./pricing-live.js";
 import {
@@ -66,6 +67,7 @@ function normCost(n: unknown): number {
 export function mapCcusageDaily(
   tool: string,
   json: unknown,
+  now: number = Date.now(),
 ): DailyUsageEntry[] {
   const daily = (json as { daily?: unknown[] } | null)?.daily;
   if (!Array.isArray(daily)) return [];
@@ -74,7 +76,7 @@ export function mapCcusageDaily(
   for (const rawDay of daily) {
     const day = rawDay as Record<string, unknown>;
     const date = (day.date ?? day.period) as string | undefined;
-    if (typeof date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
+    if (typeof date !== "string" || !plausibleUsageDate(date, now)) continue;
 
     const breakdowns = Array.isArray(day.modelBreakdowns)
       ? (day.modelBreakdowns as Record<string, unknown>[])
@@ -438,13 +440,11 @@ export const COLLECT_STAGES = SOURCES.length + 4 + VSCODE_AGENTS.length + 1;
  */
 export function isAuthoritativeScan(
   attributionComplete: boolean,
-  nativeClaude: Pick<NativeCollectResult, "timedOut">,
-  nativeCodex: Pick<NativeCollectResult, "timedOut">,
+  ...fingerprintReaders: Array<Pick<NativeCollectResult, "timedOut">>
 ): boolean {
   return (
     attributionComplete &&
-    nativeClaude.timedOut !== true &&
-    nativeCodex.timedOut !== true
+    fingerprintReaders.every((reader) => reader.timedOut !== true)
   );
 }
 
@@ -609,7 +609,13 @@ export async function collectAll(onProgress?: ProgressFn): Promise<CollectResult
   // run already established. "Full snapshot" here is conservative: the
   // attribution scan finished AND neither native reader bailed — if either
   // scan bailed, treat the run as partial so the anti-regression guard engages.
-  const scanComplete = isAuthoritativeScan(complete, nativeClaude, nativeCodex);
+  const scanComplete = isAuthoritativeScan(
+    complete,
+    nativeClaude,
+    nativeCodex,
+    ...vscodeResults.map(({ result }) => result),
+    continueResult,
+  );
   const storePath = provenanceStorePath();
   const reconciled = reconcileProvenance(
     dedupeDaily(entries),

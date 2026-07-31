@@ -255,7 +255,8 @@ export interface VerifyCheck {
 
 export interface VerifyResponse {
   ok: boolean;
-  /** "pass" → relisted; "fail" → stays delisted; "review" → routed to an operator. */
+  /** "fail" → physically inconsistent; "review" → routed to an operator.
+   *  "pass" is retained for wire compatibility but local evidence cannot mint it. */
   verdict: "pass" | "fail" | "review";
   /** 0..100 forensic confidence the usage is genuine (advisory; for the operator). */
   score: number;
