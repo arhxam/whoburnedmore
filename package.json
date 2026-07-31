@@ -1,6 +1,6 @@
 {
   "name": "whoburnedmore",
-  "version": "0.9.13",
+  "version": "0.9.16",
   "description": "Find out who burned more — submit your AI coding-agent token usage to the public leaderboard at whoburnedmore.com",
   "type": "module",
   "bin": {
@@ -48,6 +48,10 @@
     "codex",
     "gemini-cli",
     "copilot",
+    "cursor",
+    "cline",
+    "roo",
+    "continue",
     "ccusage",
     "usage",
     "cli"

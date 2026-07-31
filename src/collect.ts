@@ -13,6 +13,7 @@ import type {
   ToolStat,
 } from "./shared.js";
 import { collectAttribution } from "./attribution.js";
+import { collectContinue } from "./continue.js";
 import { collectCursor } from "./cursor.js";
 import {
   collectClaudeNative,
@@ -20,6 +21,7 @@ import {
   type NativeCollectResult,
 } from "./native/claude.js";
 import { collectCodexNative } from "./native/codex.js";
+import { collectVscodeAgent, VSCODE_AGENTS } from "./native/vscode-agents.js";
 import { loadLivePricing } from "./pricing-live.js";
 import {
   loadProvenanceStore,
@@ -415,8 +417,12 @@ async function runCcusage(
  */
 export type ProgressFn = (done: number, total: number, label: string) => void;
 
-/** Total number of collection stages (sources + sessions/blocks/cursor/logs). */
-export const COLLECT_STAGES = SOURCES.length + 4;
+/**
+ * Total number of collection stages: the ccusage sources, plus the fixed extra
+ * ticking tasks — sessions, blocks, cursor, attribution (4), and the native
+ * non-ccusage readers cline, roo, continue (VSCODE_AGENTS.length + 1).
+ */
+export const COLLECT_STAGES = SOURCES.length + 4 + VSCODE_AGENTS.length + 1;
 
 /**
  * A run is AUTHORITATIVE — safe to lower a stored requestCount fingerprint —
@@ -519,17 +525,42 @@ export async function collectAll(onProgress?: ProgressFn): Promise<CollectResult
     tick();
     return a;
   });
+  // Non-ccusage native readers for the Cline-lineage VS Code agents (Cline, Roo)
+  // and Continue.dev. Best effort like cursor: a no-op (found:false) when the
+  // agent isn't installed, and they emit the same anti-fraud requestCount the
+  // other native readers do.
+  const vscodeTasks = VSCODE_AGENTS.map((a) =>
+    collectVscodeAgent({ tool: a.tool, extIds: a.extIds }).then((r) => {
+      tick();
+      return { tool: a.tool, result: r };
+    }),
+  );
+  const continueTask = collectContinue().then((r) => {
+    tick();
+    return r;
+  });
 
-  const [sourceResults, sessions, blocks, cursor, attribution, nativeClaude, nativeCodex] =
-    await Promise.all([
-      Promise.all(sourceTasks),
-      sessionTask,
-      blockTask,
-      cursorTask,
-      attributionTask,
-      nativeClaudeTask,
-      nativeCodexTask,
-    ]);
+  const [
+    sourceResults,
+    sessions,
+    blocks,
+    cursor,
+    attribution,
+    nativeClaude,
+    nativeCodex,
+    vscodeResults,
+    continueResult,
+  ] = await Promise.all([
+    Promise.all(sourceTasks),
+    sessionTask,
+    blockTask,
+    cursorTask,
+    attributionTask,
+    nativeClaudeTask,
+    nativeCodexTask,
+    Promise.all(vscodeTasks),
+    continueTask,
+  ]);
 
   const native = { claude: nativeClaude, codex: nativeCodex };
   const entries: DailyUsageEntry[] = [];
@@ -548,6 +579,18 @@ export async function collectAll(onProgress?: ProgressFn): Promise<CollectResult
     entries.push(...cursor.entries);
     blocks.push(...cursor.blocks);
     toolsFound.push("cursor");
+  }
+  // Cline / Roo (VS Code globalStorage tasks) and Continue.dev — additive; each
+  // no-ops when its agent isn't present.
+  for (const { tool, result } of vscodeResults) {
+    if (result.found && result.entries.length > 0) {
+      entries.push(...result.entries);
+      toolsFound.push(tool);
+    }
+  }
+  if (continueResult.found && continueResult.entries.length > 0) {
+    entries.push(...continueResult.entries);
+    toolsFound.push("continue");
   }
 
   const { tools, skills, agent, sessionMessages, complete } = attribution;

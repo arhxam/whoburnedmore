@@ -44,6 +44,7 @@ import {
 import { printBanner } from "./banner.js";
 import { daemonLoop } from "./daemon.js";
 import { collectAll, type ProgressFn } from "./collect.js";
+import { antigravityNoticeLines, detectAntigravity } from "./antigravity.js";
 import { collectClaudeRequests } from "./native/claude.js";
 import {
   clearAuth,
@@ -223,6 +224,12 @@ async function run(flags: Flags): Promise<void> {
     console.log();
     console.log("  Nothing to burn yet — no local usage found from any coding agent.");
     console.log(pc.dim("  Use Claude Code, Codex, Gemini CLI (or friends) and come back."));
+    // Don't leave an Antigravity-only user thinking their agent went unseen — say
+    // plainly why it can't be counted (encrypted, flat-rate, no local token log).
+    if (detectAntigravity()) {
+      console.log();
+      for (const line of antigravityNoticeLines()) console.log(pc.dim(line));
+    }
     return;
   }
 
@@ -968,6 +975,12 @@ async function main(): Promise<void> {
     case "status":
     case "doctor": {
       for (const line of agentStatusReport()) console.log(line);
+      // Diagnostic aid: surface Antigravity here too, so a user who relies on it
+      // understands why it never appears on their board.
+      if (detectAntigravity()) {
+        console.log("");
+        for (const line of antigravityNoticeLines()) console.log(line);
+      }
       break;
     }
     case "private":
