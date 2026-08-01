@@ -367,19 +367,36 @@ export function ccusageClaudeEnv(
   return { ...env, CLAUDE_CONFIG_DIR: resolveClaudeConfigRoots(env).join(",") };
 }
 
+/**
+ * A single source shouldn't be able to hang the whole run. 25s is plenty for a
+ * healthy local read of one agent's transcripts; a hung source gets killed and
+ * (if transient) retried once rather than stalling everything for minutes.
+ */
+const CCUSAGE_SOURCE_TIMEOUT_MS = 25_000;
+
+/**
+ * `session` and `blocks` are NOT per-source: each re-reads EVERY agent's
+ * transcripts in one child, so it does roughly the work of all the per-source
+ * children combined — while those 15+ children run concurrently against the
+ * same disk. On a large corpus 25s is therefore too small by construction: the
+ * call and its retry both timed out, runCcusage returned null, and
+ * payload.sessions stayed empty on every single run. Since per-day message
+ * counts reach the server only through sessions[].messageCount (DailyUsageEntry
+ * has no message field), dashboards showed "0 messages" indefinitely.
+ */
+const CCUSAGE_AGGREGATE_TIMEOUT_MS = 180_000;
+
 async function runCcusageOnce(
   cmd: string,
   args: string[],
   env?: NodeJS.ProcessEnv,
+  timeoutMs: number = CCUSAGE_SOURCE_TIMEOUT_MS,
 ): Promise<{ json: unknown | null; transient: boolean }> {
   try {
     const { stdout } = await execFileAsync(cmd, args, {
       encoding: "utf8",
       maxBuffer: 64 * 1024 * 1024,
-      // A single source shouldn't be able to hang the whole run. 25s is plenty
-      // for a healthy local read; a hung source gets killed and (if transient)
-      // retried once below rather than stalling everything for minutes.
-      timeout: 25_000,
+      timeout: timeoutMs,
       ...(env ? { env } : {}),
     });
     if (!stdout) return { json: null, transient: false };
@@ -404,12 +421,13 @@ async function runCcusage(
   cmd: string,
   args: string[],
   env?: NodeJS.ProcessEnv,
+  timeoutMs: number = CCUSAGE_SOURCE_TIMEOUT_MS,
 ): Promise<unknown | null> {
-  const first = await runCcusageOnce(cmd, args, env);
+  const first = await runCcusageOnce(cmd, args, env, timeoutMs);
   if (first.json !== null || !first.transient) return first.json;
   // One retry on a transient failure so a flaky source stays in the report
   // run-to-run (data consistency) rather than dropping out intermittently.
-  return (await runCcusageOnce(cmd, args, env)).json;
+  return (await runCcusageOnce(cmd, args, env, timeoutMs)).json;
 }
 
 /**
@@ -499,13 +517,23 @@ export async function collectAll(onProgress?: ProgressFn): Promise<CollectResult
 
   // Richer rollups, gathered once across all agents (ccusage aggregates them):
   // sessions power "most expensive conversations", blocks power "peak hours".
-  const sessionTask = runCcusage(cmd, [...prefixArgs, "session", "--json", "--offline"]).then(
+  const sessionTask = runCcusage(
+    cmd,
+    [...prefixArgs, "session", "--json", "--offline"],
+    undefined,
+    CCUSAGE_AGGREGATE_TIMEOUT_MS,
+  ).then(
     (json) => {
       tick();
       return json ? mapCcusageSessions(json) : [];
     },
   );
-  const blockTask = runCcusage(cmd, [...prefixArgs, "blocks", "--json", "--offline"]).then(
+  const blockTask = runCcusage(
+    cmd,
+    [...prefixArgs, "blocks", "--json", "--offline"],
+    undefined,
+    CCUSAGE_AGGREGATE_TIMEOUT_MS,
+  ).then(
     (json) => {
       tick();
       return json ? mapCcusageBlocks(json) : [];
