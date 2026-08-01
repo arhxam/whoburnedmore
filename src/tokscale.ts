@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import type { DailyUsageEntry } from "./shared.js";
+import { estimateCostUSD } from "./pricing.js";
 
 // Fallback Cursor source: the community-maintained `tokscale` CLI. The primary
 // path (src/cursor.ts) calls Cursor's dashboard API directly; if Cursor changes
@@ -45,13 +46,23 @@ export function mapTokscaleDay(date: string, json: unknown): DailyUsageEntry[] {
     const outputTokens = num(e.output) + num(e.reasoning);
     const cacheCreationTokens = num(e.cacheWrite);
     const cacheReadTokens = num(e.cacheRead);
-    const costUSD = numCost(e.cost);
+    const model = typeof e.model === "string" && e.model ? e.model : "cursor";
+    const billed = numCost(e.cost);
+    const costUSD =
+      billed > 0
+        ? billed
+        : estimateCostUSD(model, {
+            inputTokens,
+            outputTokens,
+            cacheCreationTokens,
+            cacheReadTokens,
+          });
     const total = inputTokens + outputTokens + cacheCreationTokens + cacheReadTokens;
     if (total === 0 && costUSD === 0) continue;
     out.push({
       date,
       tool: "cursor",
-      model: typeof e.model === "string" && e.model ? e.model : "cursor",
+      model,
       inputTokens,
       outputTokens,
       cacheCreationTokens,

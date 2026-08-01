@@ -53,6 +53,8 @@ const FALLBACK_TIERS: Array<{ match: RegExp; row: PriceRow }> = [
   { match: /haiku/i, row: [1, 5, 1.25, 0.1] },
   { match: /gpt-4o|gpt-4\.1/i, row: [2.5, 10, 2.5, 1.25] },
   { match: /gpt-5|o[134](-|$)|codex/i, row: [1.25, 10, 1.25, 0.125] },
+  // Cursor's Composer family has no public LiteLLM row; treat like mid-tier GPT-5.
+  { match: /composer/i, row: [1.25, 10, 1.25, 0.125] },
   { match: /gemini.*flash/i, row: [0.3, 2.5, 0.3, 0.03] },
   { match: /gemini/i, row: [2, 12, 2, 0.2] },
   { match: /grok/i, row: [3, 15, 3, 0.75] },

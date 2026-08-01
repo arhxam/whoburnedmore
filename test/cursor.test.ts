@@ -41,6 +41,40 @@ describe("mapCursorEvents", () => {
     expect(blocks[0].totalTokens).toBeGreaterThan(0);
   });
 
+  it("estimates API-equivalent cost when Cursor reports totalCents=0 (included usage)", () => {
+    const { entries } = mapCursorEvents([
+      {
+        timestamp: "1781012410601",
+        model: "claude-opus-4-8-thinking-high",
+        tokenUsage: {
+          inputTokens: 1_000_000,
+          outputTokens: 100_000,
+          cacheWriteTokens: 0,
+          cacheReadTokens: 0,
+          totalCents: 0,
+        },
+      },
+    ]);
+    expect(entries).toHaveLength(1);
+    // opus fallback: $5/M in + $25/M out → $5 + $2.5 = $7.5
+    expect(entries[0].costUSD).toBeCloseTo(7.5, 2);
+  });
+
+  it("keeps billed Cursor cents when present instead of overwriting with estimate", () => {
+    const { entries } = mapCursorEvents([
+      {
+        timestamp: "1781012410601",
+        model: "claude-opus-4-8-thinking-high",
+        tokenUsage: {
+          inputTokens: 1_000_000,
+          outputTokens: 100_000,
+          totalCents: 12.34,
+        },
+      },
+    ]);
+    expect(entries[0].costUSD).toBeCloseTo(0.1234, 4);
+  });
+
   it("skips events without tokenUsage or timestamp", () => {
     expect(mapCursorEvents([{ model: "x" }]).entries).toEqual([]);
     expect(mapCursorEvents([{ tokenUsage: { inputTokens: 5 } }]).entries).toEqual([]);

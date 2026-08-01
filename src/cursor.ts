@@ -5,6 +5,7 @@ import { homedir, platform } from "node:os";
 import { join } from "node:path";
 import type { BlockEntry, DailyUsageEntry } from "./shared.js";
 import { localUsageDate } from "./native/usage-date.js";
+import { estimateCostUSD } from "./pricing.js";
 import { collectCursorViaTokscale } from "./tokscale.js";
 
 // Cursor doesn't write ccusage-readable local logs — its usage lives behind the
@@ -115,7 +116,17 @@ export function mapCursorEvents(events: CursorEvent[]): {
     const output = num(tu.outputTokens);
     const cacheWrite = num(tu.cacheWriteTokens);
     const cacheRead = num(tu.cacheReadTokens);
-    const cost = Math.max(0, (Number(tu.totalCents) || 0) / 100);
+    // Cursor reports totalCents=0 for subscription/included usage even when
+    // tokens are huge. Prefer billed cents when present; otherwise estimate
+    // API-equivalent cost from public model rates (same as Claude/Codex paths).
+    const billed = Math.max(0, (Number(tu.totalCents) || 0) / 100);
+    const estimated = estimateCostUSD(model, {
+      inputTokens: input,
+      outputTokens: output,
+      cacheCreationTokens: cacheWrite,
+      cacheReadTokens: cacheRead,
+    });
+    const cost = billed > 0 ? billed : estimated;
     const total = input + output + cacheWrite + cacheRead;
     if (total === 0 && cost === 0) continue;
 
