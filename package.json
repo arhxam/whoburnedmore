@@ -10,22 +10,23 @@
     "dist/index.js"
   ],
   "scripts": {
-    "build": "rm -rf dist && esbuild src/index.ts --bundle --platform=node --format=esm --target=node20 --outfile=dist/index.js --external:ccusage --external:picocolors --external:tokscale",
+    "clean": "node scripts/clean.mjs",
+    "build": "npm run clean && esbuild src/index.ts --bundle --platform=node --format=esm --target=node20 --outfile=dist/index.js --external:ccusage --external:picocolors --external:tokscale",
     "test": "vitest run",
     "lint": "tsc -p tsconfig.json --noEmit",
     "smoke:package": "node scripts/smoke-package.mjs",
     "prepublishOnly": "npm run lint && npm run test && npm run build && npm run smoke:package"
   },
   "dependencies": {
-    "ccusage": "20.0.9",
-    "picocolors": "1.1.1"
+    "ccusage": "^20.0.19",
+    "picocolors": "^1.1.1"
   },
   "devDependencies": {
-    "@types/node": "^22.10.0",
+    "@types/node": "^22.18.0",
     "esbuild": "^0.27.0",
-    "typescript": "^5.7.0",
-    "vitest": "^3.0.0",
-    "zod": "^3.23.0"
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0",
+    "zod": "^3.25.0"
   },
   "engines": {
     "node": ">=20"
