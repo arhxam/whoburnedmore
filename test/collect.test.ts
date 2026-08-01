@@ -513,6 +513,122 @@ describe("mapCcusageBlocks", () => {
   });
 });
 
+describe("opencode source (ccusage-only, no native reader)", () => {
+  it("always uses ccusage entries for opencode (no native reader exists)", () => {
+    const native = {
+      claude: found([nativeEntry("claude", 10)]),
+      codex: found([nativeEntry("codex", 5)]),
+    };
+    const cc = ccEntry("opencode");
+    const result = selectSourceEntries("opencode", [cc], native);
+    expect(result).toHaveLength(1);
+    expect(result[0].model).toBe("fallback-model");
+    expect(result[0].requestCount).toBeUndefined();
+  });
+
+  it("maps opencode daily output with a single model via modelsUsed", () => {
+    const entries = mapCcusageDaily("opencode", {
+      daily: [
+        {
+          date: "2026-06-15",
+          inputTokens: 500,
+          outputTokens: 250,
+          cacheCreationTokens: 0,
+          cacheReadTokens: 100,
+          totalCost: 3.5,
+          modelsUsed: ["claude-opus-4-8"],
+        },
+      ],
+    });
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toEqual({
+      date: "2026-06-15",
+      tool: "opencode",
+      model: "claude-opus-4-8",
+      inputTokens: 500,
+      outputTokens: 250,
+      cacheCreationTokens: 0,
+      cacheReadTokens: 100,
+      costUSD: 3.5,
+      origin: "cli",
+      verified: false,
+    });
+  });
+
+  it("maps opencode daily output with multiple models as 'unknown'", () => {
+    const entries = mapCcusageDaily("opencode", {
+      daily: [
+        {
+          date: "2026-06-16",
+          inputTokens: 300,
+          outputTokens: 150,
+          cacheCreationTokens: 0,
+          cacheReadTokens: 0,
+          totalCost: 1.2,
+          modelsUsed: ["gpt-5.2-codex", "claude-sonnet-4-6"],
+        },
+      ],
+    });
+    expect(entries).toHaveLength(1);
+    expect(entries[0].model).toBe("unknown");
+    expect(entries[0].tool).toBe("opencode");
+  });
+
+  it("maps opencode daily output with empty modelsUsed as 'unknown'", () => {
+    const entries = mapCcusageDaily("opencode", {
+      daily: [
+        {
+          date: "2026-06-17",
+          inputTokens: 200,
+          outputTokens: 100,
+          cacheCreationTokens: 0,
+          cacheReadTokens: 0,
+          totalCost: 0.5,
+          modelsUsed: [],
+        },
+      ],
+    });
+    expect(entries).toHaveLength(1);
+    expect(entries[0].model).toBe("unknown");
+  });
+
+  it("maps opencode daily output with no modelsUsed field as 'unknown'", () => {
+    const entries = mapCcusageDaily("opencode", {
+      daily: [
+        {
+          date: "2026-06-18",
+          inputTokens: 100,
+          outputTokens: 50,
+          cacheCreationTokens: 0,
+          cacheReadTokens: 0,
+          totalCost: 0.1,
+        },
+      ],
+    });
+    expect(entries).toHaveLength(1);
+    expect(entries[0].model).toBe("unknown");
+  });
+
+  it("dedupes opencode entries sharing the same key", () => {
+    const base: DailyUsageEntry = {
+      date: "2026-06-19",
+      tool: "opencode",
+      model: "claude-opus-4-8",
+      inputTokens: 100,
+      outputTokens: 50,
+      cacheCreationTokens: 0,
+      cacheReadTokens: 0,
+      costUSD: 0.5,
+      origin: "cli",
+      verified: false,
+    };
+    const merged = dedupeDaily([base, { ...base, inputTokens: 200, costUSD: 1.0 }]);
+    expect(merged).toHaveLength(1);
+    expect(merged[0].inputTokens).toBe(300);
+    expect(merged[0].costUSD).toBeCloseTo(1.5);
+  });
+});
+
 describe("dedupe before send (prevents API duplicate-key 500s)", () => {
   const daily = (over: Record<string, unknown> = {}) => ({
     date: "2026-06-09",

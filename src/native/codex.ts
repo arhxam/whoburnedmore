@@ -16,7 +16,7 @@
  */
 import { readdir } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type { DailyUsageEntry } from "../shared.js";
 import { estimateCostUSD } from "../pricing.js";
 import { nativeCachePath, readFilesWithCache } from "./file-cache.js";
@@ -239,7 +239,7 @@ export function aggregateCodexSessions(
 /** Resolve the Codex sessions root (honors CODEX_HOME, default ~/.codex). */
 export function resolveCodexSessionsDir(env = process.env): string {
   const home = env.CODEX_HOME && env.CODEX_HOME.trim() ? env.CODEX_HOME.trim() : join(homedir(), ".codex");
-  return join(home, "sessions");
+  return resolve(home, "sessions");
 }
 
 async function listJsonl(dir: string): Promise<string[]> {

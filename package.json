@@ -11,6 +11,7 @@
   ],
   "scripts": {
     "clean": "node scripts/clean.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
     "build": "npm run clean && esbuild src/index.ts --bundle --platform=node --format=esm --target=node20 --outfile=dist/index.js --external:ccusage --external:picocolors --external:tokscale",
     "test": "vitest run",
     "lint": "tsc -p tsconfig.json --noEmit",

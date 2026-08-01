@@ -29,7 +29,7 @@ contents, or file paths. Run `private` to drop off the board, `remove` to delete
 dashboard and its data, or use `--local` to stay fully offline.
 
 > Want a 100%-local report that makes **no** network calls at all? Use `npx whoburnedmore
-> --local`, which builds an HTML dashboard on your machine and uploads nothing.
+--local`, which builds an HTML dashboard on your machine and uploads nothing.
 
 ## Commands
 
@@ -67,6 +67,7 @@ contains no secrets and no server code — just the client that talks to the pub
 ```bash
 npm install
 npm run build   # bundles src/index.ts -> dist/index.js
+npm run typecheck
 npm test
 ```
 

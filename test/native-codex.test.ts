@@ -5,13 +5,25 @@ import {
   parseCodexRollout,
   resolveCodexSessionsDir,
 } from "../src/native/codex.js";
+import path from "node:path";
 
 const meta = (model: string) =>
-  JSON.stringify({ timestamp: "2026-06-10T12:00:00Z", type: "session_meta", payload: { id: "sess-1", model, model_provider: "openai" } });
+  JSON.stringify({
+    timestamp: "2026-06-10T12:00:00Z",
+    type: "session_meta",
+    payload: { id: "sess-1", model, model_provider: "openai" },
+  });
 const turnCtx = (model: string) =>
-  JSON.stringify({ timestamp: "2026-06-10T12:00:00Z", type: "turn_context", payload: { type: "turn_context", model } });
+  JSON.stringify({
+    timestamp: "2026-06-10T12:00:00Z",
+    type: "turn_context",
+    payload: { type: "turn_context", model },
+  });
 /** A cumulative token_count event (inline-fields layout). */
-const tokenCount = (ts: string, total: { input: number; cached?: number; output: number; reasoning?: number }) =>
+const tokenCount = (
+  ts: string,
+  total: { input: number; cached?: number; output: number; reasoning?: number },
+) =>
   JSON.stringify({
     timestamp: ts,
     type: "event_msg",
@@ -27,7 +39,12 @@ const tokenCount = (ts: string, total: { input: number; cached?: number; output:
     },
   });
 
-const total = (e: { inputTokens: number; outputTokens: number; cacheCreationTokens: number; cacheReadTokens: number }) =>
+const total = (e: {
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
+}) =>
   e.inputTokens + e.outputTokens + e.cacheCreationTokens + e.cacheReadTokens;
 
 describe("parseCodexRollout — cumulative handling", () => {
@@ -69,7 +86,12 @@ describe("parseCodexRollout — cumulative handling", () => {
   it("maps cached input separately without double-counting reasoning output", () => {
     const lines = [
       meta("gpt-5-codex"),
-      tokenCount("2026-06-10T12:05:00Z", { input: 1000, cached: 600, output: 200, reasoning: 80 }),
+      tokenCount("2026-06-10T12:05:00Z", {
+        input: 1000,
+        cached: 600,
+        output: 200,
+        reasoning: 80,
+      }),
     ];
     const [s] = parseCodexRollout(lines);
     expect(s.cacheReadTokens).toBe(600);
@@ -88,7 +110,13 @@ describe("parseCodexRollout — cumulative handling", () => {
       type: "event_msg",
       payload: {
         type: "token_count",
-        info: { total_token_usage: { input_tokens: 300, cached_input_tokens: 100, output_tokens: 90 } },
+        info: {
+          total_token_usage: {
+            input_tokens: 300,
+            cached_input_tokens: 100,
+            output_tokens: 90,
+          },
+        },
       },
     });
     const [s] = parseCodexRollout([meta("gpt-5"), line]);
@@ -113,8 +141,15 @@ describe("parseCodexRollout — cumulative handling", () => {
 
 describe("aggregateCodexSessions", () => {
   it("sums sessions into per-date+model buckets and accumulates turn counts", () => {
-    const sessionA = [meta("gpt-5-codex"), tokenCount("2026-06-10T12:01:00Z", { input: 100, output: 50 })];
-    const sessionB = [meta("gpt-5-codex"), tokenCount("2026-06-10T13:01:00Z", { input: 300, output: 50 }), tokenCount("2026-06-10T13:05:00Z", { input: 400, output: 80 })];
+    const sessionA = [
+      meta("gpt-5-codex"),
+      tokenCount("2026-06-10T12:01:00Z", { input: 100, output: 50 }),
+    ];
+    const sessionB = [
+      meta("gpt-5-codex"),
+      tokenCount("2026-06-10T13:01:00Z", { input: 300, output: 50 }),
+      tokenCount("2026-06-10T13:05:00Z", { input: 400, output: 80 }),
+    ];
     const entries = aggregateCodexSessions([sessionA, sessionB]);
     expect(entries).toHaveLength(1);
     const e = entries[0];
@@ -127,9 +162,18 @@ describe("aggregateCodexSessions", () => {
   });
 
   it("separates different models and dates", () => {
-    const a = [meta("gpt-5-codex"), tokenCount("2026-06-10T12:00:00Z", { input: 10, output: 5 })];
-    const b = [meta("gpt-4o"), tokenCount("2026-06-10T12:00:00Z", { input: 20, output: 5 })];
-    const c = [meta("gpt-5-codex"), tokenCount("2026-06-20T12:00:00Z", { input: 30, output: 5 })];
+    const a = [
+      meta("gpt-5-codex"),
+      tokenCount("2026-06-10T12:00:00Z", { input: 10, output: 5 }),
+    ];
+    const b = [
+      meta("gpt-4o"),
+      tokenCount("2026-06-10T12:00:00Z", { input: 20, output: 5 }),
+    ];
+    const c = [
+      meta("gpt-5-codex"),
+      tokenCount("2026-06-20T12:00:00Z", { input: 30, output: 5 }),
+    ];
     const entries = aggregateCodexSessions([a, b, c]);
     expect(entries).toHaveLength(3);
   });
@@ -137,7 +181,11 @@ describe("aggregateCodexSessions", () => {
 
 describe("resolveCodexSessionsDir", () => {
   it("defaults to ~/.codex/sessions and honors CODEX_HOME", () => {
-    expect(resolveCodexSessionsDir({} as NodeJS.ProcessEnv)).toMatch(/\.codex\/sessions$/);
-    expect(resolveCodexSessionsDir({ CODEX_HOME: "/custom/codex" } as NodeJS.ProcessEnv)).toBe("/custom/codex/sessions");
+    expect(resolveCodexSessionsDir({})).toMatch(/\.codex[\/\\]sessions$/);
+    expect(
+      resolveCodexSessionsDir({
+        CODEX_HOME: "/custom/codex",
+      }),
+    ).toBe(path.resolve("/custom/codex", "sessions"));
   });
 });

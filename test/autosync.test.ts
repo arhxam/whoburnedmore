@@ -31,6 +31,8 @@ import {
   syncIntervalLabel,
 } from "../src/autosync.js";
 
+import path, { posix } from "node:path";
+
 describe("buildLaunchdPlist", () => {
   it("produces a launchd plist that runs the latest npm package on an interval", () => {
     const plist = buildLaunchdPlist(
@@ -49,9 +51,7 @@ describe("buildLaunchdPlist", () => {
     expect(plist).toContain("<string>sync</string>");
     expect(plist).toContain("/home/u/.config/whoburnedmore/sync.log");
     expect(plist).not.toContain("/tmp/");
-    expect(plist).toContain(
-      `<integer>${SYNC_INTERVAL_MINUTES * 60}</integer>`,
-    );
+    expect(plist).toContain(`<integer>${SYNC_INTERVAL_MINUTES * 60}</integer>`);
   });
 
   it("syncs at a sub-hour (15min) cadence by default", () => {
@@ -139,7 +139,10 @@ describe("syncEnv (identity/endpoint env propagation)", () => {
   it("drops a forwarded value containing a newline (cron/systemd are line-oriented)", () => {
     const pairs = syncEnv({
       npmPath: "/usr/bin/npm",
-      env: { WHOBURNEDMORE_API: "https://evil\nMALICIOUS=1", WHOBURNEDMORE_WEB: "https://ok.example" },
+      env: {
+        WHOBURNEDMORE_API: "https://evil\nMALICIOUS=1",
+        WHOBURNEDMORE_WEB: "https://ok.example",
+      },
     });
     const map = Object.fromEntries(pairs);
     expect(map.WHOBURNEDMORE_API).toBeUndefined();
@@ -166,8 +169,13 @@ describe("syncEnv (identity/endpoint env propagation)", () => {
     );
     expect(plist).toContain("<key>WHOBURNEDMORE_CONFIG_DIR</key>");
     expect(plist).toContain("<string>/home/u/.wbm</string>");
-    const service = buildSystemdService(syncCommandArgs("/usr/bin/npm"), envPairs);
-    expect(service).toContain('Environment="WHOBURNEDMORE_CONFIG_DIR=/home/u/.wbm"');
+    const service = buildSystemdService(
+      syncCommandArgs("/usr/bin/npm"),
+      envPairs,
+    );
+    expect(service).toContain(
+      'Environment="WHOBURNEDMORE_CONFIG_DIR=/home/u/.wbm"',
+    );
   });
 
   it("escapes cron `%` and systemd `%` specifiers in values", () => {
@@ -209,10 +217,14 @@ describe("scheduled sync command", () => {
 
   it("covers the real install layouts that launchd/cron strip from PATH", () => {
     // Apple-Silicon Homebrew
-    expect(syncPathEnv("/opt/homebrew/bin/npm").split(":")[0]).toBe("/opt/homebrew/bin");
+    expect(syncPathEnv("/opt/homebrew/bin/npm").split(":")[0]).toBe(
+      "/opt/homebrew/bin",
+    );
     // Intel Homebrew / official .pkg installer (node lands in /usr/local/bin,
     // which launchd's default PATH also excludes).
-    expect(syncPathEnv("/usr/local/bin/npm").split(":")[0]).toBe("/usr/local/bin");
+    expect(syncPathEnv("/usr/local/bin/npm").split(":")[0]).toBe(
+      "/usr/local/bin",
+    );
     // nvm / fnm / volta / asdf: a version-pinned dir nowhere near the standard
     // ones — must still be prepended so `env node` resolves.
     const nvm = syncPathEnv("/Users/me/.nvm/versions/node/v22.3.0/bin/npm");
@@ -235,7 +247,8 @@ describe("scheduled sync command", () => {
   });
 
   it("quotes linux cron command and log paths without shell injection", () => {
-    const logPath = "/home/me/.config/whoburnedmore/sync log'$(touch hacked).log";
+    const logPath =
+      "/home/me/.config/whoburnedmore/sync log'$(touch hacked).log";
     const line = expectedLinuxCronLine({
       npmPath: "/home/me/bin/npm with space",
       logPath,
@@ -247,7 +260,9 @@ describe("scheduled sync command", () => {
   });
 
   it("quotes windows scheduled-task commands", () => {
-    const line = windowsCommandLine(syncCommandArgs("C:\\Program Files\\nodejs\\npm.cmd"));
+    const line = windowsCommandLine(
+      syncCommandArgs("C:\\Program Files\\nodejs\\npm.cmd"),
+    );
     expect(line).toContain('"C:\\Program Files\\nodejs\\npm.cmd"');
     expect(line).toContain('"whoburnedmore@latest"');
     expect(line).toContain('"sync"');
@@ -382,7 +397,7 @@ describe("resolveNpmPath (stable npm path)", () => {
       execPath: "/some/runtime/node",
       platform: "linux",
     });
-    expect(got).toBe("/some/runtime/npm");
+    expect(got).toBe(posix.join("/some/runtime", "npm"));
   });
 
   it("uses npm.cmd next to node.exe on Windows", () => {

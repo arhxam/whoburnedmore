@@ -1,17 +1,49 @@
 name: ci
+
 on:
   push:
     branches: [main]
   pull_request:
+
+# Cancel stale runs for the same branch/PR - thus saves runner minutes on fast pushes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  build-test:
+  # Type-check: platform-independent, run once 
+  typecheck:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
-      - run: npm install
-      - run: npm run build
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
       - run: npm run lint
+
+  # Build + test: full matrix (os + node)
+  build-test:
+    needs: typecheck
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node: [20, 22]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - run: npm ci
+      - run: npm run build
       - run: npm test
