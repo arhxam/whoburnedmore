@@ -177,9 +177,19 @@ ${envEntries}
        interval. Submits are idempotent server-side, so an extra run is safe. -->
   <key>RunAtLoad</key>
   <true/>
-  <!-- Be a good citizen: macOS schedules this with background priority. -->
+  <!-- Standard, NOT Background. ProcessType=Background opts the job into
+       macOS I/O throttling, which is disastrous for a job whose work is almost
+       entirely reading thousands of transcript files: a full collect measured
+       ~51s unthrottled vs ~197s throttled on the same machine. That blows past
+       the collector's own budgets (25s per ccusage child, 45s for the native
+       reader), so every source times out at once, entries comes back empty and
+       the tick submits nothing — it logged "Nothing to burn yet" on 206 of 473
+       runs (~44%) until this was changed. Nice=0 keeps CPU priority neighbourly
+       without throttling the reads. -->
   <key>ProcessType</key>
-  <string>Background</string>
+  <string>Standard</string>
+  <key>Nice</key>
+  <integer>0</integer>
   <key>StandardOutPath</key>
   <string>${xmlEscape(logPath)}</string>
   <key>StandardErrorPath</key>
