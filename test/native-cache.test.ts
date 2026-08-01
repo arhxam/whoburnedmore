@@ -325,4 +325,33 @@ describe("codex native reader through the cache", () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  it("codex: archived_sessions are counted alongside the live sessions dir", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "wbm-codexarchive-"));
+    try {
+      const live = join(dir, "sessions", "2026", "06", "12");
+      const archived = join(dir, "archived_sessions", "2026", "06", "10");
+      await mkdir(live, { recursive: true });
+      await mkdir(archived, { recursive: true });
+      await writeFile(
+        join(live, "rollout-live.jsonl"),
+        codexRollout("gpt-5.3-codex", [{ ts: "2026-06-12T12:00:00Z", input: 60, output: 40 }]),
+      );
+      // Codex migrates finished sessions here; before the fix this whole file
+      // was invisible and its day vanished from the report entirely.
+      await writeFile(
+        join(archived, "rollout-archived.jsonl"),
+        codexRollout("gpt-5.3-codex", [{ ts: "2026-06-10T12:00:00Z", input: 20, output: 10 }]),
+      );
+      const env = { CODEX_HOME: dir, WHOBURNEDMORE_CONFIG_DIR: dir } as NodeJS.ProcessEnv;
+      const out = await collectCodexNative(env, { budgetMs: 5000 });
+      expect(out.found).toBe(true);
+      expect(out.filesScanned).toBe(2);
+      const total = out.entries.reduce((s, e) => s + e.inputTokens + e.outputTokens, 0);
+      expect(total).toBe(130);
+      expect(new Set(out.entries.map((e) => e.date)).size).toBe(2);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });
