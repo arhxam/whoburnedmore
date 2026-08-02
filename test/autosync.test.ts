@@ -32,6 +32,16 @@ import {
 } from "../src/autosync.js";
 
 describe("buildLaunchdPlist", () => {
+  it("does not opt the job into macOS I/O throttling", () => {
+    // ProcessType=Background throttles disk reads, and this job is almost pure
+    // disk reading. Throttled, a full collect overruns the collector's own
+    // budgets (25s per ccusage child, 45s native) and the tick submits nothing.
+    const plist = buildLaunchdPlist(syncCommandArgs("/usr/local/bin/npm"));
+    expect(plist).toContain("<key>ProcessType</key>");
+    expect(plist).toContain("<string>Standard</string>");
+    expect(plist).not.toContain("<string>Background</string>");
+  });
+
   it("produces a launchd plist that runs the latest npm package on an interval", () => {
     const plist = buildLaunchdPlist(
       syncCommandArgs("/usr/local/bin/npm"),

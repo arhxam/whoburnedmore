@@ -236,10 +236,25 @@ export function aggregateCodexSessions(
   return finalizeCodexEntries(acc);
 }
 
+/** Resolve the Codex home (honors CODEX_HOME, default ~/.codex). */
+function resolveCodexHome(env = process.env): string {
+  return env.CODEX_HOME && env.CODEX_HOME.trim() ? env.CODEX_HOME.trim() : join(homedir(), ".codex");
+}
+
 /** Resolve the Codex sessions root (honors CODEX_HOME, default ~/.codex). */
 export function resolveCodexSessionsDir(env = process.env): string {
-  const home = env.CODEX_HOME && env.CODEX_HOME.trim() ? env.CODEX_HOME.trim() : join(homedir(), ".codex");
-  return join(home, "sessions");
+  return join(resolveCodexHome(env), "sessions");
+}
+
+/**
+ * Every root holding Codex rollouts. Codex moves finished sessions out of
+ * `sessions/` into `archived_sessions/`, so reading only the live directory
+ * silently drops most of the history — on a heavy user that was 26 of 41 days.
+ * Both are scanned; a missing directory just yields no files.
+ */
+export function resolveCodexSessionsDirs(env = process.env): string[] {
+  const home = resolveCodexHome(env);
+  return [join(home, "sessions"), join(home, "archived_sessions")];
 }
 
 async function listJsonl(dir: string): Promise<string[]> {
@@ -327,8 +342,8 @@ export async function collectCodexNative(
   env = process.env,
   opts: { budgetMs?: number; now?: () => number; cachePath?: string } = {},
 ): Promise<NativeCollectResult> {
-  const dir = resolveCodexSessionsDir(env);
-  const files = await listJsonl(dir);
+  const dirs = resolveCodexSessionsDirs(env);
+  const files = (await Promise.all(dirs.map(listJsonl))).flat();
   if (files.length === 0) return { entries: [], found: false, filesScanned: 0 };
   const now = opts.now ?? Date.now;
   const res = await readFilesWithCache<CachedSession>({

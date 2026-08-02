@@ -2,17 +2,26 @@ import { describe, expect, it } from "vitest";
 import {
   capByTokens,
   ccusageClaudeEnv,
+  ccusageFallbackSources,
+  CCUSAGE_AGGREGATE_TIMEOUT_MS,
+  CCUSAGE_FALLBACK_TIMEOUT_MS,
+  CCUSAGE_TIMEOUT_MS,
   dedupeBlocks,
   dedupeDaily,
   dedupeSessions,
   isAuthoritativeScan,
+  isRetryableCcusageFailure,
   mapCcusageBlocks,
   mapCcusageDaily,
   mapCcusageSessions,
+  NATIVE_COVERED_SOURCES,
   selectSourceEntries,
 } from "../src/collect.js";
 import type { DailyUsageEntry } from "../src/shared.js";
-import type { NativeCollectResult } from "../src/native/claude.js";
+import {
+  NATIVE_READ_BUDGET_MS,
+  type NativeCollectResult,
+} from "../src/native/claude.js";
 
 const nativeEntry = (tool: string, requestCount: number): DailyUsageEntry => ({
   date: "2026-06-10",
@@ -115,6 +124,76 @@ describe("selectSourceEntries", () => {
     const native = { claude: found([nativeEntry("claude", 1)]), codex: found([nativeEntry("codex", 1)]) };
     const gemini = selectSourceEntries("gemini", [ccEntry("gemini")], native);
     expect(gemini[0].model).toBe("fallback-model");
+  });
+});
+
+describe("ccusageFallbackSources (deferred fallback probing)", () => {
+  // The regression these guard: ccusage used to probe claude/codex in the same
+  // parallel burst as the native readers, so a heavy machine ran two full
+  // passes over the same multi-GB corpus at once. The contention pushed the
+  // readers past their budget AND killed the shorter-capped fallback, and the
+  // source vanished from the payload entirely (issue #2).
+  const winner = { claude: found([nativeEntry("claude", 5)]), codex: found([nativeEntry("codex", 5)]) };
+
+  it("probes nothing when both native readers produced entries", () => {
+    expect(ccusageFallbackSources(winner)).toEqual([]);
+  });
+
+  it("probes only the source whose native reader came back empty", () => {
+    expect(ccusageFallbackSources({ ...winner, claude: notFound })).toEqual(["claude"]);
+    expect(ccusageFallbackSources({ ...winner, codex: notFound })).toEqual(["codex"]);
+  });
+
+  it("probes a source that found files but no usable entries", () => {
+    expect(ccusageFallbackSources({ ...winner, claude: found([]) })).toEqual(["claude"]);
+  });
+
+  it("probes a source whose native reader timed out or threw", () => {
+    const bailed: NativeCollectResult = { entries: [], found: false, filesScanned: 3, timedOut: true };
+    expect(ccusageFallbackSources({ claude: bailed, codex: bailed })).toEqual(["claude", "codex"]);
+  });
+
+  it("never proposes a fallback probe for a source ccusage owns outright", () => {
+    const all = ccusageFallbackSources({ claude: notFound, codex: notFound });
+    expect(all.every((s) => NATIVE_COVERED_SOURCES.has(s))).toBe(true);
+    expect(all).not.toContain("gemini");
+  });
+});
+
+describe("ccusage fallback budget", () => {
+  it("is never shorter than the native reader it stands in for", () => {
+    // A fallback that gives up sooner than the reader it replaces cannot rescue
+    // the run it exists for: a corpus too big for the reader is then by
+    // construction too big for the fallback, and the source is dropped.
+    expect(CCUSAGE_FALLBACK_TIMEOUT_MS).toBeGreaterThanOrEqual(NATIVE_READ_BUDGET_MS);
+    expect(CCUSAGE_FALLBACK_TIMEOUT_MS).toBeGreaterThan(CCUSAGE_TIMEOUT_MS);
+  });
+
+  it("gives the session/blocks aggregate read a much longer budget than a per-source probe", () => {
+    // session/blocks each re-read every agent's transcripts in one child, so the
+    // short per-source cap timed them out and payload.sessions came back empty.
+    expect(CCUSAGE_AGGREGATE_TIMEOUT_MS).toBeGreaterThan(CCUSAGE_TIMEOUT_MS);
+  });
+});
+
+describe("isRetryableCcusageFailure", () => {
+  it("does NOT retry our own timeout", () => {
+    // Deterministic: the corpus doesn't fit the budget, so a retry burns a
+    // second full budget of CPU to fail identically — starving the native
+    // readers running alongside on the very machine already struggling.
+    expect(isRetryableCcusageFailure({ killed: true, signal: "SIGTERM", code: null })).toBe(false);
+  });
+
+  it("retries a spawn failure", () => {
+    expect(isRetryableCcusageFailure({ code: "ENOENT" })).toBe(true);
+  });
+
+  it("retries an external kill (not ours)", () => {
+    expect(isRetryableCcusageFailure({ killed: false, signal: "SIGKILL" })).toBe(true);
+  });
+
+  it("does NOT retry a clean non-zero exit", () => {
+    expect(isRetryableCcusageFailure({ code: 1, signal: null })).toBe(false);
   });
 });
 
