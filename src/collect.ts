@@ -18,6 +18,7 @@ import { collectCursor } from "./cursor.js";
 import {
   collectClaudeNative,
   resolveClaudeConfigRoots,
+  NATIVE_READ_BUDGET_MS,
   type NativeCollectResult,
 } from "./native/claude.js";
 import { collectCodexNative } from "./native/codex.js";
@@ -30,6 +31,31 @@ import {
   reconcileProvenance,
   saveProvenanceStore,
 } from "./provenance-store.js";
+
+/**
+ * Sources our OWN native readers cover. ccusage is only ever a fallback for
+ * these (see `selectSourceEntries`), so `collectAll` no longer probes them in
+ * the parallel phase — doing so re-read the very same multi-GB transcript
+ * corpus concurrently with the reader it exists to back up.
+ */
+export const NATIVE_COVERED_SOURCES = new Set(["claude", "codex"]);
+
+/**
+ * Wall-clock cap for one ccusage probe. Generous for the ordinary case: a
+ * source with no data on disk answers in well under a second, so this only ever
+ * bites a source that really is reading a large corpus.
+ */
+export const CCUSAGE_TIMEOUT_MS = 25_000;
+
+/**
+ * Cap for the claude/codex FALLBACK probe. It re-reads the same corpus the
+ * native reader just failed to finish, so it gets the native reader's budget:
+ * a fallback that gives up sooner than the reader it replaces can never rescue
+ * the run it exists for. (With the old shared 25s cap against a 45s reader, a
+ * corpus too big for the reader was by construction too big for the fallback —
+ * and Claude Code vanished from the payload entirely.)
+ */
+export const CCUSAGE_FALLBACK_TIMEOUT_MS = NATIVE_READ_BUDGET_MS;
 
 /** Sources ccusage can read, in the order we probe them. */
 export const SOURCES = [
@@ -346,11 +372,38 @@ export function selectSourceEntries(
   ccusageEntries: DailyUsageEntry[],
   native: { claude: NativeCollectResult; codex: NativeCollectResult },
 ): DailyUsageEntry[] {
-  if (source === "claude" && native.claude.found && native.claude.entries.length > 0)
+  if (source === "claude" && nativeReaderWon(native.claude))
     return native.claude.entries;
-  if (source === "codex" && native.codex.found && native.codex.entries.length > 0)
+  if (source === "codex" && nativeReaderWon(native.codex))
     return native.codex.entries;
   return ccusageEntries;
+}
+
+/**
+ * Did a native reader produce usable entries? When it did, ccusage is not
+ * consulted for that source at all — which is why `collectAll` can decide
+ * whether the fallback probe is needed BEFORE paying for it.
+ */
+export function nativeReaderWon(result: NativeCollectResult): boolean {
+  return result.found && result.entries.length > 0;
+}
+
+/**
+ * The natively-covered sources that still need a ccusage fallback this run —
+ * i.e. the ones whose native reader came back without usable entries (empty
+ * disk, a timeout, or a throw). Returned in SOURCES order so the fallback pass
+ * is deterministic. Everything else is either already covered natively or was
+ * probed in the parallel phase.
+ */
+export function ccusageFallbackSources(native: {
+  claude: NativeCollectResult;
+  codex: NativeCollectResult;
+}): string[] {
+  return SOURCES.filter(
+    (s) =>
+      NATIVE_COVERED_SOURCES.has(s) &&
+      !nativeReaderWon(s === "claude" ? native.claude : native.codex),
+  );
 }
 
 /**
@@ -367,19 +420,45 @@ export function ccusageClaudeEnv(
   return { ...env, CLAUDE_CONFIG_DIR: resolveClaudeConfigRoots(env).join(",") };
 }
 
+/**
+ * Should a failed ccusage probe be retried once?
+ *
+ * execFile rejects on our own timeout (`killed`), an external signal, a spawn
+ * failure (string `code` like ENOENT), or a clean non-zero exit (numeric
+ * `code`). Only a spawn failure or an EXTERNAL kill is worth retrying — a busy
+ * machine or an OOM-killed pass really can succeed the second time.
+ *
+ * Our OWN timeout is NOT retried. It means the corpus doesn't fit the budget,
+ * which is deterministic: the retry burns another full budget of CPU to fail
+ * identically. That doubled cost is not free — it lands on the exact machine
+ * already struggling and starves the native readers running alongside, making
+ * the silent source drop-out this retry exists to prevent MORE likely. A clean
+ * non-zero exit isn't retried either (keeps "not installed" fast).
+ */
+export function isRetryableCcusageFailure(err: unknown): boolean {
+  const e = err as NodeJS.ErrnoException & {
+    killed?: boolean;
+    signal?: string | null;
+  };
+  if (e.killed === true) return false; // our own timeout — deterministic
+  return e.signal != null || typeof e.code === "string";
+}
+
 async function runCcusageOnce(
   cmd: string,
   args: string[],
   env?: NodeJS.ProcessEnv,
+  timeoutMs: number = CCUSAGE_TIMEOUT_MS,
 ): Promise<{ json: unknown | null; transient: boolean }> {
   try {
     const { stdout } = await execFileAsync(cmd, args, {
       encoding: "utf8",
       maxBuffer: 64 * 1024 * 1024,
-      // A single source shouldn't be able to hang the whole run. 25s is plenty
-      // for a healthy local read; a hung source gets killed and (if transient)
-      // retried once below rather than stalling everything for minutes.
-      timeout: 25_000,
+      // A single source shouldn't be able to hang the whole run: a hung source
+      // gets killed and (if transient) retried once below rather than stalling
+      // everything for minutes. The claude/codex fallback passes a longer cap —
+      // see CCUSAGE_FALLBACK_TIMEOUT_MS.
+      timeout: timeoutMs,
       ...(env ? { env } : {}),
     });
     if (!stdout) return { json: null, transient: false };
@@ -389,14 +468,7 @@ async function runCcusageOnce(
       return { json: null, transient: false };
     }
   } catch (err) {
-    // execFile rejects on timeout (killed by signal), spawn failure (string
-    // `code` like ENOENT), or a clean non-zero exit (numeric `code`). The first
-    // two are transient (a busy machine, an OOM-killed pass) and worth one retry
-    // so a source isn't silently dropped; a clean non-zero exit means the source
-    // genuinely has nothing/errored — don't retry (keeps "not installed" fast).
-    const e = err as NodeJS.ErrnoException & { killed?: boolean; signal?: string | null };
-    const transient = e.killed === true || e.signal != null || typeof e.code === "string";
-    return { json: null, transient };
+    return { json: null, transient: isRetryableCcusageFailure(err) };
   }
 }
 
@@ -404,12 +476,13 @@ async function runCcusage(
   cmd: string,
   args: string[],
   env?: NodeJS.ProcessEnv,
+  timeoutMs: number = CCUSAGE_TIMEOUT_MS,
 ): Promise<unknown | null> {
-  const first = await runCcusageOnce(cmd, args, env);
+  const first = await runCcusageOnce(cmd, args, env, timeoutMs);
   if (first.json !== null || !first.transient) return first.json;
   // One retry on a transient failure so a flaky source stays in the report
   // run-to-run (data consistency) rather than dropping out intermittently.
-  return (await runCcusageOnce(cmd, args, env)).json;
+  return (await runCcusageOnce(cmd, args, env, timeoutMs)).json;
 }
 
 /**
@@ -485,14 +558,26 @@ export async function collectAll(onProgress?: ProgressFn): Promise<CollectResult
   );
 
   const sourceTasks = SOURCES.map(async (source) => {
-    // For Claude, force ccusage to scan both config roots (dual-dir hardening);
-    // other sources inherit the ambient environment.
-    const env = source === "claude" ? ccusageClaudeEnv() : undefined;
-    const json = await runCcusage(
-      cmd,
-      [...prefixArgs, source, "daily", "--json", "--offline"],
-      env,
-    );
+    // claude/codex are read by the native readers above; ccusage is only their
+    // FALLBACK, so it is not probed here. Racing it against the reader it backs
+    // up meant two concurrent full passes over the same multi-GB corpus (plus
+    // the attribution scan over a third) — on a heavy machine that contention
+    // pushed the reader past its budget AND killed the 25s fallback, and the
+    // source silently vanished from the payload. The fallback now runs after
+    // this phase, only if it is actually needed. This stage's tick tracks the
+    // native reader instead, so the bar reflects the work really in flight.
+    if (NATIVE_COVERED_SOURCES.has(source)) {
+      await (source === "claude" ? nativeClaudeTask : nativeCodexTask);
+      tick();
+      return { source, mapped: [] as DailyUsageEntry[] };
+    }
+    const json = await runCcusage(cmd, [
+      ...prefixArgs,
+      source,
+      "daily",
+      "--json",
+      "--offline",
+    ]);
     tick();
     return { source, mapped: json ? mapCcusageDaily(source, json) : [] };
   });
@@ -563,13 +648,32 @@ export async function collectAll(onProgress?: ProgressFn): Promise<CollectResult
   ]);
 
   const native = { claude: nativeClaude, codex: nativeCodex };
+
+  // Deferred ccusage fallback for the natively-covered sources: only for the
+  // ones whose native reader produced nothing usable, and only now that the
+  // parallel phase is done, so the fallback gets the machine to itself. It also
+  // runs on the native reader's budget (CCUSAGE_FALLBACK_TIMEOUT_MS) rather than
+  // the short probe cap. Both together are what keep a heavy Claude Code user's
+  // usage in the payload instead of silently dropping it.
+  const fallbacks = new Map<string, DailyUsageEntry[]>();
+  for (const source of ccusageFallbackSources(native)) {
+    const json = await runCcusage(
+      cmd,
+      [...prefixArgs, source, "daily", "--json", "--offline"],
+      // For Claude, force ccusage to scan both config roots (dual-dir hardening).
+      source === "claude" ? ccusageClaudeEnv() : undefined,
+      CCUSAGE_FALLBACK_TIMEOUT_MS,
+    );
+    fallbacks.set(source, json ? mapCcusageDaily(source, json) : []);
+  }
+
   const entries: DailyUsageEntry[] = [];
   const toolsFound: string[] = [];
   // Re-assemble in SOURCES order so the "from claude, codex, …" line stays stable.
   // For claude/codex the native reader's entries win over ccusage's (see
   // selectSourceEntries); every other source keeps ccusage's mapped entries.
   for (const { source, mapped } of sourceResults) {
-    const chosen = selectSourceEntries(source, mapped, native);
+    const chosen = selectSourceEntries(source, fallbacks.get(source) ?? mapped, native);
     if (chosen.length > 0) {
       entries.push(...chosen);
       toolsFound.push(source);
