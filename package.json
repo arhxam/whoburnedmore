@@ -10,7 +10,7 @@
     "dist/index.js"
   ],
   "scripts": {
-    "build": "rm -rf dist && esbuild src/index.ts --bundle --platform=node --format=esm --target=node20 --outfile=dist/index.js --external:ccusage --external:picocolors --external:tokscale",
+    "build": "node scripts/clean.mjs && esbuild src/index.ts --bundle --platform=node --format=esm --target=node20 --outfile=dist/index.js --external:ccusage --external:picocolors --external:tokscale",
     "test": "vitest run",
     "lint": "tsc -p tsconfig.json --noEmit",
     "smoke:package": "node scripts/smoke-package.mjs",
