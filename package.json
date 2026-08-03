@@ -17,7 +17,7 @@
     "prepublishOnly": "npm run lint && npm run test && npm run build && npm run smoke:package"
   },
   "dependencies": {
-    "ccusage": "20.0.9",
+    "ccusage": "20.0.19",
     "picocolors": "1.1.1"
   },
   "devDependencies": {
