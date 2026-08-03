@@ -1,0 +1,4 @@
+sidecar/dist/
+dist/
+*.xcodeproj/
+build/

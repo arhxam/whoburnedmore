@@ -62,6 +62,12 @@ overridable with `WHOBURNEDMORE_API`.
 This repository exists so you can read exactly what the CLI does before you run it. It
 contains no secrets and no server code — just the client that talks to the public API.
 
+## menubar-app/
+
+[`menubar-app/`](./menubar-app/) is the source for **BurnBar**, a native macOS menu bar
+app that shows live token burn and remaining usage limits across your AI coding tools. See
+[`menubar-app/README.md`](./menubar-app/README.md) for its architecture and build steps.
+
 ## Build
 
 ```bash

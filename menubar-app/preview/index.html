@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BurnBar v2 — UI Preview</title>
+<style>
+  :root {
+    --bg: #131316;
+    --panel: #1c1c21;
+    --panel2: #232329;
+    --border: #2e2e36;
+    --text: #f2f2f4;
+    --muted: #9b9ba4;
+    --faint: #6b6b74;
+    --orange: #ff7a29;
+    --orange-dim: rgba(255,122,41,.45);
+    --green: #4ade80;
+    --amber: #fbbf24;
+    --red: #f87171;
+    --radius: 12px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 14px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", Inter, sans-serif;
+    padding: 32px 24px 80px;
+  }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  h1 .flame { color: var(--orange); }
+  .sub { color: var(--muted); margin-bottom: 28px; }
+  h2 { font-size: 15px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 40px 0 14px; }
+  h2 .n { color: var(--orange); margin-right: 6px; }
+  .note { color: var(--faint); font-size: 12.5px; margin: 6px 0 14px; max-width: 720px; }
+
+  /* ---------- menu bar mock ---------- */
+  .menubar {
+    background: linear-gradient(180deg,#3a3a40,#333338);
+    border-radius: 8px; padding: 5px 14px; display: flex; align-items: center;
+    gap: 22px; justify-content: flex-end; font-size: 13px; margin-bottom: 10px;
+    border: 1px solid var(--border); max-width: 860px;
+  }
+  .mb-item { display: flex; align-items: center; gap: 5px; color: #eee; font-variant-numeric: tabular-nums; }
+  .mb-item.dim { color: #bbb; }
+  .mb-flame { font-size: 13px; }
+  .mb-label { font-size: 11px; color: var(--faint); margin-right: auto; }
+  .mb-item.sel { background: rgba(255,255,255,.18); border-radius: 5px; padding: 1px 7px; }
+  .amber-t { color: var(--amber); } .red-t { color: var(--red); }
+
+  .variants { display: flex; flex-wrap: wrap; gap: 10px; max-width: 860px; }
+  .variant {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 14px; cursor: pointer; display: flex; flex-direction: column; gap: 6px; min-width: 150px;
+  }
+  .variant:hover { border-color: var(--orange-dim); }
+  .variant.active { border-color: var(--orange); }
+  .variant .v-demo { font-size: 13px; display: flex; gap: 5px; align-items: center; font-variant-numeric: tabular-nums; }
+  .variant .v-name { font-size: 11px; color: var(--muted); }
+
+  /* ---------- layout ---------- */
+  .duo { display: flex; gap: 28px; align-items: flex-start; flex-wrap: wrap; }
+
+  /* ---------- popover mock ---------- */
+  .popover {
+    width: 330px; background: var(--panel); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 14px; box-shadow: 0 18px 50px rgba(0,0,0,.5);
+    flex-shrink: 0;
+  }
+  .zone { padding: 8px 0; }
+  .zone + .zone { border-top: 1px solid var(--border); }
+  .zone-h { font-size: 10.5px; text-transform: uppercase; letter-spacing: .1em; color: var(--muted); margin-bottom: 8px; display:flex; justify-content: space-between; align-items:center;}
+  .zone-h .link { color: var(--faint); font-size: 10px; cursor: pointer; text-transform: none; letter-spacing: 0; }
+  .zone-h .link:hover { color: var(--orange); }
+  .hidden { display: none !important; }
+
+  .limit-row { margin-bottom: 9px; }
+  .limit-top { display: flex; justify-content: space-between; align-items: baseline; }
+  .limit-name { font-size: 13px; }
+  .limit-pct { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .bar { height: 5px; background: #303038; border-radius: 3px; margin: 4px 0 3px; overflow: hidden; }
+  .bar > div { height: 100%; border-radius: 3px; }
+  .g { background: var(--green); color: var(--green); } .a { background: var(--amber); color: var(--amber); } .r { background: var(--red); color: var(--red); }
+  .limit-sub { font-size: 11px; color: var(--faint); display: flex; gap: 10px; }
+  .limit-sub .fc { color: var(--amber); }
+
+  .stats { display: flex; gap: 22px; margin-bottom: 8px; }
+  .stat-big { font-size: 21px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .stat-cap { font-size: 11px; color: var(--muted); }
+  .spark { display: flex; align-items: flex-end; gap: 3px; height: 34px; margin-top: 6px; }
+  .spark div { flex: 1; background: rgba(255,122,41,.45); border-radius: 2px; }
+  .spark div:last-child { background: var(--orange); }
+  .spark div:hover { background: var(--orange); }
+
+  .tool-row { display: flex; justify-content: space-between; font-size: 13px; padding: 2.5px 0; }
+  .tool-row .t-val { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .tool-bar { height: 3px; background: rgba(255,122,41,.25); border-radius: 2px; margin: 1px 0 4px; }
+  .tool-bar > div { height: 100%; background: var(--orange-dim); border-radius: 2px; }
+  .models { font-size: 11px; color: var(--faint); margin-top: 4px; }
+
+  .session-row { display:flex; justify-content: space-between; font-size: 12.5px; padding: 2.5px 0; color: var(--muted); }
+  .session-row .s-name { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px;}
+
+  .wbm { display: flex; align-items: center; gap: 8px; font-size: 13px; padding-top: 8px; }
+  .wbm .trophy { color: var(--orange); }
+  .wbm .rank { font-weight: 700; margin-left: auto; }
+  .wbm .drank { color: var(--muted); font-size: 12px; }
+  .wbm-cta {
+    display: flex; flex-direction: column; gap: 6px; background: var(--panel2);
+    border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin-top: 6px;
+  }
+  .wbm-cta b { font-size: 13px; }
+  .wbm-cta span { font-size: 12px; color: var(--muted); }
+  .btn {
+    background: var(--orange); color: #16120d; font-weight: 600; font-size: 12.5px;
+    border: none; border-radius: 6px; padding: 6px 12px; cursor: pointer; align-self: flex-start;
+  }
+  .btn.ghost { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+  .footer { display: flex; align-items: center; gap: 10px; padding-top: 10px; font-size: 11px; color: var(--faint); }
+  .footer .icons { margin-left: auto; display: flex; gap: 10px; font-size: 13px; }
+  .footer .icons span { cursor: pointer; } .footer .icons span:hover { color: var(--orange); }
+
+  /* ---------- settings mock ---------- */
+  .settings {
+    flex: 1; min-width: 560px; max-width: 720px; background: var(--panel);
+    border: 1px solid var(--border); border-radius: var(--radius);
+    box-shadow: 0 18px 50px rgba(0,0,0,.5); overflow: hidden;
+  }
+  .set-title { padding: 12px 18px; border-bottom: 1px solid var(--border); font-weight: 600; font-size: 13px; display:flex; align-items:center; gap:8px;}
+  .set-title .dot { width: 11px; height: 11px; border-radius: 50%; background: #ff5f57; display:inline-block;}
+  .set-body { display: flex; min-height: 430px; }
+  .set-nav { width: 150px; border-right: 1px solid var(--border); padding: 10px 8px; display: flex; flex-direction: column; gap: 2px; }
+  .set-nav button {
+    background: none; border: none; color: var(--muted); text-align: left; font-size: 13px;
+    padding: 7px 10px; border-radius: 6px; cursor: pointer;
+  }
+  .set-nav button.on { background: var(--panel2); color: var(--text); }
+  .set-nav button:hover { color: var(--text); }
+  .set-pane { flex: 1; padding: 16px 20px; display: none; }
+  .set-pane.on { display: block; }
+  .set-group { margin-bottom: 18px; }
+  .set-group > .g-title { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--faint); margin-bottom: 8px; }
+  .opt { display: flex; align-items: center; gap: 10px; padding: 5px 0; font-size: 13px; }
+  .opt .desc { color: var(--faint); font-size: 11.5px; margin-left: auto; text-align: right; max-width: 280px;}
+  .opt input[type=checkbox] { accent-color: var(--orange); width: 15px; height: 15px; }
+  .opt select, .opt input[type=number] {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 3px 8px; font-size: 12.5px;
+  }
+  .pill-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px;}
+  .pill { border: 1px solid var(--border); border-radius: 999px; padding: 3px 11px; font-size: 12px; color: var(--muted); cursor: pointer; }
+  .pill.on { border-color: var(--orange); color: var(--orange); }
+  .badge { font-size: 10px; border: 1px solid var(--orange-dim); color: var(--orange); border-radius: 4px; padding: 1px 5px; margin-left: 6px; vertical-align: 1px;}
+  .kbd { background: var(--panel2); border: 1px solid var(--border); border-radius: 4px; padding: 0 5px; font-size: 11px; }
+
+  /* onboarding */
+  .onb { width: 380px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 22px; box-shadow: 0 18px 50px rgba(0,0,0,.5); }
+  .onb h3 { font-size: 17px; margin-bottom: 6px; }
+  .onb p { color: var(--muted); font-size: 13px; margin-bottom: 12px; }
+  .onb .found { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0 16px; }
+  .onb .chip { background: var(--panel2); border: 1px solid var(--border); border-radius: 999px; padding: 4px 12px; font-size: 12.5px; display: flex; gap: 6px; align-items: center;}
+  .onb .chip .ok { color: var(--green); }
+  .onb .row { display: flex; gap: 10px; margin-top: 8px; }
+</style>
+</head>
+<body>
+
+<h1><span class="flame">🔥</span> BurnBar v2 — interactive preview</h1>
+<div class="sub">Everything here is a proposal. In section 2, the settings checkboxes on the right <b>live-toggle</b> the popover on the left — play with it and note what you want in/out.</div>
+
+<!-- ============ 1. MENU BAR ============ -->
+<h2><span class="n">1</span>Menu bar — pick the default text mode</h2>
+<div class="note">Click a variant to see it in the fake menu bar. All modes stay switchable in Settings; this only picks the <i>default</i>. The "session status" mode is new — it's the thing you said you use most: your Claude 5h window, right in the bar.</div>
+<div class="menubar" id="mb">
+  <span class="mb-label">preview</span>
+  <span class="mb-item sel" id="mb-demo"><span class="mb-flame">🔥</span><span id="mb-text">53% · 3h28m</span></span>
+  <span class="mb-item dim">◐</span><span class="mb-item dim">📶</span><span class="mb-item dim">🔋</span><span class="mb-item dim">Sun 2:29 AM</span>
+</div>
+<div class="variants" id="variants">
+  <div class="variant active" data-text="53% · 3h28m"><span class="v-demo">🔥 53% · 3h28m</span><span class="v-name">Session status (5h window % + reset) — NEW</span></div>
+  <div class="variant" data-text="147.7M"><span class="v-demo">🔥 147.7M</span><span class="v-name">Today's tokens (current default)</span></div>
+  <div class="variant" data-text="53%"><span class="v-demo">🔥 53%</span><span class="v-name">Tightest limit %</span></div>
+  <div class="variant" data-text="$185"><span class="v-demo">🔥 $185</span><span class="v-name">Today's cost</span></div>
+  <div class="variant" data-text="147.7M · 53%"><span class="v-demo">🔥 147.7M · 53%</span><span class="v-name">Tokens + limit combo — NEW</span></div>
+  <div class="variant" data-text=""><span class="v-demo">🔥</span><span class="v-name">Icon only</span></div>
+  <div class="variant" data-text="⚠ 96% · 22m"><span class="v-demo">🔥 <span class="red-t">96% · 22m</span></span><span class="v-name">(auto) critical state — red + countdown</span></div>
+</div>
+
+<!-- ============ 2. POPOVER + SETTINGS ============ -->
+<h2><span class="n">2</span>Popover v2 + the new Settings window (linked live)</h2>
+<div class="note">Settings is now a real, <b>big window that opens centered on the screen you're on</b> (the current tiny off-screen dialog is a macOS Settings-scene bug — replaced with our own window). The "Popover sections" pane toggles what you see on the left, exactly like the real app will.</div>
+
+<div class="duo">
+  <!-- POPOVER -->
+  <div class="popover" id="pop">
+    <div class="zone" id="z-limits">
+      <div class="zone-h">Limits <span class="link">claude.ai/usage ↗</span></div>
+      <div class="limit-row" id="row-claude5h">
+        <div class="limit-top"><span class="limit-name">Claude · 5h window</span><span class="limit-pct g">53%</span></div>
+        <div class="bar"><div class="g" style="width:53%"></div></div>
+        <div class="limit-sub"><span>resets in 3h 28m</span><span class="fc" id="fc-claude">cap ~6:40 PM at this pace</span></div>
+      </div>
+      <div class="limit-row" id="row-claudewk">
+        <div class="limit-top"><span class="limit-name">Claude · weekly</span><span class="limit-pct g">45%</span></div>
+        <div class="bar"><div class="g" style="width:45%"></div></div>
+        <div class="limit-sub"><span>resets in 5d 14h</span></div>
+      </div>
+      <div class="limit-row" id="row-claudemodel">
+        <div class="limit-top"><span class="limit-name">Claude · Fable weekly</span><span class="limit-pct a">84%</span></div>
+        <div class="bar"><div class="a" style="width:84%"></div></div>
+        <div class="limit-sub"><span>resets in 5d 14h</span><span class="fc">⚠ hits cap Tue at this pace</span></div>
+      </div>
+      <div class="limit-row" id="row-codex">
+        <div class="limit-top"><span class="limit-name">Codex · session</span><span class="limit-pct g">12%</span></div>
+        <div class="bar"><div class="g" style="width:12%"></div></div>
+        <div class="limit-sub"><span>resets in 4h 02m</span></div>
+      </div>
+      <div class="limit-row" id="row-cursor-lim">
+        <div class="limit-top"><span class="limit-name">Cursor · plan usage</span><span class="limit-pct g">31%</span></div>
+        <div class="bar"><div class="g" style="width:31%"></div></div>
+        <div class="limit-sub"><span>renews Aug 14</span><span class="badge" style="border:none">NEW</span></div>
+      </div>
+    </div>
+
+    <div class="zone" id="z-burn">
+      <div class="zone-h">Burn <span class="link" id="burn-period">today ▾</span></div>
+      <div class="stats">
+        <div><div class="stat-big">147.7M</div><div class="stat-cap">today · $185</div></div>
+        <div><div class="stat-big">2.9B</div><div class="stat-cap">this week · $2,412</div></div>
+        <div id="stat-streak"><div class="stat-big">🔥 12</div><div class="stat-cap">day streak</div></div>
+      </div>
+      <div class="spark" id="spark"></div>
+    </div>
+
+    <div class="zone" id="z-tools">
+      <div class="zone-h">Top tools today</div>
+      <div class="tool-row"><span>claude</span><span class="t-val">128.3M</span></div>
+      <div class="tool-bar"><div style="width:87%"></div></div>
+      <div class="tool-row"><span>codex</span><span class="t-val">14.1M</span></div>
+      <div class="tool-bar"><div style="width:10%"></div></div>
+      <div class="tool-row"><span>cursor</span><span class="t-val">5.3M</span></div>
+      <div class="tool-bar"><div style="width:4%"></div></div>
+      <div class="models">claude-fable-5 · claude-opus-4-8 · gpt-5.2</div>
+    </div>
+
+    <div class="zone" id="z-sessions">
+      <div class="zone-h">Biggest sessions today <span class="badge" style="border:none">NEW</span></div>
+      <div class="session-row"><span class="s-name">acme-web — dashboard build</span><span>96.2M</span></div>
+      <div class="session-row"><span class="s-name">x-tweet-preview — v1.4.1</span><span>31.9M</span></div>
+      <div class="session-row"><span class="s-name">save-your-shit — photos audit</span><span>11.4M</span></div>
+    </div>
+
+    <div class="zone" id="z-wbm">
+      <div class="wbm"><span class="trophy">🏆</span><b>@arhamamiin</b><span class="rank">#14</span><span class="drank">today #4 ↑2</span></div>
+      <div class="session-row" id="wbm-rival"><span class="s-name">@dax is 2.1M ahead of you today</span><span class="link" style="color:var(--orange);cursor:pointer">beat him ↗</span></div>
+    </div>
+
+    <div class="zone hidden" id="z-wbm-cta">
+      <div class="wbm-cta">
+        <b>See how you rank 🏆</b>
+        <span>Your burn vs every AI coder on whoburnedmore.com — free, one command, no signup to browse.</span>
+        <div style="display:flex;gap:8px"><button class="btn">Join the leaderboard</button><button class="btn ghost">Not now</button></div>
+      </div>
+    </div>
+
+    <div class="footer">
+      <span>updated 2:32 AM</span>
+      <div class="icons" title="pause · website · settings · quit"><span title="Pause collection">⏸</span><span title="Open whoburnedmore.com">🌐</span><span title="Settings">⚙︎</span><span title="Quit">⏻</span></div>
+    </div>
+  </div>
+
+  <!-- SETTINGS -->
+  <div class="settings">
+    <div class="set-title"><span class="dot"></span> BurnBar Settings <span style="color:var(--faint);font-weight:400;margin-left:6px">— opens centered on the ACTIVE screen, 720×480</span></div>
+    <div class="set-body">
+      <div class="set-nav" id="setnav">
+        <button class="on" data-pane="p-general">General</button>
+        <button data-pane="p-menubar">Menu bar</button>
+        <button data-pane="p-popover">Popover sections</button>
+        <button data-pane="p-providers">Providers</button>
+        <button data-pane="p-notif">Notifications</button>
+        <button data-pane="p-account">Account</button>
+      </div>
+
+      <div class="set-pane on" id="p-general">
+        <div class="set-group"><div class="g-title">Startup</div>
+          <label class="opt"><input type="checkbox" checked> Launch at login</label>
+          <label class="opt"><input type="checkbox" checked> Check for updates automatically (Sparkle)</label>
+        </div>
+        <div class="set-group"><div class="g-title">Refresh</div>
+          <div class="opt">Burn data <select><option>Real-time (file watch)</option><option>Every minute</option><option>Every 5 min</option></select></div>
+          <div class="opt">Limits polling <select><option>Every 60s</option><option>Every 2 min</option><option>Every 5 min</option></select><span class="desc">also refreshes on wake + popover open</span></div>
+          <label class="opt"><input type="checkbox"> Pause collection on battery power <span class="desc">saves energy on the go</span></label>
+        </div>
+        <div class="set-group"><div class="g-title">Shortcuts</div>
+          <div class="opt">Toggle popover <span class="kbd">⌥ + B</span><span class="desc">global hotkey, configurable</span></div>
+        </div>
+      </div>
+
+      <div class="set-pane" id="p-menubar">
+        <div class="set-group"><div class="g-title">Show in menu bar</div>
+          <div class="pill-row" id="mbpills">
+            <span class="pill on">Session status</span><span class="pill">Today's tokens</span><span class="pill">Limit %</span><span class="pill">Cost</span><span class="pill">Tokens + limit</span><span class="pill">Icon only</span>
+          </div>
+          <label class="opt" style="margin-top:8px"><input type="checkbox" checked> Turn amber at 80%, red at 95% <span class="desc">icon + text tint</span></label>
+          <label class="opt"><input type="checkbox" checked> Show reset countdown when critical</label>
+          <label class="opt"><input type="checkbox"> ⌥-click cycles display mode</label>
+        </div>
+      </div>
+
+      <div class="set-pane" id="p-popover">
+        <div class="set-group"><div class="g-title">Sections — toggles apply to the preview on the left</div>
+          <label class="opt"><input type="checkbox" checked data-toggle="z-limits"> Limits (Claude / Codex / Cursor windows)</label>
+          <label class="opt"><input type="checkbox" checked data-toggle="fc-claude"> &nbsp;&nbsp;↳ pace forecast lines ("cap ~6:40 PM")</label>
+          <label class="opt"><input type="checkbox" checked data-toggle="row-claudemodel"> &nbsp;&nbsp;↳ per-model weekly rows (Fable/Opus)</label>
+          <label class="opt"><input type="checkbox" checked data-toggle="z-burn"> Burn (today / week / sparkline)</label>
+          <label class="opt"><input type="checkbox" checked data-toggle="stat-streak"> &nbsp;&nbsp;↳ day streak</label>
+          <label class="opt"><input type="checkbox" checked data-toggle="z-tools"> Top tools + models</label>
+          <label class="opt"><input type="checkbox" checked data-toggle="z-sessions"> Biggest sessions today</label>
+          <label class="opt"><input type="checkbox" checked data-toggle="z-wbm"> whoburnedmore rank strip</label>
+          <label class="opt"><input type="checkbox" checked data-toggle="wbm-rival"> &nbsp;&nbsp;↳ rival line ("@dax is 2.1M ahead")</label>
+        </div>
+      </div>
+
+      <div class="set-pane" id="p-providers">
+        <div class="set-group"><div class="g-title">Track burn from</div>
+          <label class="opt"><input type="checkbox" checked> Claude Code <span class="desc">~/.claude transcripts</span></label>
+          <label class="opt"><input type="checkbox" checked> Codex <span class="desc">~/.codex sessions</span></label>
+          <label class="opt"><input type="checkbox" checked> Cursor <span class="desc">local token → dashboard API</span></label>
+          <label class="opt"><input type="checkbox" checked> Cline / Roo <span class="desc">VS Code storage</span></label>
+          <label class="opt"><input type="checkbox" checked> Continue <span class="desc">~/.continue</span></label>
+          <label class="opt"><input type="checkbox" checked> Gemini, Copilot, opencode, amp… <span class="desc">ccusage long tail (12 more)</span></label>
+        </div>
+        <div class="set-group"><div class="g-title">Limits</div>
+          <label class="opt"><input type="checkbox" checked> Claude windows <span class="desc">one-time Keychain approval</span></label>
+          <label class="opt"><input type="checkbox" checked> Codex windows <span class="desc">no auth needed</span></label>
+          <label class="opt"><input type="checkbox" checked> Cursor plan usage <span class="badge">NEW</span></label>
+        </div>
+      </div>
+
+      <div class="set-pane" id="p-notif">
+        <div class="set-group"><div class="g-title">Alert me when</div>
+          <label class="opt"><input type="checkbox" checked> a limit window crosses <select><option>80%</option><option>70%</option><option>90%</option></select></label>
+          <label class="opt"><input type="checkbox" checked> a limit window crosses <select><option>95%</option><option>90%</option><option>98%</option></select> <span class="desc">plays sound</span></label>
+          <label class="opt"><input type="checkbox" checked> a window resets <span class="desc">"you're back"</span></label>
+          <label class="opt"><input type="checkbox"> projected to hit cap within <select><option>30 min</option><option>1 h</option><option>2 h</option></select> <span class="badge">NEW</span></label>
+          <label class="opt"><input type="checkbox"> someone overtakes me on the daily board <span class="badge">NEW</span></label>
+          <label class="opt"><input type="checkbox"> daily digest at <select><option>9:00 PM</option><option>6:00 PM</option></select> <span class="desc">"you burned 147M today, #4"</span> <span class="badge">NEW</span></label>
+        </div>
+      </div>
+
+      <div class="set-pane" id="p-account">
+        <div class="set-group"><div class="g-title">whoburnedmore</div>
+          <div class="opt">Connected as <b>@arhamamiin</b> <span class="desc">via ~/.config/whoburnedmore</span></div>
+          <label class="opt"><input type="checkbox" checked> Show rank in popover</label>
+          <label class="opt"><input type="checkbox" checked> Sync my usage to the leaderboard <span class="desc">runs the same 15-min sync the CLI uses</span></label>
+          <div class="opt"><button class="btn ghost">Open my profile ↗</button><button class="btn ghost">Disconnect</button></div>
+        </div>
+        <div class="set-group"><div class="g-title">If NOT connected (what new users see)</div>
+          <div class="opt"><button class="btn">Connect / create account</button><span class="desc">device-flow sign-in, in-app, ~20s. Everything else works without it.</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 3. ONBOARDING ============ -->
+<h2><span class="n">3</span>First-run for someone who's never heard of whoburnedmore</h2>
+<div class="note">Zero-config: the app detects tools and just starts. whoburnedmore is a soft, dismissible upsell — never a wall.</div>
+<div class="duo">
+  <div class="onb">
+    <h3>🔥 BurnBar is watching your burn</h3>
+    <p>Found these AI coding tools on your Mac — tracking starts now, all on-device:</p>
+    <div class="found">
+      <span class="chip"><span class="ok">✓</span> Claude Code</span>
+      <span class="chip"><span class="ok">✓</span> Codex</span>
+      <span class="chip"><span class="ok">✓</span> Cursor</span>
+      <span class="chip" style="opacity:.5">Cline — not found</span>
+    </div>
+    <p>Want your Claude 5h-window limits too? That needs one Keychain approval (read-only, token never leaves your Mac).</p>
+    <div class="row"><button class="btn">Enable limits</button><button class="btn ghost">Skip for now</button></div>
+  </div>
+  <div class="onb">
+    <h3>🏆 Optional: get ranked</h3>
+    <p>whoburnedmore.com is the public leaderboard of AI token burners. Joining is one click here (device sign-in) — or ignore this forever, BurnBar works fully without it.</p>
+    <div class="row"><button class="btn">See the leaderboard ↗</button><button class="btn ghost">Maybe later</button></div>
+  </div>
+</div>
+
+<script>
+  // sparkline bars
+  const heights = [8,30,14,4,5,4,12,5,7,9,18,28,22,34];
+  const spark = document.getElementById('spark');
+  heights.forEach(h => { const d = document.createElement('div'); d.style.height = h + 'px'; spark.appendChild(d); });
+
+  // menu bar variants
+  const mbText = document.getElementById('mb-text');
+  document.querySelectorAll('.variant').forEach(v => v.addEventListener('click', () => {
+    document.querySelectorAll('.variant').forEach(x => x.classList.remove('active'));
+    v.classList.add('active');
+    const t = v.dataset.text;
+    mbText.textContent = t;
+    mbText.className = t.startsWith('⚠') ? 'red-t' : '';
+    mbText.style.display = t ? '' : 'none';
+  }));
+
+  // settings nav
+  document.querySelectorAll('#setnav button').forEach(b => b.addEventListener('click', () => {
+    document.querySelectorAll('#setnav button').forEach(x => x.classList.remove('on'));
+    document.querySelectorAll('.set-pane').forEach(x => x.classList.remove('on'));
+    b.classList.add('on');
+    document.getElementById(b.dataset.pane).classList.add('on');
+  }));
+
+  // live popover toggles
+  document.querySelectorAll('[data-toggle]').forEach(cb => cb.addEventListener('change', () => {
+    document.getElementById(cb.dataset.toggle).classList.toggle('hidden', !cb.checked);
+  }));
+
+  // wbm strip vs CTA demo: uncheck the strip -> show the join CTA (new-user view)
+  document.querySelector('[data-toggle="z-wbm"]').addEventListener('change', (e) => {
+    document.getElementById('z-wbm-cta').classList.toggle('hidden', e.target.checked);
+  });
+
+  // pills
+  document.querySelectorAll('#mbpills .pill').forEach(p => p.addEventListener('click', () => {
+    document.querySelectorAll('#mbpills .pill').forEach(x => x.classList.remove('on'));
+    p.classList.add('on');
+  }));
+</script>
+</body>
+</html>

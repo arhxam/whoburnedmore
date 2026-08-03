@@ -1,0 +1,20 @@
+{
+  "name": "@whoburnedmore/burnbar",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "BurnBar — native macOS menu bar app for live AI token burn + usage limits. Swift shell + bun-compiled sidecar.",
+  "scripts": {
+    "build:sidecar": "bun build --compile --outfile sidecar/dist/burnbar-sidecar sidecar/src/main.ts",
+    "test": "vitest run --root sidecar"
+  },
+  "dependencies": {
+    "ccusage": "20.0.9",
+    "picocolors": "^1.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}
