@@ -16,7 +16,7 @@
  */
 import { readdir } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type { DailyUsageEntry } from "../shared.js";
 import { estimateCostUSD } from "../pricing.js";
 import { nativeCachePath, readFilesWithCache } from "./file-cache.js";
@@ -243,7 +243,7 @@ function resolveCodexHome(env = process.env): string {
 
 /** Resolve the Codex sessions root (honors CODEX_HOME, default ~/.codex). */
 export function resolveCodexSessionsDir(env = process.env): string {
-  return join(resolveCodexHome(env), "sessions");
+  return resolve(resolveCodexHome(env), "sessions");
 }
 
 /**

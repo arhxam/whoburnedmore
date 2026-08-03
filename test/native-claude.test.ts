@@ -275,6 +275,6 @@ describe("resolveClaudeProjectDirs", () => {
     const dirs = resolveClaudeProjectDirs({
       CLAUDE_CONFIG_DIR: "/a/one, /b/two",
     } as NodeJS.ProcessEnv);
-    expect(dirs).toEqual(["/a/one/projects", "/b/two/projects"]);
+    expect(dirs).toEqual([join("/a/one", "projects"), join("/b/two", "projects")]);
   });
 });

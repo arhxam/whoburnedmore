@@ -1,6 +1,6 @@
 {
   "name": "whoburnedmore",
-  "version": "0.9.18",
+  "version": "0.9.19",
   "description": "Find out who burned more — submit your AI coding-agent token usage to the public leaderboard at whoburnedmore.com",
   "type": "module",
   "bin": {
@@ -10,14 +10,14 @@
     "dist/index.js"
   ],
   "scripts": {
-    "build": "rm -rf dist && esbuild src/index.ts --bundle --platform=node --format=esm --target=node20 --outfile=dist/index.js --external:ccusage --external:picocolors --external:tokscale",
+    "build": "node scripts/clean.mjs && esbuild src/index.ts --bundle --platform=node --format=esm --target=node20 --outfile=dist/index.js --external:ccusage --external:picocolors --external:tokscale",
     "test": "vitest run",
     "lint": "tsc -p tsconfig.json --noEmit",
     "smoke:package": "node scripts/smoke-package.mjs",
     "prepublishOnly": "npm run lint && npm run test && npm run build && npm run smoke:package"
   },
   "dependencies": {
-    "ccusage": "20.0.9",
+    "ccusage": "20.0.19",
     "picocolors": "1.1.1"
   },
   "devDependencies": {

@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir, platform } from "node:os";
-import { dirname, join, win32 } from "node:path";
+import { dirname, join, posix, win32 } from "node:path";
 import { defaultConfigDir } from "./config.js";
 
 /**
@@ -254,7 +254,7 @@ export function resolveNpmPath(opts?: {
 
   const sibling = os === "win32"
     ? win32.join(win32.dirname(execPath), "npm.cmd")
-    : join(dirname(execPath), "npm");
+    : posix.join(posix.dirname(execPath), "npm");
   if (check(sibling)) return sibling;
 
   return os === "win32" ? "npm.cmd" : "npm";

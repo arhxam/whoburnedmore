@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import path from "node:path";
 import {
   CODEX_CACHE_VERSION,
   aggregateCodexSessions,
@@ -138,22 +139,24 @@ describe("aggregateCodexSessions", () => {
 
 describe("resolveCodexSessionsDir", () => {
   it("defaults to ~/.codex/sessions and honors CODEX_HOME", () => {
-    expect(resolveCodexSessionsDir({} as NodeJS.ProcessEnv)).toMatch(/\.codex\/sessions$/);
-    expect(resolveCodexSessionsDir({ CODEX_HOME: "/custom/codex" } as NodeJS.ProcessEnv)).toBe("/custom/codex/sessions");
+    expect(resolveCodexSessionsDir({} as NodeJS.ProcessEnv)).toMatch(/\.codex[\/\\]sessions$/);
+    expect(
+      resolveCodexSessionsDir({ CODEX_HOME: "/custom/codex" } as NodeJS.ProcessEnv),
+    ).toBe(path.resolve("/custom/codex", "sessions"));
   });
 });
 
 describe("resolveCodexSessionsDirs", () => {
   it("covers both the live and the archived rollout roots", () => {
     expect(resolveCodexSessionsDirs({ CODEX_HOME: "/custom/codex" } as NodeJS.ProcessEnv)).toEqual([
-      "/custom/codex/sessions",
-      "/custom/codex/archived_sessions",
+      path.join("/custom/codex", "sessions"),
+      path.join("/custom/codex", "archived_sessions"),
     ]);
   });
 
   it("defaults to ~/.codex and keeps the live dir first", () => {
     const dirs = resolveCodexSessionsDirs({} as NodeJS.ProcessEnv);
-    expect(dirs[0]).toMatch(/\.codex\/sessions$/);
-    expect(dirs[1]).toMatch(/\.codex\/archived_sessions$/);
+    expect(dirs[0]).toMatch(/\.codex[\/\\]sessions$/);
+    expect(dirs[1]).toMatch(/\.codex[\/\\]archived_sessions$/);
   });
 });
