@@ -10,6 +10,9 @@ public enum MenuBarMetric: String, CaseIterable, Sendable {
     case todayTokens
     case todayCost
     case weeklyPercent // Claude weekly window %
+    case weeklyReset // time until the weekly window resets
+    case weekTokens
+    case weekCost
     case tightestLimit // worst % across every tracked window
     case none
 
@@ -20,11 +23,13 @@ public enum MenuBarMetric: String, CaseIterable, Sendable {
         public let sessionReset: Date?
         public let sessionTokens: Int?
         public let weeklyPercent: Double?
+        public let weeklyReset: Date?
         public let now: Date
 
         public init(
             summary: Summary?, worstPercent: Double?, sessionPercent: Double?,
             sessionReset: Date?, sessionTokens: Int?, weeklyPercent: Double?,
+            weeklyReset: Date? = nil,
             now: Date = Date()
         ) {
             self.summary = summary
@@ -33,6 +38,7 @@ public enum MenuBarMetric: String, CaseIterable, Sendable {
             self.sessionReset = sessionReset
             self.sessionTokens = sessionTokens
             self.weeklyPercent = weeklyPercent
+            self.weeklyReset = weeklyReset
             self.now = now
         }
     }
@@ -48,6 +54,11 @@ public enum MenuBarMetric: String, CaseIterable, Sendable {
         case .todayTokens: return i.summary.map { Formatters.compactTokens($0.today.totalTokens) }
         case .todayCost: return i.summary.map { Formatters.usd($0.today.costUSD) }
         case .weeklyPercent: return pct(i.weeklyPercent)
+        case .weeklyReset:
+            guard let r = i.weeklyReset else { return nil }
+            return Formatters.countdown(to: r, from: i.now)
+        case .weekTokens: return i.summary.map { Formatters.compactTokens($0.week.totalTokens) }
+        case .weekCost: return i.summary.map { Formatters.usd($0.week.costUSD) }
         case .tightestLimit: return pct(i.worstPercent)
         case .none: return nil
         }
@@ -61,6 +72,9 @@ public enum MenuBarMetric: String, CaseIterable, Sendable {
         case .todayTokens: return "Today's tokens"
         case .todayCost: return "Today's cost"
         case .weeklyPercent: return "Weekly %"
+        case .weeklyReset: return "Weekly reset"
+        case .weekTokens: return "This week's tokens"
+        case .weekCost: return "This week's cost"
         case .tightestLimit: return "Tightest limit %"
         case .none: return "Nothing"
         }
@@ -68,7 +82,12 @@ public enum MenuBarMetric: String, CaseIterable, Sendable {
 
     /// Render a slot pair: nil slots collapse, both nil → nil (icon only).
     public static func pairText(_ slot1: MenuBarMetric, _ slot2: MenuBarMetric, _ i: Inputs) -> String? {
-        let parts = [slot1.text(i), slot2.text(i)].compactMap { $0 }
+        slotsText([slot1, slot2], i)
+    }
+
+    /// Render any ordered slot list: empty/nil slots collapse, all-nil → nil.
+    public static func slotsText(_ slots: [MenuBarMetric], _ i: Inputs) -> String? {
+        let parts = slots.compactMap { $0.text(i) }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 

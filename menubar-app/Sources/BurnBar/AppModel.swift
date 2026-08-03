@@ -83,17 +83,22 @@ final class AppModel: ObservableObject {
         return usage.sevenDay?.utilization
     }
 
+    var weeklyReset: Date? {
+        guard case .ready(let usage) = claudeState else { return nil }
+        return Formatters.parseISO(usage.sevenDay?.resetsAt)
+    }
+
     var menuBarText: String? {
-        MenuBarMetric.pairText(
-            settings.metricSlot1,
-            settings.metricSlot2,
+        MenuBarMetric.slotsText(
+            [settings.metricSlot1, settings.metricSlot2, settings.metricSlot3],
             .init(
                 summary: summary,
                 worstPercent: worstPercent,
                 sessionPercent: sessionPercent,
                 sessionReset: sessionReset,
                 sessionTokens: sessionTokens,
-                weeklyPercent: weeklyPercent
+                weeklyPercent: weeklyPercent,
+                weeklyReset: weeklyReset
             )
         )
     }

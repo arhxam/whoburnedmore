@@ -47,6 +47,49 @@ final class MetricSlotTests: XCTestCase {
         XCTAssertEqual(MenuBarMetric.pairText(.sessionPercent, .todayTokens, inputs(session: nil)), "147.7M")
     }
 
+    func testMetricSlotWeeklyAndWeekMetrics() {
+        var i = inputs()
+        // weeklyReset defaults nil in the helper — provide one via a fresh Inputs.
+        i = .init(
+            summary: i.summary, worstPercent: i.worstPercent, sessionPercent: i.sessionPercent,
+            sessionReset: i.sessionReset, sessionTokens: i.sessionTokens, weeklyPercent: 45,
+            weeklyReset: Date(timeIntervalSince1970: 2_000_000 + 3 * 86_400 + 7_200),
+            now: Date(timeIntervalSince1970: 2_000_000)
+        )
+        XCTAssertEqual(MenuBarMetric.weeklyReset.text(i), "3d 2h")
+        XCTAssertEqual(MenuBarMetric.weeklyPercent.text(i), "45%")
+        // week totals are zero in the fixture summary → formatted, not nil
+        XCTAssertEqual(MenuBarMetric.weekTokens.text(i), "0")
+        XCTAssertEqual(MenuBarMetric.weekCost.text(i), "$0.00")
+        XCTAssertNil(MenuBarMetric.weeklyReset.text(inputs())) // no reset → collapses
+    }
+
+    func testMetricSlotTripleCombination() {
+        let i = inputs()
+        XCTAssertEqual(
+            MenuBarMetric.slotsText([.sessionPercent, .sessionCountdown, .todayTokens], i),
+            "53% · 1h 0m · 147.7M"
+        )
+        XCTAssertEqual(MenuBarMetric.slotsText([.todayTokens, .none, .none], i), "147.7M")
+        XCTAssertNil(MenuBarMetric.slotsText([.none, .none, .none], i))
+        // A nil-valued middle slot collapses cleanly.
+        XCTAssertEqual(
+            MenuBarMetric.slotsText([.sessionPercent, .weeklyReset, .todayCost], i),
+            "53% · $185"
+        )
+    }
+
+    func testMetricSlotThirdSlotDefaultsToNothing() {
+        let d = UserDefaults(suiteName: "bb-slot3-test-\(UUID().uuidString)")!
+        let store = MainActor.assumeIsolated { SettingsStore(defaults: d) }
+        MainActor.assumeIsolated {
+            XCTAssertEqual(store.metricSlot3, MenuBarMetric.none)
+            store.metricSlot3 = .weeklyReset
+        }
+        let reloaded = MainActor.assumeIsolated { SettingsStore(defaults: d) }
+        MainActor.assumeIsolated { XCTAssertEqual(reloaded.metricSlot3, .weeklyReset) }
+    }
+
     func testMetricSlotLegacyMigration() {
         XCTAssertEqual(MenuBarMetric.migrate(from: .sessionStatus).0, .sessionPercent)
         XCTAssertEqual(MenuBarMetric.migrate(from: .sessionStatus).1, .sessionCountdown)

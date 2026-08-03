@@ -119,7 +119,7 @@ struct SettingsRootView: View {
                     .buttonStyle(.plain)
                 }
                 Spacer()
-                Text("BurnBar 0.3.0").font(.caption2).foregroundStyle(.tertiary).padding(.leading, 8)
+                Text("BurnBar 0.4.0").font(.caption2).foregroundStyle(.tertiary).padding(.leading, 8)
             }
             .padding(10)
             .frame(width: 170)
@@ -206,7 +206,7 @@ struct MenuBarPane: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            SectionHeader("Build your own bar — two slots, any metrics")
+            SectionHeader("Build your own bar — three slots, any metrics")
             HStack(alignment: .top, spacing: 24) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("First slot").font(.caption).foregroundStyle(.secondary)
@@ -220,6 +220,13 @@ struct MenuBarPane: View {
                     RadioList(
                         options: MenuBarMetric.allCases.map { ($0, $0.label) },
                         selection: $settings.metricSlot2
+                    )
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Third slot").font(.caption).foregroundStyle(.secondary)
+                    RadioList(
+                        options: MenuBarMetric.allCases.map { ($0, $0.label) },
+                        selection: $settings.metricSlot3
                     )
                 }
             }

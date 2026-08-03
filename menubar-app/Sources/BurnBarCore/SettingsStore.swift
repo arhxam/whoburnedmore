@@ -20,6 +20,7 @@ public final class SettingsStore: ObservableObject {
         )
         metricSlot1 = MenuBarMetric(rawValue: d.string(forKey: Keys.metricSlot1) ?? "") ?? migrated.0
         metricSlot2 = MenuBarMetric(rawValue: d.string(forKey: Keys.metricSlot2) ?? "") ?? migrated.1
+        metricSlot3 = MenuBarMetric(rawValue: d.string(forKey: Keys.metricSlot3) ?? "") ?? .none
         tintThresholds = Self.bool(d, Keys.tintThresholds, true)
         showLimits = Self.bool(d, Keys.showLimits, true)
         showForecast = Self.bool(d, Keys.showForecast, true)
@@ -54,6 +55,7 @@ public final class SettingsStore: ObservableObject {
     @Published public var textMode: MenuBarTextMode { didSet { d.set(textMode.rawValue, forKey: Keys.textMode) } }
     @Published public var metricSlot1: MenuBarMetric { didSet { d.set(metricSlot1.rawValue, forKey: Keys.metricSlot1) } }
     @Published public var metricSlot2: MenuBarMetric { didSet { d.set(metricSlot2.rawValue, forKey: Keys.metricSlot2) } }
+    @Published public var metricSlot3: MenuBarMetric { didSet { d.set(metricSlot3.rawValue, forKey: Keys.metricSlot3) } }
     @Published public var tintThresholds: Bool { didSet { d.set(tintThresholds, forKey: Keys.tintThresholds) } }
 
     @Published public var showLimits: Bool { didSet { d.set(showLimits, forKey: Keys.showLimits) } }
@@ -101,6 +103,7 @@ public final class SettingsStore: ObservableObject {
         public static let textMode = "menubar.textMode"
         public static let metricSlot1 = "menubar.metricSlot1"
         public static let metricSlot2 = "menubar.metricSlot2"
+        public static let metricSlot3 = "menubar.metricSlot3"
         public static let tintThresholds = "menubar.tint"
         public static let showLimits = "popover.showLimits"
         public static let showForecast = "popover.showForecast"
@@ -129,7 +132,7 @@ public final class SettingsStore: ObservableObject {
         public static let syncEnabled = "sync.enabled"
         public static let onboardingDone = "onboarding.done"
         public static let all: [String] = [
-            textMode, metricSlot1, metricSlot2, tintThresholds, showLimits, showForecast, showPerModel, showBurn,
+            textMode, metricSlot1, metricSlot2, metricSlot3, tintThresholds, showLimits, showForecast, showPerModel, showBurn,
             showStreak, showTools, showSessions, showWbm, showRival, showStatusDot,
             providerClaude, providerCodex, providerCursor, providerVscode, providerLongtail,
             warnThreshold, criticalThreshold, notifyThresholds, notifyReset, notifyForecast,
