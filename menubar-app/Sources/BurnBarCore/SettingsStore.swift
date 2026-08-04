@@ -14,13 +14,23 @@ public final class SettingsStore: ObservableObject {
             for key in Keys.all { defaults.removeObject(forKey: key) }
         }
         textMode = MenuBarTextMode(rawValue: d.string(forKey: Keys.textMode) ?? "") ?? .sessionStatus
-        // v0.3 metric slots: explicit values win; else migrate from legacy textMode.
+        // Metric slots. Explicit values win. A legacy user (only textMode stored)
+        // migrates from it; a fresh install gets the default trio the bar ships
+        // with: today's tokens · session % · session resets-in.
+        let hasLegacy = d.string(forKey: Keys.textMode) != nil
         let migrated = MenuBarMetric.migrate(
             from: MenuBarTextMode(rawValue: d.string(forKey: Keys.textMode) ?? "") ?? .sessionStatus
         )
-        metricSlot1 = MenuBarMetric(rawValue: d.string(forKey: Keys.metricSlot1) ?? "") ?? migrated.0
-        metricSlot2 = MenuBarMetric(rawValue: d.string(forKey: Keys.metricSlot2) ?? "") ?? migrated.1
-        metricSlot3 = MenuBarMetric(rawValue: d.string(forKey: Keys.metricSlot3) ?? "") ?? .none
+        let def1: MenuBarMetric = hasLegacy ? migrated.0 : .todayTokens
+        let def2: MenuBarMetric = hasLegacy ? migrated.1 : .sessionPercent
+        let def3: MenuBarMetric = hasLegacy ? .none : .sessionCountdown
+        metricSlot1 = MenuBarMetric(rawValue: d.string(forKey: Keys.metricSlot1) ?? "") ?? def1
+        metricSlot2 = MenuBarMetric(rawValue: d.string(forKey: Keys.metricSlot2) ?? "") ?? def2
+        metricSlot3 = MenuBarMetric(rawValue: d.string(forKey: Keys.metricSlot3) ?? "") ?? def3
+        // Each slot can be scoped to any provider (default "all" = aggregate/Claude).
+        metricProvider1 = d.string(forKey: Keys.metricProvider1) ?? "all"
+        metricProvider2 = d.string(forKey: Keys.metricProvider2) ?? "all"
+        metricProvider3 = d.string(forKey: Keys.metricProvider3) ?? "all"
         tintThresholds = Self.bool(d, Keys.tintThresholds, true)
         showLimits = Self.bool(d, Keys.showLimits, true)
         showForecast = Self.bool(d, Keys.showForecast, true)
@@ -63,6 +73,9 @@ public final class SettingsStore: ObservableObject {
     @Published public var metricSlot1: MenuBarMetric { didSet { d.set(metricSlot1.rawValue, forKey: Keys.metricSlot1) } }
     @Published public var metricSlot2: MenuBarMetric { didSet { d.set(metricSlot2.rawValue, forKey: Keys.metricSlot2) } }
     @Published public var metricSlot3: MenuBarMetric { didSet { d.set(metricSlot3.rawValue, forKey: Keys.metricSlot3) } }
+    @Published public var metricProvider1: String { didSet { d.set(metricProvider1, forKey: Keys.metricProvider1) } }
+    @Published public var metricProvider2: String { didSet { d.set(metricProvider2, forKey: Keys.metricProvider2) } }
+    @Published public var metricProvider3: String { didSet { d.set(metricProvider3, forKey: Keys.metricProvider3) } }
     @Published public var tintThresholds: Bool { didSet { d.set(tintThresholds, forKey: Keys.tintThresholds) } }
 
     @Published public var showLimits: Bool { didSet { d.set(showLimits, forKey: Keys.showLimits) } }
@@ -101,10 +114,12 @@ public final class SettingsStore: ObservableObject {
 
     /// Display filter: is this tool's UI row enabled?
     public func providerEnabled(_ tool: String) -> Bool {
-        switch tool {
+        switch tool.lowercased() {
         case "claude": return providerClaude
         case "codex": return providerCodex
         case "cursor": return providerCursor
+        case "copilot", "github copilot", "copilot-chat": return providerCopilot
+        case "gemini", "gemini-cli": return providerGemini
         case "cline", "roo", "continue": return providerVscode
         default: return providerLongtail
         }
@@ -115,6 +130,9 @@ public final class SettingsStore: ObservableObject {
         public static let metricSlot1 = "menubar.metricSlot1"
         public static let metricSlot2 = "menubar.metricSlot2"
         public static let metricSlot3 = "menubar.metricSlot3"
+        public static let metricProvider1 = "menubar.metricProvider1"
+        public static let metricProvider2 = "menubar.metricProvider2"
+        public static let metricProvider3 = "menubar.metricProvider3"
         public static let tintThresholds = "menubar.tint"
         public static let showLimits = "popover.showLimits"
         public static let showForecast = "popover.showForecast"
@@ -146,7 +164,8 @@ public final class SettingsStore: ObservableObject {
         public static let syncEnabled = "sync.enabled"
         public static let onboardingDone = "onboarding.done"
         public static let all: [String] = [
-            textMode, metricSlot1, metricSlot2, metricSlot3, tintThresholds, showLimits, showForecast, showPerModel, showBurn,
+            textMode, metricSlot1, metricSlot2, metricSlot3,
+            metricProvider1, metricProvider2, metricProvider3, tintThresholds, showLimits, showForecast, showPerModel, showBurn,
             showStreak, showTools, showSessions, showWbm, showRival, showStatusDot,
             providerClaude, providerCodex, providerCursor, providerVscode, providerLongtail, providerCopilot, providerGemini, primaryProvider,
             warnThreshold, criticalThreshold, notifyThresholds, notifyReset, notifyForecast,

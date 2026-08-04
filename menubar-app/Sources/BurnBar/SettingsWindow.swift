@@ -204,34 +204,44 @@ struct GeneralPane: View {
 struct MenuBarPane: View {
     @EnvironmentObject private var settings: SettingsStore
 
+    /// Provider each slot can be scoped to. "all" = aggregate (session % / reset
+    /// follow Claude). Pick a specific tool to show e.g. Codex's session %.
+    static let providerOptions: [(String, String)] = [
+        ("all", "All / aggregate"), ("claude", "Claude"), ("codex", "Codex"),
+        ("cursor", "Cursor"), ("copilot", "Copilot"), ("gemini", "Gemini"),
+    ]
+
+    @ViewBuilder
+    private func slotColumn(
+        _ title: String, metric: Binding<MenuBarMetric>, provider: Binding<String>,
+        allowNone: Bool
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.caption).foregroundStyle(.secondary)
+            RadioList(
+                options: MenuBarMetric.allCases.filter { allowNone || $0 != .none }.map { ($0, $0.label) },
+                selection: metric
+            )
+            Divider().padding(.vertical, 2)
+            Text("For provider").font(.caption2).foregroundStyle(.tertiary)
+            Picker("", selection: provider) {
+                ForEach(Self.providerOptions, id: \.0) { Text($0.1).tag($0.0) }
+            }
+            .labelsHidden().frame(maxWidth: 150)
+            .disabled(!metric.wrappedValue.isProviderScoped)
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            SectionHeader("Build your own bar — three slots, any metrics")
+            SectionHeader("Build your own bar — three slots, any metric, any provider")
             HStack(alignment: .top, spacing: 24) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("First slot").font(.caption).foregroundStyle(.secondary)
-                    RadioList(
-                        options: MenuBarMetric.allCases.filter { $0 != .none }.map { ($0, $0.label) },
-                        selection: $settings.metricSlot1
-                    )
-                }
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Second slot").font(.caption).foregroundStyle(.secondary)
-                    RadioList(
-                        options: MenuBarMetric.allCases.map { ($0, $0.label) },
-                        selection: $settings.metricSlot2
-                    )
-                }
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Third slot").font(.caption).foregroundStyle(.secondary)
-                    RadioList(
-                        options: MenuBarMetric.allCases.map { ($0, $0.label) },
-                        selection: $settings.metricSlot3
-                    )
-                }
+                slotColumn("First slot", metric: $settings.metricSlot1, provider: $settings.metricProvider1, allowNone: false)
+                slotColumn("Second slot", metric: $settings.metricSlot2, provider: $settings.metricProvider2, allowNone: true)
+                slotColumn("Third slot", metric: $settings.metricSlot3, provider: $settings.metricProvider3, allowNone: true)
             }
             MenuBarPreviewLine()
-            Text("Example: \"Session %\" + \"Today's tokens\" shows 53% · 147.7M. \"Tokens this session\" counts burn observed while BurnBar runs, inside the current 5-hour window.")
+            Text("Ships showing Today's tokens · Session % · Session resets-in. Scope any slot to a provider — e.g. Codex's session % — and it's tagged in the bar (\"X 71%\"). \"Tokens this session\" counts burn observed while BurnBar runs, inside the current 5-hour window.")
                 .font(.caption).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 

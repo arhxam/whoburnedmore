@@ -79,15 +79,60 @@ final class MetricSlotTests: XCTestCase {
         )
     }
 
-    func testMetricSlotThirdSlotDefaultsToNothing() {
-        let d = UserDefaults(suiteName: "bb-slot3-test-\(UUID().uuidString)")!
+    func testFreshInstallDefaultTrio() {
+        // A fresh install (no legacy textMode) ships the default bar:
+        // today's tokens · session % · session resets-in, all "all"-scoped.
+        let d = UserDefaults(suiteName: "bb-fresh-\(UUID().uuidString)")!
         let store = MainActor.assumeIsolated { SettingsStore(defaults: d) }
         MainActor.assumeIsolated {
-            XCTAssertEqual(store.metricSlot3, MenuBarMetric.none)
+            XCTAssertEqual(store.metricSlot1, .todayTokens)
+            XCTAssertEqual(store.metricSlot2, .sessionPercent)
+            XCTAssertEqual(store.metricSlot3, .sessionCountdown)
+            XCTAssertEqual(store.metricProvider1, "all")
+            XCTAssertEqual(store.metricProvider2, "all")
+            XCTAssertEqual(store.metricProvider3, "all")
+        }
+    }
+
+    func testMetricSlotProviderRoundTrip() {
+        let d = UserDefaults(suiteName: "bb-slotprov-\(UUID().uuidString)")!
+        let store = MainActor.assumeIsolated { SettingsStore(defaults: d) }
+        MainActor.assumeIsolated {
             store.metricSlot3 = .weeklyReset
+            store.metricProvider2 = "codex"
         }
         let reloaded = MainActor.assumeIsolated { SettingsStore(defaults: d) }
-        MainActor.assumeIsolated { XCTAssertEqual(reloaded.metricSlot3, .weeklyReset) }
+        MainActor.assumeIsolated {
+            XCTAssertEqual(reloaded.metricSlot3, .weeklyReset)
+            XCTAssertEqual(reloaded.metricProvider2, "codex")
+        }
+    }
+
+    func testProviderScopedSlotsTagAndResolve() {
+        let base = inputs()
+        let codex = MenuBarMetric.ProviderStats(
+            sessionPercent: 71, sessionReset: Date(timeIntervalSince1970: 2_000_000 + 7200),
+            todayTokens: 98_600_000
+        )
+        let i = MenuBarMetric.Inputs(
+            summary: base.summary, worstPercent: base.worstPercent,
+            sessionPercent: base.sessionPercent, sessionReset: base.sessionReset,
+            sessionTokens: base.sessionTokens, weeklyPercent: base.weeklyPercent,
+            byProvider: ["codex": codex],
+            now: Date(timeIntervalSince1970: 2_000_000)
+        )
+        // "all" tokens are bare; an explicitly-scoped Claude slot tags "C 53%"
+        // (falling back to the aggregate value), Codex tags its own "X 71%".
+        XCTAssertEqual(
+            MenuBarMetric.slotsText([(.todayTokens, "all"), (.sessionPercent, "claude"), (.sessionPercent, "codex")], i),
+            "147.7M · C 53% · X 71%"
+        )
+        // Codex today's tokens resolve from its own breakdown, tagged.
+        XCTAssertEqual(MenuBarMetric.slotsText([(.todayTokens, "codex")], i), "X 98.6M")
+        // A provider with no stats for the metric collapses.
+        XCTAssertNil(MenuBarMetric.slotsText([(.weeklyPercent, "codex")], i))
+        // Global metric ignores the provider tag.
+        XCTAssertEqual(MenuBarMetric.slotsText([(.tightestLimit, "codex")], i), "54%")
     }
 
     func testMetricSlotLegacyMigration() {

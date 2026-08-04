@@ -249,7 +249,8 @@ struct BurnZone: View {
                     StatBlock(title: "today", tokens: s.today.totalTokens, cost: s.today.costUSD)
                     StatBlock(title: "this week", tokens: s.week.totalTokens, cost: s.week.costUSD)
                     if settings.showStreak, model.streakDays > 1 {
-                        VStack(alignment: .leading, spacing: 1) {
+                        Spacer(minLength: 8)
+                        VStack(alignment: .trailing, spacing: 1) {
                             HStack(spacing: 3) { BurnFlame(size: 14); Text("\(model.streakDays)").font(.title3.weight(.bold)) }
                             Text("day streak").font(.caption2).foregroundStyle(.secondary)
                         }

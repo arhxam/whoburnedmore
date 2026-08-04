@@ -144,6 +144,70 @@ final class AppModel: ObservableObject {
                       reset: Formatters.parseISO(cursor.renewsAt)),
             ]))
         }
+
+        // Token-only providers: any ENABLED tool we saw burn from today that has
+        // no live limit window (Cline/Roo/Continue, Gemini, Copilot, the long
+        // tail — and Claude/Codex too if their limits aren't wired) still gets a
+        // row, so flipping its toggle on visibly adds it to the panel.
+        let already = Set(out.map(\.id))
+        for tool in summary?.byToolToday ?? [] where tool.tokens > 0 {
+            let id = tool.tool.lowercased()
+            guard !already.contains(id), settings.providerEnabled(id) else { continue }
+            out.append(.init(id: id, name: Self.prettyProvider(id), metrics: [
+                .init(id: "\(id)-tok", label: "today", percent: nil,
+                      note: Formatters.compactTokens(tool.tokens)),
+            ]))
+        }
+        return out
+    }
+
+    /// Display name for a tool id ("cline" → "Cline", "opencode" → "opencode").
+    static func prettyProvider(_ id: String) -> String {
+        switch id {
+        case "claude": return "Claude"
+        case "codex": return "Codex"
+        case "cursor": return "Cursor"
+        case "copilot": return "Copilot"
+        case "gemini": return "Gemini"
+        case "cline": return "Cline"
+        case "roo": return "Roo"
+        case "continue": return "Continue"
+        default: return id
+        }
+    }
+
+    /// Per-provider numbers for provider-scoped menu-bar slots.
+    var byProviderStats: [String: MenuBarMetric.ProviderStats] {
+        var out: [String: MenuBarMetric.ProviderStats] = [:]
+        for t in summary?.byToolToday ?? [] {
+            var s = out[t.tool.lowercased()] ?? .init()
+            s.todayTokens = t.tokens
+            s.todayCost = t.costUSD
+            out[t.tool.lowercased()] = s
+        }
+        if case .ready(let u) = claudeState {
+            var s = out["claude"] ?? .init()
+            s.sessionPercent = u.fiveHour?.utilization
+            s.sessionReset = Formatters.parseISO(u.fiveHour?.resetsAt)
+            s.weeklyPercent = u.sevenDay?.utilization
+            s.weeklyReset = Formatters.parseISO(u.sevenDay?.resetsAt)
+            s.sessionTokens = sessionTokens
+            out["claude"] = s
+        }
+        if let c = codexLimits, c.present {
+            var s = out["codex"] ?? .init()
+            s.sessionPercent = c.primary?.usedPercent
+            s.sessionReset = Formatters.parseISO(c.primary?.resetsAt)
+            s.weeklyPercent = c.secondary?.usedPercent
+            s.weeklyReset = Formatters.parseISO(c.secondary?.resetsAt)
+            out["codex"] = s
+        }
+        if let cu = cursorLimits, cu.present {
+            var s = out["cursor"] ?? .init()
+            s.sessionPercent = cu.planPercent
+            s.sessionReset = Formatters.parseISO(cu.renewsAt)
+            out["cursor"] = s
+        }
         return out
     }
 
@@ -166,7 +230,9 @@ final class AppModel: ObservableObject {
 
     var menuBarText: String? {
         MenuBarMetric.slotsText(
-            [settings.metricSlot1, settings.metricSlot2, settings.metricSlot3],
+            [(settings.metricSlot1, settings.metricProvider1),
+             (settings.metricSlot2, settings.metricProvider2),
+             (settings.metricSlot3, settings.metricProvider3)],
             .init(
                 summary: summary,
                 worstPercent: worstPercent,
@@ -174,7 +240,8 @@ final class AppModel: ObservableObject {
                 sessionReset: sessionReset,
                 sessionTokens: sessionTokens,
                 weeklyPercent: weeklyPercent,
-                weeklyReset: weeklyReset
+                weeklyReset: weeklyReset,
+                byProvider: byProviderStats
             )
         )
     }
@@ -241,7 +308,7 @@ final class AppModel: ObservableObject {
         let newWbm = await wbmResult
         detectOvertaken(old: wbmState, new: newWbm)
         wbmState = newWbm
-        if case .ready(let profile) = newWbm { updateStreak(profile) }
+        if case .ready = newWbm { recomputeStreak() }
         if let state = await claudeResult {
             claudeState = state
             if case .ready(let usage) = state {
@@ -282,9 +349,10 @@ final class AppModel: ObservableObject {
         prevDailyRank = newRank
     }
 
-    private func updateStreak(_ profile: WbmProfile) {
-        // Streak = consecutive non-zero days in the local 14-day series (server
-        // streak needs no extra call this way; capped at 14 by data available).
+    /// Streak = consecutive non-zero days in the local 14-day series. Recomputed
+    /// whenever burn data lands (below) so it doesn't wait on the whoburnedmore
+    /// poll, and again after a rank refresh.
+    private func recomputeStreak() {
         guard let days = summary?.days else { return }
         var streak = 0
         for day in days.reversed() {
@@ -345,6 +413,7 @@ final class AppModel: ObservableObject {
                 todayTokens: s.today.totalTokens,
                 windowResetAt: sessionReset
             )
+            recomputeStreak()
             lastUpdatedAt = Date()
         case .limits(let l):
             codexLimits = l.codex
