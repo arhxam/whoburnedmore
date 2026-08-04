@@ -9,6 +9,9 @@ cd "$(dirname "$0")/.."
 
 IDENTITY="${BURNBAR_SIGN_IDENTITY:-Developer ID Application: Arham Amin (84MFPMUB97)}"
 
+echo "==> app icon"
+[[ -f Resources/AppIcon.icns ]] || bash scripts/gen-app-icon.sh
+
 echo "==> sidecar"
 (cd sidecar && bun build --compile --outfile dist/burnbar-sidecar ./src/main.ts >/dev/null)
 
@@ -23,6 +26,7 @@ mkdir -p dist
 cp -R build/Build/Products/Release/BurnBar.app dist/
 RES="dist/BurnBar.app/Contents/Resources"
 mkdir -p "$RES"
+cp Resources/AppIcon.icns "$RES/AppIcon.icns"
 cp sidecar/dist/burnbar-sidecar "$RES/burnbar-sidecar"
 CCU=$(ls ../../node_modules/.pnpm/@ccusage+ccusage-darwin-arm64*/node_modules/@ccusage/ccusage-darwin-arm64/bin/ccusage 2>/dev/null | head -1 || true)
 if [[ -n "$CCU" ]]; then
@@ -34,11 +38,15 @@ fi
 
 echo "==> codesign"
 # Inside-out: nested executables/frameworks first, then the bundle.
-codesign --force --options runtime --timestamp --sign "$IDENTITY" "$RES/burnbar-sidecar"
-[[ -f "$RES/ccusage" ]] && codesign --force --options runtime --timestamp --sign "$IDENTITY" "$RES/ccusage"
+# The bun sidecar + ccusage JIT, so they carry the JIT entitlements; the app
+# itself is hardened-runtime clean. All with a secure timestamp for notarization.
+SIDECAR_ENT="sidecar.entitlements"
+APP_ENT="BurnBar.entitlements"
+codesign --force --options runtime --timestamp --entitlements "$SIDECAR_ENT" --sign "$IDENTITY" "$RES/burnbar-sidecar"
+[[ -f "$RES/ccusage" ]] && codesign --force --options runtime --timestamp --entitlements "$SIDECAR_ENT" --sign "$IDENTITY" "$RES/ccusage"
 codesign --force --options runtime --timestamp --sign "$IDENTITY" \
   dist/BurnBar.app/Contents/Frameworks/BurnBarCore.framework
-codesign --force --options runtime --timestamp --sign "$IDENTITY" dist/BurnBar.app
+codesign --force --options runtime --timestamp --entitlements "$APP_ENT" --sign "$IDENTITY" dist/BurnBar.app
 
-codesign --verify --strict dist/BurnBar.app
+codesign --verify --strict --deep dist/BurnBar.app
 echo "==> signed OK"
