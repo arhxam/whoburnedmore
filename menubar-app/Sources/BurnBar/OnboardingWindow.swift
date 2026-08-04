@@ -60,8 +60,10 @@ struct OnboardingView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("🔥 BurnBar is watching your burn")
-                .font(.title2.weight(.bold))
+            HStack(spacing: 8) {
+                BurnFlame(size: 20)
+                Text("BurnBar is watching your burn").font(.title2.weight(.bold))
+            }
             Text("Found these AI coding tools — live tracking already started, entirely on-device:")
                 .foregroundStyle(.secondary)
 
@@ -96,7 +98,9 @@ struct OnboardingView: View {
 
             Divider()
 
-            Text("Optional: get ranked 🏆").font(.headline)
+            Label {
+                Text("Optional: get ranked").font(.headline)
+            } icon: { Image(systemName: "trophy.fill").foregroundStyle(.orange) }
             Text("whoburnedmore.com is the public leaderboard of AI token burners. One click to join — or ignore this forever; BurnBar works fully without it.")
                 .font(.callout).foregroundStyle(.secondary)
             HStack {

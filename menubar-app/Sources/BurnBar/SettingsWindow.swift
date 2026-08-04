@@ -119,7 +119,7 @@ struct SettingsRootView: View {
                     .buttonStyle(.plain)
                 }
                 Spacer()
-                Text("BurnBar 0.4.0").font(.caption2).foregroundStyle(.tertiary).padding(.leading, 8)
+                Text("BurnBar 0.5.0").font(.caption2).foregroundStyle(.tertiary).padding(.leading, 8)
             }
             .padding(10)
             .frame(width: 170)
@@ -231,7 +231,7 @@ struct MenuBarPane: View {
                 }
             }
             MenuBarPreviewLine()
-            Text("Example: \"Session %\" + \"Today's tokens\" → 🔥 53% · 147.7M. \"Tokens this session\" counts burn observed while BurnBar runs, inside the current 5-hour window.")
+            Text("Example: \"Session %\" + \"Today's tokens\" shows 53% · 147.7M. \"Tokens this session\" counts burn observed while BurnBar runs, inside the current 5-hour window.")
                 .font(.caption).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -246,21 +246,35 @@ struct MenuBarPane: View {
 struct PopoverPane: View {
     @EnvironmentObject private var settings: SettingsStore
 
+    private let providers: [(String, String)] = [
+        ("tightest", "Tightest window (auto)"), ("none", "None — just the rings"),
+        ("provider:claude", "Claude"), ("provider:codex", "Codex"),
+        ("provider:cursor", "Cursor"), ("provider:copilot", "Copilot"), ("provider:gemini", "Gemini"),
+    ]
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            Text("This whole panel is yours — turn any section off, pick which providers show, and choose what leads. Nothing here is fixed.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+
+            SectionHeader("Primary — the big ring on top")
+            Picker("", selection: $settings.primaryProvider) {
+                ForEach(providers, id: \.0) { Text($0.1).tag($0.0) }
+            }
+            .labelsHidden().frame(maxWidth: 260)
+            Text("Pin one provider as a large hero ring, let it auto-follow whichever window is tightest, or drop it for a clean row of rings.")
+                .font(.caption2).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
+
             SectionHeader("Sections — changes apply instantly")
-            Toggle("Limits (Claude / Codex / Cursor windows)", isOn: $settings.showLimits)
+            Toggle("Limits (rings + per-provider detail)", isOn: $settings.showLimits)
             Toggle("↳ pace forecast lines (\"cap ~6:40 PM\")", isOn: $settings.showForecast)
-                .padding(.leading, 18).disabled(!settings.showLimits)
-            Toggle("↳ per-model weekly rows", isOn: $settings.showPerModel)
                 .padding(.leading, 18).disabled(!settings.showLimits)
             Toggle("↳ provider service-status dot", isOn: $settings.showStatusDot)
                 .padding(.leading, 18).disabled(!settings.showLimits)
-            Toggle("Burn (today / week / 14-day chart)", isOn: $settings.showBurn)
+            Toggle("Burn (today / week / 14-day sparkline)", isOn: $settings.showBurn)
             Toggle("↳ day streak", isOn: $settings.showStreak)
                 .padding(.leading, 18).disabled(!settings.showBurn)
             Toggle("Top tools + models", isOn: $settings.showTools)
-            Toggle("Biggest sessions today", isOn: $settings.showSessions)
             Toggle("whoburnedmore rank strip", isOn: $settings.showWbm)
             Toggle("↳ rival line (\"@dax is 2.1M ahead\")", isOn: $settings.showRival)
                 .padding(.leading, 18).disabled(!settings.showWbm)
@@ -273,14 +287,18 @@ struct ProvidersPane: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            SectionHeader("Show usage from")
+            SectionHeader("Providers — show or hide each")
+            Text("Claude and Codex are on by default. Flip on any others you use.")
+                .font(.caption).foregroundStyle(.secondary)
             Toggle("Claude Code", isOn: $settings.providerClaude)
             Toggle("Codex", isOn: $settings.providerCodex)
             Toggle("Cursor", isOn: $settings.providerCursor)
+            Toggle("Copilot", isOn: $settings.providerCopilot)
+            Toggle("Gemini", isOn: $settings.providerGemini)
             Toggle("Cline / Roo / Continue", isOn: $settings.providerVscode)
-            Toggle("Long tail (Gemini, Copilot, opencode, amp, …)", isOn: $settings.providerLongtail)
-            Text("Hides a tool from BurnBar's UI. Collection still runs locally so re-enabling is instant and history stays complete.")
-                .font(.caption).foregroundStyle(.secondary)
+            Toggle("Long tail (opencode, amp, kimi, …)", isOn: $settings.providerLongtail)
+            Text("Turning a provider off removes its ring and detail rows from the panel. Collection keeps running locally, so re-enabling is instant and history stays complete.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
     }
 }

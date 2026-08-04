@@ -36,7 +36,7 @@ targets:
         CFBundleIdentifier: com.whoburnedmore.burnbar
         CFBundleName: BurnBar
         CFBundleDisplayName: BurnBar
-        CFBundleShortVersionString: "0.4.0"
+        CFBundleShortVersionString: "0.5.0"
         CFBundleVersion: "1"
         LSUIElement: true
         LSMinimumSystemVersion: "14.0"

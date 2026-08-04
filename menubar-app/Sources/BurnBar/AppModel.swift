@@ -88,6 +88,82 @@ final class AppModel: ObservableObject {
         return Formatters.parseISO(usage.sevenDay?.resetsAt)
     }
 
+    /// Whether to inject the full 5-provider demo stack (screenshots / preview).
+    private let demoLimits = ProcessInfo.processInfo.environment["BURNBAR_DEMO_LIMITS"] == "1"
+
+    /// Unified per-provider limits for the popover rings + detail rows, filtered
+    /// by the Settings provider toggles. Each provider contributes ITS metrics
+    /// (Claude: 5h + weekly + per-model; Codex: 5h + weekly + credits; …).
+    var providerLimits: [ProviderLimit] {
+        if demoLimits {
+            return ProviderLimits.demo().filter { providerLimitEnabled($0.id) }
+        }
+        var out: [ProviderLimit] = []
+
+        if settings.providerClaude, case .ready(let usage) = claudeState {
+            var m: [ProviderMetric] = []
+            if let fh = usage.fiveHour {
+                m.append(.init(id: "c5", label: "5h window", percent: fh.utilization,
+                               reset: Formatters.parseISO(fh.resetsAt), forecast: claudeForecastHit))
+            }
+            if let wk = usage.sevenDay {
+                m.append(.init(id: "cw", label: "weekly", percent: wk.utilization,
+                               reset: Formatters.parseISO(wk.resetsAt)))
+            }
+            for s in usage.scoped where s.kind == "weekly_scoped" && s.modelName != nil {
+                m.append(.init(id: "cs-\(s.modelName!)", label: "\(s.modelName!) weekly",
+                               percent: s.percent, reset: Formatters.parseISO(s.resetsAt)))
+            }
+            if !m.isEmpty { out.append(.init(id: "claude", name: "Claude", metrics: m)) }
+        }
+
+        if settings.providerCodex, let codex = codexLimits, codex.present {
+            var m: [ProviderMetric] = []
+            if let p = codex.primary {
+                m.append(.init(id: "x-p", label: p.label, percent: p.usedPercent,
+                               reset: Formatters.parseISO(p.resetsAt),
+                               forecast: Formatters.parseISO(p.forecastHitAt)))
+            }
+            if let s = codex.secondary {
+                m.append(.init(id: "x-s", label: s.label, percent: s.usedPercent,
+                               reset: Formatters.parseISO(s.resetsAt)))
+            }
+            if let bal = codex.creditsBalance {
+                m.append(.init(id: "x-c", label: "credits", percent: nil, note: "\(bal) left"))
+            }
+            if m.isEmpty {
+                m.append(.init(id: "x-plan", label: codex.planType ?? "active",
+                               percent: nil, note: "no window pressure"))
+            }
+            out.append(.init(id: "codex", name: "Codex", metrics: m))
+        }
+
+        if settings.providerCursor, let cursor = cursorLimits, cursor.present {
+            out.append(.init(id: "cursor", name: "Cursor", metrics: [
+                .init(id: "u", label: "plan usage", percent: cursor.planPercent,
+                      reset: Formatters.parseISO(cursor.renewsAt)),
+            ]))
+        }
+        return out
+    }
+
+    /// The optional hero provider (Settings → Menu bar → Primary).
+    var heroProvider: ProviderLimit? {
+        ProviderLimits.hero(from: providerLimits,
+                            choice: PrimaryChoice(rawValue: settings.primaryProvider))
+    }
+
+    func providerLimitEnabled(_ id: String) -> Bool {
+        switch id {
+        case "claude": return settings.providerClaude
+        case "codex": return settings.providerCodex
+        case "cursor": return settings.providerCursor
+        case "copilot": return settings.providerCopilot
+        case "gemini": return settings.providerGemini
+        default: return true
+        }
+    }
+
     var menuBarText: String? {
         MenuBarMetric.slotsText(
             [settings.metricSlot1, settings.metricSlot2, settings.metricSlot3],
@@ -160,16 +236,18 @@ final class AppModel: ObservableObject {
     func refreshRemote() async {
         async let claudeResult = claude.fetch()
         async let wbmResult = wbm.fetch()
+        // Resolve the whoburnedmore rank FIRST so a slow/prompting Claude
+        // Keychain read can never block the rank strip from rendering.
+        let newWbm = await wbmResult
+        detectOvertaken(old: wbmState, new: newWbm)
+        wbmState = newWbm
+        if case .ready(let profile) = newWbm { updateStreak(profile) }
         if let state = await claudeResult {
             claudeState = state
             if case .ready(let usage) = state {
                 feedClaudeAlerts(usage)
             }
         }
-        let newWbm = await wbmResult
-        detectOvertaken(old: wbmState, new: newWbm)
-        wbmState = newWbm
-        if case .ready(let profile) = newWbm { updateStreak(profile) }
         lastUpdatedAt = Date()
     }
 

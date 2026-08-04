@@ -53,11 +53,12 @@ final class SettingsStoreTests: XCTestCase {
 
     func testSettingsStoreProviderFilter() {
         let s = SettingsStore(defaults: freshDefaults())
-        s.providerVscode = false
-        XCTAssertTrue(s.providerEnabled("claude"))
-        XCTAssertFalse(s.providerEnabled("cline"))
-        XCTAssertFalse(s.providerEnabled("roo"))
-        XCTAssertTrue(s.providerEnabled("gemini")) // long tail default on
+        XCTAssertTrue(s.providerEnabled("claude")) // claude on by default
+        XCTAssertTrue(s.providerEnabled("codex")) // codex on by default
+        XCTAssertFalse(s.providerEnabled("cline")) // vscode off by default now
+        XCTAssertFalse(s.providerEnabled("gemini")) // long tail off by default now
+        s.providerVscode = true
+        XCTAssertTrue(s.providerEnabled("roo"))
     }
 }
 

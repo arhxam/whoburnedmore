@@ -32,11 +32,18 @@ public final class SettingsStore: ObservableObject {
         showWbm = Self.bool(d, Keys.showWbm, true)
         showRival = Self.bool(d, Keys.showRival, true)
         showStatusDot = Self.bool(d, Keys.showStatusDot, true)
+        // Default: only Claude + Codex are shown; the rest are opt-in so the
+        // panel starts focused instead of a wall of empty rings.
         providerClaude = Self.bool(d, Keys.providerClaude, true)
         providerCodex = Self.bool(d, Keys.providerCodex, true)
-        providerCursor = Self.bool(d, Keys.providerCursor, true)
-        providerVscode = Self.bool(d, Keys.providerVscode, true)
-        providerLongtail = Self.bool(d, Keys.providerLongtail, true)
+        providerCursor = Self.bool(d, Keys.providerCursor, false)
+        providerVscode = Self.bool(d, Keys.providerVscode, false)
+        providerLongtail = Self.bool(d, Keys.providerLongtail, false)
+        providerCopilot = Self.bool(d, Keys.providerCopilot, false)
+        providerGemini = Self.bool(d, Keys.providerGemini, false)
+        // Default: NO hero — just the clean rings row. The big summary ring is
+        // opt-in (Settings → Popover → Primary).
+        primaryProvider = d.string(forKey: Keys.primaryProvider) ?? "none"
         warnThreshold = Self.double(d, Keys.warnThreshold, 80)
         criticalThreshold = Self.double(d, Keys.criticalThreshold, 95)
         notifyThresholds = Self.bool(d, Keys.notifyThresholds, true)
@@ -74,6 +81,10 @@ public final class SettingsStore: ObservableObject {
     @Published public var providerCursor: Bool { didSet { d.set(providerCursor, forKey: Keys.providerCursor) } }
     @Published public var providerVscode: Bool { didSet { d.set(providerVscode, forKey: Keys.providerVscode) } }
     @Published public var providerLongtail: Bool { didSet { d.set(providerLongtail, forKey: Keys.providerLongtail) } }
+    @Published public var providerCopilot: Bool { didSet { d.set(providerCopilot, forKey: Keys.providerCopilot) } }
+    @Published public var providerGemini: Bool { didSet { d.set(providerGemini, forKey: Keys.providerGemini) } }
+    /// Popover hero: "none" | "tightest" | "provider:<id>".
+    @Published public var primaryProvider: String { didSet { d.set(primaryProvider, forKey: Keys.primaryProvider) } }
 
     @Published public var warnThreshold: Double { didSet { d.set(warnThreshold, forKey: Keys.warnThreshold) } }
     @Published public var criticalThreshold: Double { didSet { d.set(criticalThreshold, forKey: Keys.criticalThreshold) } }
@@ -120,6 +131,9 @@ public final class SettingsStore: ObservableObject {
         public static let providerCursor = "provider.cursor"
         public static let providerVscode = "provider.vscode"
         public static let providerLongtail = "provider.longtail"
+        public static let providerCopilot = "provider.copilot"
+        public static let providerGemini = "provider.gemini"
+        public static let primaryProvider = "popover.primaryProvider"
         public static let warnThreshold = "notify.warnThreshold"
         public static let criticalThreshold = "notify.criticalThreshold"
         public static let notifyThresholds = "notify.thresholds"
@@ -134,7 +148,7 @@ public final class SettingsStore: ObservableObject {
         public static let all: [String] = [
             textMode, metricSlot1, metricSlot2, metricSlot3, tintThresholds, showLimits, showForecast, showPerModel, showBurn,
             showStreak, showTools, showSessions, showWbm, showRival, showStatusDot,
-            providerClaude, providerCodex, providerCursor, providerVscode, providerLongtail,
+            providerClaude, providerCodex, providerCursor, providerVscode, providerLongtail, providerCopilot, providerGemini, primaryProvider,
             warnThreshold, criticalThreshold, notifyThresholds, notifyReset, notifyForecast,
             notifyOvertaken, digestEnabled, digestHour, limitsRefresh, syncEnabled, onboardingDone,
         ]
