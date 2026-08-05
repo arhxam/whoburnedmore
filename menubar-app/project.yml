@@ -46,6 +46,12 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.whoburnedmore.burnbar
         ENABLE_HARDENED_RUNTIME: "YES"
+        # With GENERATE_INFOPLIST_FILE=YES, the version keys come from these build
+        # settings — not the info.properties above — so they MUST be set or the
+        # bundle ships with no CFBundleShortVersionString (which also blocks
+        # notarization).
+        MARKETING_VERSION: "0.5.0"
+        CURRENT_PROJECT_VERSION: "1"
 
   BurnBarCoreTests:
     type: bundle.unit-test
