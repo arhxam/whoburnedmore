@@ -534,11 +534,20 @@ export function isAuthoritativeScan(
 }
 
 /** Run ccusage for every known source, add Cursor, and merge the results. */
-export async function collectAll(onProgress?: ProgressFn): Promise<CollectResult> {
+export async function collectAll(
+  onProgress?: ProgressFn,
+  opts?: { offline?: boolean },
+): Promise<CollectResult> {
   // Freshen the pricing table BEFORE any reader prices an entry (24h disk
   // cache, ~5s network cap on a cold day, silent fallback to the baked
   // snapshot). This is what keeps costUSD current on already-installed CLIs.
-  await loadLivePricing().catch(() => {});
+  // In offline mode (`--local`) force the baked table so we make NO network
+  // request — the "fully offline" promise must hold literally.
+  await loadLivePricing(
+    opts?.offline
+      ? { ...process.env, WHOBURNEDMORE_PRICING_OFFLINE: "1" }
+      : process.env,
+  ).catch(() => {});
 
   const { cmd, prefixArgs } = resolveCcusageBin();
   let done = 0;
@@ -616,7 +625,7 @@ export async function collectAll(onProgress?: ProgressFn): Promise<CollectResult
   });
   // Cursor isn't a ccusage source — pull it from the local Cursor session +
   // dashboard API (best effort; no-op if Cursor isn't installed/signed in).
-  const cursorTask = collectCursor().then((c) => {
+  const cursorTask = collectCursor({ offline: opts?.offline }).then((c) => {
     tick();
     return c;
   });

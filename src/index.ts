@@ -4,6 +4,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { platform } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { createInterface } from "node:readline/promises";
 import pc from "picocolors";
 import type { SubmitPayload } from "./shared.js";
@@ -185,10 +186,14 @@ function showLocalDashboard(payload: SubmitPayload): void {
     file,
     renderDashboardHtml(payload.entries, new Date(), { webBaseUrl: webBase() }),
   );
+  // Build a proper file URL (pathToFileURL emits file:///C:/… on Windows —
+  // string-concatenating `file://${path}` yields an invalid file://C:\… URL
+  // that the OS opener chokes on).
+  const fileUrl = pathToFileURL(file).href;
   console.log();
-  console.log(`  Local dashboard: ${pc.cyan(`file://${file}`)}`);
+  console.log(`  Local dashboard: ${pc.cyan(fileUrl)}`);
   console.log(pc.dim("  Re-run `npx whoburnedmore --local` to refresh it. Nothing left your machine."));
-  openBrowser(`file://${file}`);
+  openBrowser(fileUrl);
 }
 
 async function run(flags: Flags): Promise<void> {
@@ -214,7 +219,7 @@ async function run(flags: Flags): Promise<void> {
     : startProgress();
   let collected;
   try {
-    collected = await collectAll(progress.onProgress);
+    collected = await collectAll(progress.onProgress, { offline: flags.local });
   } finally {
     progress.stop();
   }

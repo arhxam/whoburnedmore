@@ -585,6 +585,14 @@ export interface SubmitResponse {
   orgSlug?: string;
   /** Full URL of the org board, e.g. https://whoburnedmore.com/o/<slug>/board. */
   orgBoardUrl?: string;
+  /** Whether this signed-in account currently appears on the public leaderboard. */
+  listed?: boolean;
+  /**
+   * True when the account is signed in but NOT listed solely because it has no
+   * social handle yet (common for Google CLI-first sign-ups). The CLI uses this
+   * to prompt the user to add one instead of implying they're on the board.
+   */
+  needsSocial?: boolean;
 }
 
 export interface AnonSubmitResponse {

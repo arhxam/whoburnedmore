@@ -198,7 +198,7 @@ export async function fetchCursorEvents(
  * Best-effort Cursor collection: locate the local token, call the dashboard
  * API, fold into entries + blocks. Returns empty on any failure.
  */
-export async function collectCursor(): Promise<{
+export async function collectCursor(opts?: { offline?: boolean }): Promise<{
   entries: DailyUsageEntry[];
   blocks: BlockEntry[];
   found: boolean;
@@ -207,7 +207,10 @@ export async function collectCursor(): Promise<{
     const db = cursorDbPath();
     const token = db ? readCursorToken(db) : null;
     const cookie = token ? cursorCookie(token) : null;
-    if (cookie) {
+    // In offline mode (`--local`) we must never send the local Cursor session
+    // token to cursor.com — skip the dashboard fetch and fall through to the
+    // purely-local tokscale cache below.
+    if (cookie && !opts?.offline) {
       const events = await fetchCursorEvents(cookie);
       const { entries, blocks } = mapCursorEvents(events);
       if (entries.length > 0) return { entries, blocks, found: true };

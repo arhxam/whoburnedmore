@@ -34,6 +34,7 @@ export function signedInNextStepLines(result: {
   profileUrl: string;
   boardUrl?: string | null;
   orgBoardUrl?: string | null;
+  needsSocial?: boolean | null;
 }): string[] {
   if (result.orgBoardUrl) {
     return [
@@ -47,6 +48,15 @@ export function signedInNextStepLines(result: {
       `  🤝 You're on the board: ${sanitizeServerText(result.boardUrl)}`,
       "  → Open it to see who burned more.",
       `  → Get a friend on it — have them run: npx whoburnedmore --board=${sanitizeServerText(code)}`,
+    ];
+  }
+  // Signed in but not on the public board yet — the ONLY thing missing is a
+  // social handle. Say so plainly instead of implying they already rank.
+  if (result.needsSocial) {
+    return [
+      `  Your dashboard: ${sanitizeServerText(result.profileUrl)}`,
+      "  → You're synced, but not on the public leaderboard yet.",
+      "  → Add a social handle (X, GitHub, or Instagram) on your dashboard to appear.",
     ];
   }
   return [
