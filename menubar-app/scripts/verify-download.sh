@@ -11,7 +11,8 @@ cleanup() { [[ -n "$MP" ]] && hdiutil detach "$MP" -quiet 2>/dev/null || true; r
 trap cleanup EXIT
 
 DMG="$TMP/BurnBar.dmg"
-curl -sL -o "$DMG" "$URL"
+# Retry + bound each attempt so transient GitHub-CDN slowness can't hang the check.
+curl -fsSL --retry 4 --retry-delay 3 --retry-all-errors --max-time 180 -o "$DMG" "$URL"
 # what a browser download sets:
 xattr -w com.apple.quarantine "0083;00000000;Safari;$(uuidgen)" "$DMG" 2>/dev/null || true
 
