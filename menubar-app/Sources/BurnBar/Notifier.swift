@@ -13,7 +13,11 @@ final class Notifier {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
 
-    func deliver(provider: String, kind: String, level: Int?, percent: Double) {
+    /// `isCritical` is whether this alert is at (or above) the user's configured
+    /// critical threshold — NOT a hardcoded 95, which silently downgraded the
+    /// most-severe alert (no sound, generic wording) for anyone who set critical
+    /// to 85/90/98 in Settings.
+    func deliver(provider: String, kind: String, level: Int?, percent: Double, isCritical: Bool = false) {
         let content = UNMutableNotificationContent()
         switch kind {
         case "reset":
@@ -21,11 +25,11 @@ final class Notifier {
             content.body = "You're back — usage is at \(Int(percent.rounded()))%."
         default:
             content.title = "\(provider) at \(Int(percent.rounded()))% of its limit"
-            content.body = level == 95
+            content.body = isCritical
                 ? "Nearly locked out — consider pausing or switching tools."
                 : "Heads up: you've crossed \(level ?? 80)% of the window."
         }
-        content.sound = level == 95 ? .default : nil
+        content.sound = isCritical ? .default : nil
         let request = UNNotificationRequest(
             identifier: "burnbar-\(provider)-\(kind)-\(level ?? 0)-\(Int(Date().timeIntervalSince1970))",
             content: content,

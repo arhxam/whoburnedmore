@@ -100,7 +100,8 @@ final class DeviceFlow: ObservableObject {
     }
 
     private func bindDevice(api: String, token: String, anonKey: String) async {
-        var req = URLRequest(url: URL(string: "\(api)/v1/me/devices/bind")!)
+        guard let url = URL(string: "\(api)/v1/me/devices/bind") else { return }
+        var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -122,7 +123,10 @@ final class DeviceFlow: ObservableObject {
     }
 
     private func post<T: Decodable>(url: String, body: [String: String]) async throws -> T {
-        var req = URLRequest(url: URL(string: url)!)
+        guard let u = URL(string: url) else {
+            throw NSError(domain: "burnbar", code: 2, userInfo: [NSLocalizedDescriptionKey: "invalid API URL"])
+        }
+        var req = URLRequest(url: u)
         req.httpMethod = "POST"
         req.timeoutInterval = 15
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")

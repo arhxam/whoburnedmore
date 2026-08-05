@@ -107,12 +107,14 @@ public enum MenuBarMetric: String, CaseIterable, Sendable {
         }
     }
 
-    /// Provider-scoped value. `provider == "all"` (or a provider with no stats)
-    /// falls back to the aggregate `text(i)`.
+    /// Provider-scoped value. `provider == "all"` (or a metric that isn't
+    /// provider-scoped) uses the aggregate `text(i)`. A slot scoped to a specific
+    /// provider that has NO stats collapses to nil — it must never show the
+    /// aggregate number tagged with that provider's letter (e.g. "U 53%" implying
+    /// Cursor is at 53% when 53% is really Claude's aggregate).
     public func text(_ i: Inputs, provider: String) -> String? {
-        guard provider != "all", isProviderScoped, let s = i.byProvider[provider] else {
-            return text(i)
-        }
+        guard provider != "all", isProviderScoped else { return text(i) }
+        guard let s = i.byProvider[provider] else { return nil }
         func pct(_ v: Double?) -> String? { v.map { "\(Int($0.rounded()))%" } }
         switch self {
         case .sessionPercent: return pct(s.sessionPercent)

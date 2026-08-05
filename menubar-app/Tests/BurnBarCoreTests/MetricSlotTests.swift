@@ -114,25 +114,41 @@ final class MetricSlotTests: XCTestCase {
             sessionPercent: 71, sessionReset: Date(timeIntervalSince1970: 2_000_000 + 7200),
             todayTokens: 98_600_000
         )
+        let claude = MenuBarMetric.ProviderStats(sessionPercent: 40, todayTokens: 12_300_000)
         let i = MenuBarMetric.Inputs(
             summary: base.summary, worstPercent: base.worstPercent,
             sessionPercent: base.sessionPercent, sessionReset: base.sessionReset,
             sessionTokens: base.sessionTokens, weeklyPercent: base.weeklyPercent,
-            byProvider: ["codex": codex],
+            byProvider: ["codex": codex, "claude": claude],
             now: Date(timeIntervalSince1970: 2_000_000)
         )
-        // "all" tokens are bare; an explicitly-scoped Claude slot tags "C 53%"
-        // (falling back to the aggregate value), Codex tags its own "X 71%".
+        // "all" tokens are bare; each scoped provider tags its OWN value.
         XCTAssertEqual(
             MenuBarMetric.slotsText([(.todayTokens, "all"), (.sessionPercent, "claude"), (.sessionPercent, "codex")], i),
-            "147.7M · C 53% · X 71%"
+            "147.7M · C 40% · X 71%"
         )
         // Codex today's tokens resolve from its own breakdown, tagged.
         XCTAssertEqual(MenuBarMetric.slotsText([(.todayTokens, "codex")], i), "X 98.6M")
         // A provider with no stats for the metric collapses.
         XCTAssertNil(MenuBarMetric.slotsText([(.weeklyPercent, "codex")], i))
+        // A slot scoped to a provider with NO data at all collapses — it must NOT
+        // fall back to the aggregate tagged with that provider's letter.
+        XCTAssertNil(MenuBarMetric.slotsText([(.sessionPercent, "cursor")], i))
+        XCTAssertEqual(
+            MenuBarMetric.slotsText([(.todayTokens, "all"), (.sessionPercent, "cursor")], i),
+            "147.7M"
+        )
         // Global metric ignores the provider tag.
         XCTAssertEqual(MenuBarMetric.slotsText([(.tightestLimit, "codex")], i), "54%")
+    }
+
+    func testCompactTokensUnitBoundaryPromotion() {
+        // Rounding must not produce "1000M"/"1000K"; it promotes to the next unit.
+        XCTAssertEqual(Formatters.compactTokens(999_950_000), "1B")
+        XCTAssertEqual(Formatters.compactTokens(999_950), "1M")
+        XCTAssertEqual(Formatters.compactTokens(999_500), "999.5K") // stays K (doesn't round up to 1000K)
+        XCTAssertEqual(Formatters.compactTokens(950_000_000), "950M") // no false promotion
+        XCTAssertFalse(Formatters.compactTokens(Int.min).isEmpty) // must not crash (abs(Int.min) traps)
     }
 
     func testMetricSlotLegacyMigration() {

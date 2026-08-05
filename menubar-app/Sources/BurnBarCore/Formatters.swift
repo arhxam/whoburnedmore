@@ -3,30 +3,36 @@ import Foundation
 /// Pure display helpers — unit-tested in BurnBarCoreTests.
 public enum Formatters {
     /// 999 → "999", 1_234 → "1.2K", 3_400_000 → "3.4M", 2_864_722_751 → "2.9B".
-    /// Trailing ".0" is dropped ("2K", not "2.0K").
+    /// Trailing ".0" is dropped ("2K", not "2.0K"). Promotes across unit
+    /// boundaries when rounding tips it over (999_950_000 → "1B", not "1000M").
     public static func compactTokens(_ n: Int) -> String {
-        let v = Double(abs(n))
         let sign = n < 0 ? "-" : ""
-        func one(_ value: Double, _ suffix: String) -> String {
-            let rounded = (value * 10).rounded() / 10
-            let s = rounded.truncatingRemainder(dividingBy: 1) == 0
-                ? String(Int(rounded))
-                : String(format: "%.1f", rounded)
+        // `abs(Int.min)` traps (its magnitude overflows Int); clamp to Int.max.
+        let v = n == Int.min ? Double(Int.max) : Double(abs(n))
+        let units: [(Double, String)] = [(1_000_000_000, "B"), (1_000_000, "M"), (1_000, "K")]
+        for (i, unit) in units.enumerated() {
+            guard v >= unit.0 else { continue }
+            var scaled = (v / unit.0 * 10).rounded() / 10
+            var suffix = unit.1
+            if scaled >= 1000, i > 0 {
+                // rounding pushed it into the next unit (999.95M → "1000M" → "1B")
+                let up = units[i - 1]
+                scaled = (v / up.0 * 10).rounded() / 10
+                suffix = up.1
+            }
+            let s = scaled.truncatingRemainder(dividingBy: 1) == 0
+                ? String(Int(scaled))
+                : String(format: "%.1f", scaled)
             return "\(sign)\(s)\(suffix)"
         }
-        switch v {
-        case ..<1_000: return "\(sign)\(Int(v))"
-        case ..<1_000_000: return one(v / 1_000, "K")
-        case ..<1_000_000_000: return one(v / 1_000_000, "M")
-        default: return one(v / 1_000_000_000, "B")
-        }
+        return "\(sign)\(Int(v))"
     }
 
     public static func usd(_ v: Double) -> String {
         v >= 100 ? String(format: "$%.0f", v) : String(format: "$%.2f", v)
     }
 
-    /// "2h 14m", "14m", "38s"; nil/past → "now".
+    /// "2h 14m", "14m", "38s"; nil → "—", past/zero → "now".
     public static func countdown(to date: Date?, from now: Date = Date()) -> String {
         guard let date else { return "—" }
         let s = Int(date.timeIntervalSince(now).rounded())

@@ -115,14 +115,33 @@ export async function runWatch(env: NodeJS.ProcessEnv = process.env): Promise<vo
   // Slow tier first so the first snapshot already has the long tail when cheap.
   // Cursor plan limits ride the same slow cadence (network call) — never on
   // every FS event.
+  // Re-entrancy guard (like collectAndEmit): the slow tier is triggered from the
+  // initial call, the interval, AND the stdin "refresh" command, each taking up
+  // to ~25s. Without this, two overlapping runs let the slower one finish last
+  // and clobber the newer results (last-write-wins race).
+  let slowInFlight = false;
+  let slowPending = false;
   const refreshSlow = async () => {
-    try {
-      slow = await collectSlowTier(env);
-    } catch {
-      /* keep previous slow tier */
+    if (slowInFlight) {
+      slowPending = true;
+      return;
     }
-    cursorLimits = await fetchCursorLimits(env);
-    void collectAndEmit();
+    slowInFlight = true;
+    try {
+      try {
+        slow = await collectSlowTier(env);
+      } catch {
+        /* keep previous slow tier */
+      }
+      cursorLimits = await fetchCursorLimits(env);
+      void collectAndEmit();
+    } finally {
+      slowInFlight = false;
+      if (slowPending) {
+        slowPending = false;
+        void refreshSlow();
+      }
+    }
   };
 
   const watchers: FSWatcher[] = [];
@@ -133,7 +152,18 @@ export async function runWatch(env: NodeJS.ProcessEnv = process.env): Promise<vo
   };
   for (const root of watchRoots(env)) {
     try {
-      watchers.push(watch(root, { recursive: true }, onFsEvent));
+      const w = watch(root, { recursive: true }, onFsEvent);
+      // FSWatcher can emit 'error' AFTER creation (watched dir deleted/moved,
+      // EMFILE, FSEvents failure). With no listener, Node's EventEmitter throws
+      // and kills the whole sidecar. Drop the root instead — the slow timer covers it.
+      w.on("error", () => {
+        try {
+          w.close();
+        } catch {
+          /* already closed */
+        }
+      });
+      watchers.push(w);
     } catch {
       /* root vanished or unwatchable — the slow timer still covers it */
     }

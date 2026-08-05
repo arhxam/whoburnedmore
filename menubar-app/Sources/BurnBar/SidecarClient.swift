@@ -9,6 +9,7 @@ final class SidecarClient {
     private let log = Logger(subsystem: "com.whoburnedmore.burnbar", category: "sidecar")
     private var process: Process?
     private var stdinPipe: Pipe?
+    private var stdoutPipe: Pipe?
     private var restartDelay: TimeInterval = 1
     private var stopped = false
     var onEvent: ((SidecarEvent) -> Void)?
@@ -36,8 +37,11 @@ final class SidecarClient {
     func stop() {
         stopped = true
         try? stdinPipe?.fileHandleForWriting.write(contentsOf: Data("{\"cmd\":\"quit\"}\n".utf8))
+        stdoutPipe?.fileHandleForReading.readabilityHandler = nil // tear down the dispatch source
         process?.terminate()
         process = nil
+        stdinPipe = nil
+        stdoutPipe = nil
     }
 
     func requestRefresh() {
@@ -95,6 +99,7 @@ final class SidecarClient {
             try p.run()
             process = p
             stdinPipe = stdin
+            stdoutPipe = stdout
             log.info("sidecar started pid \(p.processIdentifier)")
         } catch {
             log.error("sidecar spawn failed: \(error.localizedDescription)")

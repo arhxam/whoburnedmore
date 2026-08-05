@@ -25,7 +25,10 @@ final class ClaudeUsageClient {
 
     func fetch() async -> ClaudeUsageState? {
         guard Date() >= cooldownUntil else { return nil } // still rate-limit-gated
-        guard let token = readAccessToken() else {
+        // Read the Keychain OFF the main actor: spawning /usr/bin/security and
+        // waitUntilExit() block, and a Keychain "Always Allow" prompt would
+        // otherwise freeze the entire menu-bar UI on every 60s poll.
+        guard let token = await Task.detached(priority: .utility, operation: { Self.readTokenSync() }).value else {
             return .unavailable(reason: "Claude Code sign-in not found")
         }
         if let expiresAt = token.expiresAt, expiresAt < Date() {
@@ -67,19 +70,21 @@ final class ClaudeUsageClient {
 
     // MARK: Keychain
 
-    private struct Token {
+    private struct Token: Sendable {
         let accessToken: String
         let expiresAt: Date?
     }
 
-    private func readAccessToken() -> Token? {
+    /// Blocking Keychain read + parse. `nonisolated static` so it runs on a
+    /// detached (non-main) executor — see `fetch()`.
+    private nonisolated static func readTokenSync() -> Token? {
         if let raw = readViaSecurityCLI() ?? readViaSecItem() {
             return parseCredentials(raw)
         }
         return nil
     }
 
-    private func parseCredentials(_ raw: Data) -> Token? {
+    private nonisolated static func parseCredentials(_ raw: Data) -> Token? {
         struct Creds: Decodable {
             struct OAuth: Decodable {
                 let accessToken: String?
@@ -94,7 +99,7 @@ final class ClaudeUsageClient {
         return Token(accessToken: access, expiresAt: expires)
     }
 
-    private func readViaSecurityCLI() -> Data? {
+    private nonisolated static func readViaSecurityCLI() -> Data? {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/security")
         p.arguments = ["find-generic-password", "-w", "-s", "Claude Code-credentials"]
@@ -113,7 +118,7 @@ final class ClaudeUsageClient {
         return trimmed.data(using: .utf8)
     }
 
-    private func readViaSecItem() -> Data? {
+    private nonisolated static func readViaSecItem() -> Data? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: "Claude Code-credentials",

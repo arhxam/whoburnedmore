@@ -36,6 +36,7 @@ final class AppModel: ObservableObject {
     private var statusTask: Task<Void, Never>?
     private var digestTask: Task<Void, Never>?
     private var syncTask: Task<Void, Never>?
+    private var wakeObserver: NSObjectProtocol?
     private var started = false
 
     init(settings: SettingsStore) {
@@ -50,7 +51,11 @@ final class AppModel: ObservableObject {
         if settings.providerClaude, case .ready(let usage) = claudeState {
             if let p = usage.fiveHour?.utilization { percents.append(p) }
             if let p = usage.sevenDay?.utilization { percents.append(p) }
-            percents.append(contentsOf: usage.scoped.compactMap(\.percent))
+            // Only the scoped limits the popover actually surfaces — otherwise the
+            // menu bar could tint red for a limit the user can't see anywhere.
+            percents.append(contentsOf: usage.scoped
+                .filter { $0.kind == "weekly_scoped" && $0.modelName != nil }
+                .compactMap(\.percent))
         }
         if settings.providerCodex, let c = codexLimits {
             if let p = c.primary?.usedPercent { percents.append(p) }
@@ -283,7 +288,7 @@ final class AppModel: ObservableObject {
             }
         }
 
-        NSWorkspace.shared.notificationCenter.addObserver(
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
@@ -295,6 +300,10 @@ final class AppModel: ObservableObject {
 
     func stop() {
         for t in [pollTask, statusTask, digestTask, syncTask] { t?.cancel() }
+        if let wakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
+            self.wakeObserver = nil
+        }
         sidecar.stop()
     }
 
@@ -331,7 +340,8 @@ final class AppModel: ObservableObject {
         for alert in claudeEdge.feed(percent) {
             let isReset = alert.kind == "reset"
             guard (isReset && settings.notifyReset) || (!isReset && settings.notifyThresholds) else { continue }
-            notifier.deliver(provider: "Claude", kind: alert.kind, level: alert.level, percent: alert.percent)
+            let isCritical = Double(alert.level ?? 0) >= settings.criticalThreshold
+            notifier.deliver(provider: "Claude", kind: alert.kind, level: alert.level, percent: alert.percent, isCritical: isCritical)
         }
         if settings.notifyForecast,
            forecastAlarm.feed(forecastHit: claudeForecastHit, percent: percent, now: now),
@@ -421,7 +431,8 @@ final class AppModel: ObservableObject {
         case .alert(let kind, let provider, let level, let percent):
             let isReset = kind == "reset"
             if (isReset && settings.notifyReset) || (!isReset && settings.notifyThresholds) {
-                notifier.deliver(provider: provider.capitalized, kind: kind, level: level, percent: percent)
+                let isCritical = Double(level ?? 0) >= settings.criticalThreshold
+                notifier.deliver(provider: provider.capitalized, kind: kind, level: level, percent: percent, isCritical: isCritical)
             }
         case .status(let isCollecting, _, let error):
             collecting = isCollecting
