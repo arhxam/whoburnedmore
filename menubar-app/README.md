@@ -3,7 +3,7 @@
 Native macOS menu bar app showing **live token burn + remaining usage limits**
 across your AI coding tools — Claude Code, Codex, Cursor, Cline, Roo, Continue,
 and the ccusage long tail — with an optional [whoburnedmore](https://whoburnedmore.com)
-rank strip. Standalone-first: fully useful signed-out and offline.
+leaderboard context. Standalone-first: fully useful signed-out and offline.
 
 Spec: `docs/superpowers/specs/2026-08-02-burnbar-design.md` ·
 Plan: `docs/superpowers/plans/2026-08-02-burnbar-impl.md`
@@ -105,8 +105,9 @@ Code Keychain item so the Limits zone can show your 5h/weekly windows (decline
 
 **The whoburnedmore interconnect (all optional):**
 1. *Already a CLI user?* BurnBar reads `~/.config/whoburnedmore/config.json` —
-   the same file `npx whoburnedmore` writes — and the rank strip lights up with
-   your handle via the public `GET /v1/users/:handle` endpoint. Zero setup.
+   the same file `npx whoburnedmore` writes — and the leaderboard context lights
+   up with today's highest burner, the all-time leaders, and the people around
+   your rank. Zero setup.
 2. *New user?* Settings → Account → Connect runs the device flow against the
    real API (`POST /v1/auth/device` → browser approval → token polled), then
    writes the SAME config.json the CLI uses — app and CLI stay interchangeable,
@@ -117,7 +118,7 @@ Code Keychain item so the Limits zone can show your 5h/weekly windows (decline
    upserts, so app + CLI coexisting is safe). Being *listed publicly* still
    follows the site's privacy gate: signed in AND ≥1 social handle on your
    profile; until then your data is private to you.
-4. *Offline/site down:* only the rank strip greys out; limits, burn, forecasts
+4. *Offline/site down:* only the leaderboard context greys out; limits, burn, forecasts
    and notifications are fully local and keep working.
 
 "Tokens this session" counts burn observed while BurnBar is running within the

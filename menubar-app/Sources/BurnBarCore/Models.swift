@@ -241,19 +241,130 @@ public struct ClaudeUsage: Equatable, Sendable {
 
 // MARK: - whoburnedmore models
 
+public struct WbmLeaderboardEntry: Decodable, Equatable, Identifiable, Sendable {
+    public let rank: Int
+    public let handle: String
+    public let displayName: String
+    public let tokens: Int
+    public let todayTokens: Int
+    public var id: String { handle.lowercased() }
+
+    public init(rank: Int, handle: String, displayName: String, tokens: Int, todayTokens: Int) {
+        self.rank = rank
+        self.handle = handle
+        self.displayName = displayName
+        self.tokens = tokens
+        self.todayTokens = todayTokens
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case rank, handle, displayName, todayTokens
+        case tokens = "totalTokens"
+    }
+}
+
+public struct WbmLeaderboard: Decodable, Equatable, Sendable {
+    public let period: String
+    public let rows: [WbmLeaderboardEntry]
+
+    public init(period: String, rows: [WbmLeaderboardEntry]) {
+        self.period = period
+        self.rows = rows
+    }
+
+    public static func decode(data: Data) -> WbmLeaderboard? {
+        try? JSONDecoder().decode(WbmLeaderboard.self, from: data)
+    }
+
+    public var dailyLeader: WbmLeaderboardEntry? {
+        rows
+            .filter { $0.todayTokens > 0 }
+            .max { lhs, rhs in
+                lhs.todayTokens == rhs.todayTokens ? lhs.rank > rhs.rank : lhs.todayTokens < rhs.todayTokens
+            }
+    }
+
+    /// The all-time leaders plus the connected person's nearest rows. The
+    /// separate daily-leader callout becomes the sixth person in the popover.
+    public func context(for handle: String, maxRows: Int = 5) -> [WbmLeaderboardEntry] {
+        guard maxRows > 0 else { return [] }
+
+        var seen = Set<String>()
+        let ranked = rows
+            .sorted { lhs, rhs in
+                lhs.rank == rhs.rank ? lhs.handle < rhs.handle : lhs.rank < rhs.rank
+            }
+            .filter { seen.insert($0.handle.lowercased()).inserted }
+
+        var selected: [WbmLeaderboardEntry] = []
+        var selectedHandles = Set<String>()
+        func add(_ row: WbmLeaderboardEntry) {
+            guard selected.count < maxRows,
+                  selectedHandles.insert(row.handle.lowercased()).inserted else { return }
+            selected.append(row)
+        }
+
+        for row in ranked.prefix(min(2, maxRows)) { add(row) }
+
+        let normalizedHandle = handle.lowercased()
+        guard let targetIndex = ranked.firstIndex(where: { $0.handle.lowercased() == normalizedHandle }) else {
+            return selected.sorted { $0.rank < $1.rank }
+        }
+
+        add(ranked[targetIndex])
+        var distance = 1
+        while selected.count < maxRows && (targetIndex - distance >= 0 || targetIndex + distance < ranked.count) {
+            if targetIndex - distance >= 0 { add(ranked[targetIndex - distance]) }
+            if targetIndex + distance < ranked.count { add(ranked[targetIndex + distance]) }
+            distance += 1
+        }
+
+        return selected.sorted { lhs, rhs in
+            lhs.rank == rhs.rank ? lhs.handle < rhs.handle : lhs.rank < rhs.rank
+        }
+    }
+}
+
 public struct WbmProfile: Equatable, Sendable {
     public let handle: String
     public let rank: Int?
     public let dailyRank: Int?
     public let weeklyRank: Int?
     public let totalTokens: Int?
+    public let leaderboardContext: [WbmLeaderboardEntry]
+    public let dailyLeader: WbmLeaderboardEntry?
 
-    public init(handle: String, rank: Int?, dailyRank: Int?, weeklyRank: Int?, totalTokens: Int?) {
+    public init(
+        handle: String,
+        rank: Int?,
+        dailyRank: Int?,
+        weeklyRank: Int?,
+        totalTokens: Int?,
+        leaderboardContext: [WbmLeaderboardEntry] = [],
+        dailyLeader: WbmLeaderboardEntry? = nil
+    ) {
         self.handle = handle
         self.rank = rank
         self.dailyRank = dailyRank
         self.weeklyRank = weeklyRank
         self.totalTokens = totalTokens
+        self.leaderboardContext = leaderboardContext
+        self.dailyLeader = dailyLeader
+    }
+
+    public func withLeaderboardContext(
+        _ context: [WbmLeaderboardEntry],
+        dailyLeader: WbmLeaderboardEntry?
+    ) -> WbmProfile {
+        WbmProfile(
+            handle: handle,
+            rank: rank,
+            dailyRank: dailyRank,
+            weeklyRank: weeklyRank,
+            totalTokens: totalTokens,
+            leaderboardContext: context,
+            dailyLeader: dailyLeader
+        )
     }
 
     public static func decode(handle: String, data: Data) -> WbmProfile? {

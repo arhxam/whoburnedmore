@@ -313,7 +313,7 @@ final class AppModel: ObservableObject {
         async let claudeResult = claude.fetch()
         async let wbmResult = wbm.fetch()
         // Resolve the whoburnedmore rank FIRST so a slow/prompting Claude
-        // Keychain read can never block the rank strip from rendering.
+        // Keychain read can never block the leaderboard context from rendering.
         let newWbm = await wbmResult
         detectOvertaken(old: wbmState, new: newWbm)
         wbmState = newWbm

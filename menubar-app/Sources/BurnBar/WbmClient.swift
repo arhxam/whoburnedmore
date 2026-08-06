@@ -34,21 +34,42 @@ final class WbmClient {
 
     func fetch() async -> WbmState {
         guard let handle = Self.configuredHandle() else { return .noAccount }
-        guard let url = URL(string: "\(Self.apiBase())/v1/users/\(handle)") else {
+        guard let profileURL = URL(string: "\(Self.apiBase())/v1/users/\(handle)"),
+              let leaderboardURL = URL(string: "\(Self.apiBase())/v1/leaderboard?period=all&by=tokens") else {
             return .offline(handle: handle)
         }
+
+        async let profileData = fetchData(from: profileURL)
+        async let leaderboardData = fetchData(from: leaderboardURL)
+
+        guard let data = await profileData,
+              let profile = WbmProfile.decode(handle: handle, data: data) else {
+            return .offline(handle: handle)
+        }
+        guard let boardData = await leaderboardData,
+              let board = WbmLeaderboard.decode(data: boardData) else {
+            // Profile/rank availability remains useful even if the public board
+            // is temporarily stale or unreachable.
+            return .ready(profile)
+        }
+        return .ready(
+            profile.withLeaderboardContext(
+                board.context(for: handle),
+                dailyLeader: board.dailyLeader
+            )
+        )
+    }
+
+    private func fetchData(from url: URL) async -> Data? {
         var req = URLRequest(url: url)
         req.timeoutInterval = 10
-        req.setValue("burnbar/0.1.0", forHTTPHeaderField: "User-Agent")
+        req.setValue("burnbar/0.6.0", forHTTPHeaderField: "User-Agent")
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
-            guard let http = resp as? HTTPURLResponse, http.statusCode == 200,
-                  let profile = WbmProfile.decode(handle: handle, data: data) else {
-                return .offline(handle: handle)
-            }
-            return .ready(profile)
+            guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else { return nil }
+            return data
         } catch {
-            return .offline(handle: handle)
+            return nil
         }
     }
 

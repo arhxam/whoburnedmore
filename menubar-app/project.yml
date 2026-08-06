@@ -36,7 +36,7 @@ targets:
         CFBundleIdentifier: com.whoburnedmore.burnbar
         CFBundleName: BurnBar
         CFBundleDisplayName: BurnBar
-        CFBundleShortVersionString: "0.5.0"
+        CFBundleShortVersionString: "0.6.0"
         CFBundleVersion: "1"
         CFBundleIconFile: "AppIcon"
         LSUIElement: true
@@ -50,7 +50,7 @@ targets:
         # settings — not the info.properties above — so they MUST be set or the
         # bundle ships with no CFBundleShortVersionString (which also blocks
         # notarization).
-        MARKETING_VERSION: "0.5.0"
+        MARKETING_VERSION: "0.6.0"
         CURRENT_PROJECT_VERSION: "1"
 
   BurnBarCoreTests:

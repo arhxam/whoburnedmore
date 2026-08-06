@@ -119,7 +119,7 @@ struct SettingsRootView: View {
                     .buttonStyle(.plain)
                 }
                 Spacer()
-                Text("BurnBar 0.5.0").font(.caption2).foregroundStyle(.tertiary).padding(.leading, 8)
+                Text("BurnBar 0.6.0").font(.caption2).foregroundStyle(.tertiary).padding(.leading, 8)
             }
             .padding(10)
             .frame(width: 170)
@@ -285,7 +285,7 @@ struct PopoverPane: View {
             Toggle("↳ day streak", isOn: $settings.showStreak)
                 .padding(.leading, 18).disabled(!settings.showBurn)
             Toggle("Top tools + models", isOn: $settings.showTools)
-            Toggle("whoburnedmore rank strip", isOn: $settings.showWbm)
+            Toggle("whoburnedmore leaderboard context", isOn: $settings.showWbm)
             Toggle("↳ rival line (\"@dax is 2.1M ahead\")", isOn: $settings.showRival)
                 .padding(.leading, 18).disabled(!settings.showWbm)
         }

@@ -363,25 +363,136 @@ struct WbmZone: View {
             HStack { Image(systemName: "wifi.slash"); Text("@\(handle) — whoburnedmore offline").font(.caption) }
                 .foregroundStyle(.secondary)
         case .ready(let profile):
-            Button {
-                if let url = WbmClient.profileURL() { NSWorkspace.shared.open(url) }
-            } label: {
+            if profile.leaderboardContext.isEmpty {
+                WbmRankStrip(profile: profile)
+            } else {
+                LeaderboardContext(profile: profile)
+            }
+        }
+    }
+}
+
+private struct WbmRankStrip: View {
+    let profile: WbmProfile
+
+    var body: some View {
+        Button {
+            if let url = WbmClient.profileURL() { NSWorkspace.shared.open(url) }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "trophy.fill").foregroundStyle(.orange)
+                Text("@\(profile.handle)").font(.callout.weight(.medium))
+                Spacer()
+                if let rank = profile.rank {
+                    Text("#\(rank)").font(.callout.monospacedDigit().weight(.semibold))
+                }
+                if let daily = profile.dailyRank {
+                    Text("today #\(daily)").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Open your whoburnedmore profile")
+    }
+}
+
+private struct LeaderboardContext: View {
+    let profile: WbmProfile
+
+    var body: some View {
+        Button {
+            if let url = WbmClient.profileURL() { NSWorkspace.shared.open(url) }
+        } label: {
+            VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
                     Image(systemName: "trophy.fill").foregroundStyle(.orange)
-                    Text("@\(profile.handle)").font(.callout.weight(.medium))
+                    Text("Leaderboard context").font(.caption.weight(.semibold)).textCase(.uppercase)
                     Spacer()
-                    if let rank = profile.rank {
-                        Text("#\(rank)").font(.callout.monospacedDigit().weight(.semibold))
-                    }
-                    if let daily = profile.dailyRank {
-                        Text("today #\(daily)").font(.caption).foregroundStyle(.secondary)
-                    }
+                    Text("open ↗").font(.caption2).foregroundStyle(.tertiary)
                 }
-                .contentShape(Rectangle())
+
+                if let leader = profile.dailyLeader {
+                    HStack(spacing: 6) {
+                        Image(systemName: "flame.fill").font(.system(size: 9)).foregroundStyle(.orange)
+                        Text("today's highest").font(.caption2).foregroundStyle(.secondary)
+                        Text(leader.displayName.isEmpty ? "@\(leader.handle)" : leader.displayName)
+                            .font(.caption.weight(.medium)).lineLimit(1)
+                        Spacer(minLength: 4)
+                        Text(Formatters.compactTokens(leader.todayTokens))
+                            .font(.caption.monospacedDigit().weight(.semibold)).foregroundStyle(.orange)
+                    }
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 4)
+                    .background(Color.orange.opacity(0.07), in: RoundedRectangle(cornerRadius: 5))
+                }
+
+                ForEach(Array(profile.leaderboardContext.enumerated()), id: \.element.id) { index, row in
+                    if index > 0, row.rank - profile.leaderboardContext[index - 1].rank > 1 {
+                        HStack(spacing: 6) {
+                            Rectangle().fill(Color.secondary.opacity(0.16)).frame(height: 1)
+                            Text("•••").font(.system(size: 7)).foregroundStyle(.tertiary)
+                            Rectangle().fill(Color.secondary.opacity(0.16)).frame(height: 1)
+                        }
+                        .frame(height: 8)
+                    }
+                    LeaderboardContextRow(row: row, isMe: row.handle.caseInsensitiveCompare(profile.handle) == .orderedSame)
+                }
+
+                HStack(spacing: 4) {
+                    Text("@\(profile.handle)")
+                    if let rank = profile.rank {
+                        Text("· all time #\(rank)")
+                    }
+                    Spacer()
+                    Text("all-time tokens")
+                }
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .padding(.top, 2)
             }
-            .buttonStyle(.plain)
-            .help("Open your whoburnedmore profile")
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .help("Open your whoburnedmore profile")
+    }
+}
+
+private struct LeaderboardContextRow: View {
+    let row: WbmLeaderboardEntry
+    let isMe: Bool
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Group {
+                if row.rank == 1 {
+                    Image(systemName: "crown.fill").font(.system(size: 9)).foregroundStyle(.orange)
+                } else {
+                    Text("#\(row.rank)").font(.caption2.monospacedDigit().weight(.semibold))
+                }
+            }
+            .frame(width: 28, alignment: .trailing)
+
+            Text(row.displayName.isEmpty ? "@\(row.handle)" : row.displayName)
+                .font(.caption.weight(isMe ? .semibold : .regular))
+                .lineLimit(1)
+            if isMe {
+                Text("you")
+                    .font(.system(size: 8, weight: .bold))
+                    .textCase(.uppercase)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .foregroundStyle(.black)
+                    .background(Color.orange, in: Capsule())
+            }
+            Spacer(minLength: 6)
+            Text(Formatters.compactTokens(row.tokens))
+                .font(.caption.monospacedDigit().weight(.medium))
+                .foregroundStyle(isMe ? .orange : .secondary)
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .background(isMe ? Color.orange.opacity(0.10) : Color.clear, in: RoundedRectangle(cornerRadius: 5))
     }
 }
 

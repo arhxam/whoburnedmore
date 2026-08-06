@@ -64,6 +64,66 @@ final class ModelsTests: XCTestCase {
         XCTAssertNil(WbmProfile.decode(handle: "x", data: Data("[]".utf8)))
     }
 
+    func testWbmLeaderboardDecodingAndContext() {
+        let rows = (1...15).map { rank in
+            """
+            {"rank":\(rank),"handle":"person-\(rank)","displayName":"Person \(rank)","totalTokens":\(rank * 1_000_000),"todayTokens":\(rank == 7 ? 9_000_000 : rank * 10_000)}
+            """
+        }.joined(separator: ",")
+        let json = "{\"period\":\"all\",\"rows\":[\(rows)],\"extra\":true}"
+
+        let board = WbmLeaderboard.decode(data: Data(json.utf8))
+        XCTAssertEqual(board?.period, "all")
+        XCTAssertEqual(board?.rows.first?.displayName, "Person 1")
+        XCTAssertEqual(board?.rows.first?.tokens, 1_000_000)
+        XCTAssertEqual(board?.dailyLeader?.rank, 7)
+        XCTAssertEqual(board?.dailyLeader?.todayTokens, 9_000_000)
+        XCTAssertEqual(
+            board?.context(for: "person-12").map(\.rank),
+            [1, 2, 11, 12, 13]
+        )
+    }
+
+    func testWbmLeaderboardContextDeduplicatesAndBackfillsNearTheTop() {
+        var rows = (1...8).map {
+            WbmLeaderboardEntry(rank: $0, handle: "person-\($0)", displayName: "Person \($0)", tokens: $0 * 100, todayTokens: $0)
+        }
+        rows.append(WbmLeaderboardEntry(rank: 4, handle: "PERSON-4", displayName: "Duplicate", tokens: 1, todayTokens: 1))
+        let board = WbmLeaderboard(period: "all", rows: rows)
+
+        let context = board.context(for: "person-4")
+        XCTAssertEqual(context.map(\.rank), [1, 2, 3, 4, 5])
+        XCTAssertEqual(Set(context.map { $0.handle.lowercased() }).count, context.count)
+        XCTAssertEqual(context.count, 5)
+    }
+
+    func testWbmLeaderboardContextFallsBackToTopTwoWhenPersonIsMissing() {
+        let board = WbmLeaderboard(
+            period: "all",
+            rows: (1...8).map {
+                WbmLeaderboardEntry(rank: $0, handle: "person-\($0)", displayName: "Person \($0)", tokens: $0 * 100, todayTokens: $0)
+            }
+        )
+
+        XCTAssertEqual(board.context(for: "not-listed").map(\.rank), [1, 2])
+        XCTAssertEqual(board.context(for: "person-8", maxRows: 4).map(\.rank), [1, 2, 7, 8])
+    }
+
+    func testWbmProfileCanAttachLeaderboardContextWithoutChangingProfileTotals() {
+        let profile = WbmProfile(handle: "me", rank: 12, dailyRank: 4, weeklyRank: 7, totalTokens: 123_456)
+        let context = [
+            WbmLeaderboardEntry(rank: 1, handle: "leader", displayName: "Leader", tokens: 9_000, todayTokens: 700),
+            WbmLeaderboardEntry(rank: 4, handle: "me", displayName: "Me", tokens: 4_000, todayTokens: 400),
+        ]
+
+        let enriched = profile.withLeaderboardContext(context, dailyLeader: context[0])
+        XCTAssertEqual(enriched.rank, 12)
+        XCTAssertEqual(enriched.dailyRank, 4)
+        XCTAssertEqual(enriched.totalTokens, 123_456)
+        XCTAssertEqual(enriched.leaderboardContext, context)
+        XCTAssertEqual(enriched.dailyLeader, context[0])
+    }
+
     func testAlertEdgeMirrorsSidecarSemantics() {
         var edge = AlertEdge()
         XCTAssertTrue(edge.feed(92).isEmpty) // first sample: no edge
