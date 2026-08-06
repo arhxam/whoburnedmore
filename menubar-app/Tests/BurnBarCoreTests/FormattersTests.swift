@@ -49,6 +49,13 @@ final class FormattersTests: XCTestCase {
         XCTAssertEqual(MeterState.worst(of: []), .normal)
     }
 
+    func testPercentFormattingClampsPresentation() {
+        XCTAssertEqual(Formatters.percent(141), "100%")
+        XCTAssertEqual(Formatters.percent(-12), "0%")
+        XCTAssertNil(Formatters.percent(nil))
+        XCTAssertNil(Formatters.percent(.infinity))
+    }
+
     func testMenuBarTextModes() {
         let summary = Summary(
             generatedAt: "2026-08-02T00:00:00Z",

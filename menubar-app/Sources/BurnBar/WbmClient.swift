@@ -35,7 +35,7 @@ final class WbmClient {
     func fetch() async -> WbmState {
         guard let handle = Self.configuredHandle() else { return .noAccount }
         guard let profileURL = URL(string: "\(Self.apiBase())/v1/users/\(handle)"),
-              let leaderboardURL = URL(string: "\(Self.apiBase())/v1/leaderboard?period=all&by=tokens") else {
+              let leaderboardURL = URL(string: "\(Self.apiBase())/v1/leaderboard?period=today&by=tokens") else {
             return .offline(handle: handle)
         }
 
@@ -55,7 +55,7 @@ final class WbmClient {
         return .ready(
             profile.withLeaderboardContext(
                 board.context(for: handle),
-                dailyLeader: board.dailyLeader
+                dailyLeader: nil
             )
         )
     }
@@ -63,7 +63,7 @@ final class WbmClient {
     private func fetchData(from url: URL) async -> Data? {
         var req = URLRequest(url: url)
         req.timeoutInterval = 10
-        req.setValue("burnbar/0.6.0", forHTTPHeaderField: "User-Agent")
+        req.setValue("burnbar/0.7.0", forHTTPHeaderField: "User-Agent")
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
             guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else { return nil }

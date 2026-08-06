@@ -14,6 +14,7 @@ public enum MenuBarMetric: String, CaseIterable, Sendable {
     case weekTokens
     case weekCost
     case tightestLimit // worst % across every tracked window
+    case creditsRemaining // provider-reported prepaid credits (Codex only)
     case none
 
     /// One provider's numbers, so a menu-bar slot can be scoped to Claude, Codex,
@@ -28,11 +29,13 @@ public enum MenuBarMetric: String, CaseIterable, Sendable {
         public var todayTokens: Int?
         public var todayCost: Double?
         public var sessionTokens: Int?
+        public var creditsRemaining: String?
 
         public init(
             sessionPercent: Double? = nil, sessionReset: Date? = nil,
             weeklyPercent: Double? = nil, weeklyReset: Date? = nil,
-            todayTokens: Int? = nil, todayCost: Double? = nil, sessionTokens: Int? = nil
+            todayTokens: Int? = nil, todayCost: Double? = nil, sessionTokens: Int? = nil,
+            creditsRemaining: String? = nil
         ) {
             self.sessionPercent = sessionPercent
             self.sessionReset = sessionReset
@@ -41,6 +44,7 @@ public enum MenuBarMetric: String, CaseIterable, Sendable {
             self.todayTokens = todayTokens
             self.todayCost = todayCost
             self.sessionTokens = sessionTokens
+            self.creditsRemaining = creditsRemaining
         }
     }
 
@@ -87,22 +91,22 @@ public enum MenuBarMetric: String, CaseIterable, Sendable {
     }
 
     public func text(_ i: Inputs) -> String? {
-        func pct(_ v: Double?) -> String? { v.map { "\(Int($0.rounded()))%" } }
         switch self {
-        case .sessionPercent: return pct(i.sessionPercent)
+        case .sessionPercent: return Formatters.percent(i.sessionPercent)
         case .sessionCountdown:
             guard let r = i.sessionReset else { return nil }
             return Formatters.countdown(to: r, from: i.now)
         case .sessionTokens: return i.sessionTokens.map { Formatters.compactTokens($0) }
         case .todayTokens: return i.summary.map { Formatters.compactTokens($0.today.totalTokens) }
         case .todayCost: return i.summary.map { Formatters.usd($0.today.costUSD) }
-        case .weeklyPercent: return pct(i.weeklyPercent)
+        case .weeklyPercent: return Formatters.percent(i.weeklyPercent)
         case .weeklyReset:
             guard let r = i.weeklyReset else { return nil }
             return Formatters.countdown(to: r, from: i.now)
         case .weekTokens: return i.summary.map { Formatters.compactTokens($0.week.totalTokens) }
         case .weekCost: return i.summary.map { Formatters.usd($0.week.costUSD) }
-        case .tightestLimit: return pct(i.worstPercent)
+        case .tightestLimit: return Formatters.percent(i.worstPercent)
+        case .creditsRemaining: return nil
         case .none: return nil
         }
     }
@@ -115,31 +119,55 @@ public enum MenuBarMetric: String, CaseIterable, Sendable {
     public func text(_ i: Inputs, provider: String) -> String? {
         guard provider != "all", isProviderScoped else { return text(i) }
         guard let s = i.byProvider[provider] else { return nil }
-        func pct(_ v: Double?) -> String? { v.map { "\(Int($0.rounded()))%" } }
         switch self {
-        case .sessionPercent: return pct(s.sessionPercent)
+        case .sessionPercent: return Formatters.percent(s.sessionPercent)
         case .sessionCountdown: return s.sessionReset.map { Formatters.countdown(to: $0, from: i.now) }
         case .sessionTokens: return s.sessionTokens.map { Formatters.compactTokens($0) }
         case .todayTokens: return s.todayTokens.map { Formatters.compactTokens($0) }
         case .todayCost: return s.todayCost.map { Formatters.usd($0) }
-        case .weeklyPercent: return pct(s.weeklyPercent)
+        case .weeklyPercent: return Formatters.percent(s.weeklyPercent)
         case .weeklyReset: return s.weeklyReset.map { Formatters.countdown(to: $0, from: i.now) }
         // Per-provider week totals aren't tracked; collapse rather than mislead.
         case .weekTokens, .weekCost: return nil
+        case .creditsRemaining: return s.creditsRemaining.map { "\($0) cr" }
         case .tightestLimit, .none: return text(i)
         }
     }
 
-    /// One-letter provider tag shown in the bar for provider-scoped slots.
+    /// Readable provider tag shown in the bar for provider-scoped slots.
     public static func providerTag(_ provider: String) -> String {
         switch provider {
-        case "claude": return "C"
-        case "codex": return "X"
-        case "cursor": return "U"
-        case "copilot": return "P"
-        case "gemini": return "G"
-        default: return provider.isEmpty ? "" : String(provider.prefix(1)).uppercased()
+        case "claude": return "Claude"
+        case "codex": return "Codex"
+        case "cursor": return "Cursor"
+        case "copilot": return "Copilot"
+        case "gemini": return "Gemini"
+        default: return provider.isEmpty ? "" : provider.capitalized
         }
+    }
+
+    /// Only offer metrics for which the selected source has honest data.
+    public static func availableMetrics(for provider: String, allowNone: Bool) -> [MenuBarMetric] {
+        let metrics: [MenuBarMetric]
+        switch provider {
+        case "all":
+            metrics = [.todayTokens, .todayCost, .weekTokens, .weekCost, .tightestLimit]
+        case "claude":
+            metrics = [.sessionPercent, .sessionCountdown, .weeklyPercent, .weeklyReset, .todayTokens, .todayCost]
+        case "codex":
+            metrics = [.sessionPercent, .sessionCountdown, .weeklyPercent, .weeklyReset, .creditsRemaining, .todayTokens, .todayCost]
+        case "cursor":
+            metrics = [.sessionPercent, .sessionCountdown, .todayTokens, .todayCost]
+        default:
+            metrics = [.todayTokens, .todayCost]
+        }
+        return allowNone ? metrics + [.none] : metrics
+    }
+
+    public static func normalized(_ metric: MenuBarMetric, for provider: String, allowNone: Bool) -> MenuBarMetric {
+        let available = availableMetrics(for: provider, allowNone: allowNone)
+        if available.contains(metric) { return metric }
+        return provider == "all" ? .todayTokens : (provider == "claude" || provider == "codex" || provider == "cursor" ? .sessionPercent : .todayTokens)
     }
 
     public var label: String {
@@ -154,7 +182,17 @@ public enum MenuBarMetric: String, CaseIterable, Sendable {
         case .weekTokens: return "This week's tokens"
         case .weekCost: return "This week's cost"
         case .tightestLimit: return "Tightest limit %"
+        case .creditsRemaining: return "Credits remaining"
         case .none: return "Nothing"
+        }
+    }
+
+    public func label(for provider: String) -> String {
+        switch self {
+        case .sessionPercent: return provider == "cursor" ? "Plan used" : "5-hour used"
+        case .sessionCountdown: return provider == "cursor" ? "Plan reset" : "5-hour reset"
+        case .weeklyPercent: return "Weekly used"
+        default: return label
         }
     }
 
@@ -170,7 +208,7 @@ public enum MenuBarMetric: String, CaseIterable, Sendable {
     }
 
     /// Render provider-scoped slots: each slot is (metric, providerKey). A
-    /// provider-specific slot is prefixed with its one-letter tag ("X 71%") so a
+    /// provider-specific slot is prefixed with its readable name ("Codex 71%") so a
     /// bar mixing e.g. Claude and Codex session % stays readable; "all" slots and
     /// global metrics render bare.
     public static func slotsText(_ slots: [(MenuBarMetric, String)], _ i: Inputs) -> String? {

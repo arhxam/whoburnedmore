@@ -383,11 +383,10 @@ private struct WbmRankStrip: View {
                 Image(systemName: "trophy.fill").foregroundStyle(.orange)
                 Text("@\(profile.handle)").font(.callout.weight(.medium))
                 Spacer()
-                if let rank = profile.rank {
-                    Text("#\(rank)").font(.callout.monospacedDigit().weight(.semibold))
-                }
                 if let daily = profile.dailyRank {
-                    Text("today #\(daily)").font(.caption).foregroundStyle(.secondary)
+                    Text("today #\(daily)").font(.callout.monospacedDigit().weight(.semibold))
+                } else {
+                    Text("not ranked today").font(.caption).foregroundStyle(.secondary)
                 }
             }
             .contentShape(Rectangle())
@@ -398,35 +397,35 @@ private struct WbmRankStrip: View {
 }
 
 private struct LeaderboardContext: View {
+    @EnvironmentObject private var model: AppModel
     let profile: WbmProfile
 
     var body: some View {
-        Button {
-            if let url = WbmClient.profileURL() { NSWorkspace.shared.open(url) }
-        } label: {
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 6) {
-                    Image(systemName: "trophy.fill").foregroundStyle(.orange)
-                    Text("Leaderboard context").font(.caption.weight(.semibold)).textCase(.uppercase)
-                    Spacer()
-                    Text("open ↗").font(.caption2).foregroundStyle(.tertiary)
-                }
-
-                if let leader = profile.dailyLeader {
-                    HStack(spacing: 6) {
-                        Image(systemName: "flame.fill").font(.system(size: 9)).foregroundStyle(.orange)
-                        Text("today's highest").font(.caption2).foregroundStyle(.secondary)
-                        Text(leader.displayName.isEmpty ? "@\(leader.handle)" : leader.displayName)
-                            .font(.caption.weight(.medium)).lineLimit(1)
-                        Spacer(minLength: 4)
-                        Text(Formatters.compactTokens(leader.todayTokens))
-                            .font(.caption.monospacedDigit().weight(.semibold)).foregroundStyle(.orange)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Image(systemName: "trophy.fill").foregroundStyle(.orange)
+                Text("Today’s leaderboard").font(.caption.weight(.semibold))
+                syncStatus
+                Spacer()
+                Button {
+                    if !model.settings.syncEnabled {
+                        model.setLeaderboardSyncEnabled(true)
+                    } else {
+                        Task { await model.syncLeaderboardNow() }
                     }
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 4)
-                    .background(Color.orange.opacity(0.07), in: RoundedRectangle(cornerRadius: 5))
+                } label: {
+                    Text("Sync now")
                 }
+                .buttonStyle(.plain)
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(.orange)
+                .disabled(model.leaderboardSyncState == .syncing)
+            }
 
+            Button {
+                if let url = WbmClient.profileURL() { NSWorkspace.shared.open(url) }
+            } label: {
+                VStack(alignment: .leading, spacing: 4) {
                 ForEach(Array(profile.leaderboardContext.enumerated()), id: \.element.id) { index, row in
                     if index > 0, row.rank - profile.leaderboardContext[index - 1].rank > 1 {
                         HStack(spacing: 6) {
@@ -441,20 +440,55 @@ private struct LeaderboardContext: View {
 
                 HStack(spacing: 4) {
                     Text("@\(profile.handle)")
-                    if let rank = profile.rank {
-                        Text("· all time #\(rank)")
+                    if let dailyRank = profile.leaderboardContext.first(where: {
+                        $0.handle.caseInsensitiveCompare(profile.handle) == .orderedSame
+                    })?.rank {
+                        Text("· today #\(dailyRank)")
+                    } else {
+                        Text("· not ranked today")
                     }
                     Spacer()
-                    Text("all-time tokens")
+                    if let local = model.summary?.today.totalTokens,
+                       let synced = profile.leaderboardContext.first(where: {
+                           $0.handle.caseInsensitiveCompare(profile.handle) == .orderedSame
+                       })?.todayTokens,
+                       local != synced {
+                        Text("local \(Formatters.compactTokens(local)) · synced \(Formatters.compactTokens(synced))")
+                    } else {
+                        Text("daily tokens")
+                    }
                 }
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
                 .padding(.top, 2)
+                }
+                .contentShape(Rectangle())
             }
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+            .help("Open your whoburnedmore profile")
         }
-        .buttonStyle(.plain)
-        .help("Open your whoburnedmore profile")
+    }
+
+    @ViewBuilder
+    private var syncStatus: some View {
+        Group {
+            switch model.leaderboardSyncState {
+            case .off:
+                Text("sync off").foregroundStyle(.secondary)
+            case .waiting:
+                Text("waiting").foregroundStyle(.secondary)
+            case .syncing:
+                ProgressView().controlSize(.mini)
+                Text("syncing").foregroundStyle(.orange)
+            case .synced:
+                Circle().fill(Color.green).frame(width: 5, height: 5)
+                Text("synced").foregroundStyle(.green)
+            case .failed(let message):
+                Circle().fill(Color.red).frame(width: 5, height: 5)
+                Text(message).foregroundStyle(.red)
+            }
+        }
+        .font(.caption2.weight(.medium))
     }
 }
 
@@ -486,7 +520,7 @@ private struct LeaderboardContextRow: View {
                     .background(Color.orange, in: Capsule())
             }
             Spacer(minLength: 6)
-            Text(Formatters.compactTokens(row.tokens))
+            Text(Formatters.compactTokens(row.todayTokens))
                 .font(.caption.monospacedDigit().weight(.medium))
                 .foregroundStyle(isMe ? .orange : .secondary)
         }

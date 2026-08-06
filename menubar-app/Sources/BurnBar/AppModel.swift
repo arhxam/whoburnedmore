@@ -5,6 +5,14 @@ import os
 
 @MainActor
 final class AppModel: ObservableObject {
+    enum LeaderboardSyncState: Equatable {
+        case off
+        case waiting
+        case syncing
+        case synced(Date)
+        case failed(String)
+    }
+
     private let log = Logger(subsystem: "com.whoburnedmore.burnbar", category: "model")
 
     @Published var summary: Summary?
@@ -16,6 +24,7 @@ final class AppModel: ObservableObject {
     @Published var claudeState: ClaudeUsageState = .unavailable(reason: "starting…")
     @Published var claudeForecastHit: Date?
     @Published var wbmState: WbmState = .noAccount
+    @Published var leaderboardSyncState: LeaderboardSyncState
     @Published var anthropicStatus: StatusPageState?
     @Published var openaiStatus: StatusPageState?
     @Published var streakDays: Int = 0
@@ -41,6 +50,7 @@ final class AppModel: ObservableObject {
 
     init(settings: SettingsStore) {
         self.settings = settings
+        leaderboardSyncState = settings.syncEnabled ? .waiting : .off
     }
 
     // MARK: derived state
@@ -205,6 +215,7 @@ final class AppModel: ObservableObject {
             s.sessionReset = Formatters.parseISO(c.primary?.resetsAt)
             s.weeklyPercent = c.secondary?.usedPercent
             s.weeklyReset = Formatters.parseISO(c.secondary?.resetsAt)
+            s.creditsRemaining = c.creditsBalance
             out["codex"] = s
         }
         if let cu = cursorLimits, cu.present {
@@ -258,7 +269,7 @@ final class AppModel: ObservableObject {
         started = true
         sidecar.onEvent = { [weak self] event in self?.handle(event) }
         sidecar.start()
-        if settings.notifyThresholds || settings.notifyReset || settings.notifyForecast {
+        if settings.notificationsEnabled && (settings.notifyThresholds || settings.notifyReset || settings.notifyForecast) {
             notifier.requestPermission()
         }
 
@@ -293,7 +304,11 @@ final class AppModel: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.sidecar.requestRefresh()
-                await self?.refreshRemote()
+                if self?.settings.syncEnabled == true {
+                    await self?.syncLeaderboardNow()
+                } else {
+                    await self?.refreshRemote()
+                }
             }
         }
     }
@@ -309,15 +324,42 @@ final class AppModel: ObservableObject {
 
     // MARK: refresh paths
 
+    func setClaudeLimitsEnabled(_ enabled: Bool) async {
+        settings.claudeLimitsEnabled = enabled
+        guard enabled else {
+            claudeState = .unavailable(reason: "Claude limits access is off")
+            claudeForecastHit = nil
+            return
+        }
+        if let state = await claude.fetch() {
+            claudeState = state
+            if case .ready(let usage) = state { feedClaudeAlerts(usage) }
+        }
+    }
+
+    func setNotificationsEnabled(_ enabled: Bool) {
+        settings.notificationsEnabled = enabled
+        if enabled { notifier.requestPermission() }
+    }
+
+    func setLeaderboardSyncEnabled(_ enabled: Bool) {
+        settings.syncEnabled = enabled
+        leaderboardSyncState = enabled ? .waiting : .off
+        if enabled {
+            Task { await syncLeaderboardNow() }
+        }
+    }
+
+    private func fetchClaudeIfEnabled() async -> ClaudeUsageState? {
+        guard settings.claudeLimitsEnabled else { return nil }
+        return await claude.fetch()
+    }
+
     func refreshRemote() async {
-        async let claudeResult = claude.fetch()
-        async let wbmResult = wbm.fetch()
+        async let claudeResult = fetchClaudeIfEnabled()
         // Resolve the whoburnedmore rank FIRST so a slow/prompting Claude
         // Keychain read can never block the leaderboard context from rendering.
-        let newWbm = await wbmResult
-        detectOvertaken(old: wbmState, new: newWbm)
-        wbmState = newWbm
-        if case .ready = newWbm { recomputeStreak() }
+        await refreshLeaderboard()
         if let state = await claudeResult {
             claudeState = state
             if case .ready(let usage) = state {
@@ -325,6 +367,13 @@ final class AppModel: ObservableObject {
             }
         }
         lastUpdatedAt = Date()
+    }
+
+    private func refreshLeaderboard() async {
+        let newWbm = await wbm.fetch()
+        detectOvertaken(old: wbmState, new: newWbm)
+        wbmState = newWbm
+        if case .ready = newWbm { recomputeStreak() }
     }
 
     private func feedClaudeAlerts(_ usage: ClaudeUsage) {
@@ -336,6 +385,7 @@ final class AppModel: ObservableObject {
         }
         claudeForecastHit = Forecast.limitHit(samples: claudeSamples, now: now)
 
+        guard settings.notificationsEnabled else { return }
         claudeEdge.thresholds = [settings.warnThreshold, settings.criticalThreshold]
         for alert in claudeEdge.feed(percent) {
             let isReset = alert.kind == "reset"
@@ -351,7 +401,7 @@ final class AppModel: ObservableObject {
     }
 
     private func detectOvertaken(old: WbmState, new: WbmState) {
-        guard settings.notifyOvertaken,
+        guard settings.notificationsEnabled, settings.notifyOvertaken,
               case .ready(let profile) = new, let newRank = profile.dailyRank else { return }
         if let prev = prevDailyRank, newRank > prev {
             notifier.deliverOvertaken(newRank: newRank)
@@ -388,7 +438,7 @@ final class AppModel: ObservableObject {
     private var lastDigestDay: String?
 
     private func maybeSendDigest() async {
-        guard settings.digestEnabled, let s = summary else { return }
+        guard settings.notificationsEnabled, settings.digestEnabled, let s = summary else { return }
         let now = Date()
         let hour = Calendar.current.component(.hour, from: now)
         let day = ISO8601DateFormatter().string(from: now).prefix(10)
@@ -399,18 +449,85 @@ final class AppModel: ObservableObject {
         notifier.deliverDigest(tokens: s.today.totalTokens, costUSD: s.today.costUSD, dailyRank: rank)
     }
 
-    private func maybeSync() async {
-        guard settings.syncEnabled else { return }
-        guard let sidecarURL = SidecarClient.sidecarURL() else { return }
+    func syncLeaderboardNow() async {
+        guard settings.syncEnabled else {
+            leaderboardSyncState = .off
+            return
+        }
+        guard leaderboardSyncState != .syncing else { return }
+        guard let sidecarURL = SidecarClient.sidecarURL() else {
+            leaderboardSyncState = .failed("sync helper missing")
+            return
+        }
+        leaderboardSyncState = .syncing
+
         let p = Process()
         p.executableURL = sidecarURL
         p.arguments = ["sync"]
         var env = ProcessInfo.processInfo.environment
         if let ccusage = SidecarClient.ccusageURL() { env["BURNBAR_CCUSAGE"] = ccusage.path }
         p.environment = env
-        p.standardOutput = FileHandle.nullDevice
-        p.standardError = FileHandle.nullDevice
-        try? p.run()
+        let output = Pipe()
+        p.standardOutput = output
+        p.standardError = output
+
+        let result: (ok: Bool, message: String?) = await withCheckedContinuation { continuation in
+            p.terminationHandler = { finished in
+                let data = output.fileHandleForReading.readDataToEndOfFile()
+                let text = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                continuation.resume(returning: (finished.terminationStatus == 0, text))
+            }
+            do {
+                try p.run()
+            } catch {
+                continuation.resume(returning: (false, error.localizedDescription))
+            }
+        }
+
+        if result.ok {
+            let now = Date()
+            await refreshLeaderboardAfterSync()
+            leaderboardSyncState = .synced(now)
+            lastUpdatedAt = now
+        } else {
+            let message = Self.syncErrorMessage(result.message)
+            leaderboardSyncState = .failed(message)
+            log.error("leaderboard sync failed: \(message)")
+        }
+    }
+
+    private func maybeSync() async {
+        guard settings.syncEnabled else { return }
+        await syncLeaderboardNow()
+    }
+
+    /// The public board serves stale data while its cache recomputes. A successful
+    /// upload therefore gets a few bounded follow-up reads before we label the UI
+    /// synced, so the app and website converge in the same interaction.
+    private func refreshLeaderboardAfterSync() async {
+        let delays: [Duration] = [.milliseconds(500), .seconds(1), .seconds(2), .seconds(3)]
+        for attempt in 0...delays.count {
+            await refreshLeaderboard()
+            guard let localToday = summary?.today.totalTokens,
+                  case .ready(let profile) = wbmState,
+                  profile.dailyRank != nil else { return }
+            let syncedToday = profile.leaderboardContext.first {
+                $0.handle.caseInsensitiveCompare(profile.handle) == .orderedSame
+            }?.todayTokens
+            if syncedToday == localToday { return }
+            if attempt < delays.count {
+                try? await Task.sleep(for: delays[attempt])
+            }
+        }
+    }
+
+    private static func syncErrorMessage(_ output: String?) -> String {
+        guard let output, !output.isEmpty else { return "upload failed" }
+        if output.contains("not-connected") || output.contains("unauthorized") {
+            return "connect your account"
+        }
+        if output.contains("no-usage") { return "no usage found" }
+        return "upload failed"
     }
 
     // MARK: sidecar events
@@ -430,7 +547,7 @@ final class AppModel: ObservableObject {
             cursorLimits = l.cursor
         case .alert(let kind, let provider, let level, let percent):
             let isReset = kind == "reset"
-            if (isReset && settings.notifyReset) || (!isReset && settings.notifyThresholds) {
+            if settings.notificationsEnabled && ((isReset && settings.notifyReset) || (!isReset && settings.notifyThresholds)) {
                 let isCritical = Double(level ?? 0) >= settings.criticalThreshold
                 notifier.deliver(provider: provider.capitalized, kind: kind, level: level, percent: percent, isCritical: isCritical)
             }

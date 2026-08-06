@@ -37,6 +37,15 @@ final class MetricSlotTests: XCTestCase {
         XCTAssertNil(MenuBarMetric.none.text(i))
     }
 
+    func testPercentPresentationCapsAtOneHundredWithoutChangingSeverity() {
+        let i = inputs(session: 141, weekly: 118, worst: 141)
+        XCTAssertEqual(MenuBarMetric.sessionPercent.text(i), "100%")
+        XCTAssertEqual(MenuBarMetric.weeklyPercent.text(i), "100%")
+        XCTAssertEqual(MenuBarMetric.tightestLimit.text(i), "100%")
+        XCTAssertEqual(MeterState(percent: 141), .critical)
+        XCTAssertEqual(MeterState(percent: 141).iconName, "flame.fill")
+    }
+
     func testMetricSlotPairJoinAndCollapse() {
         let i = inputs()
         // The user's exact ask: session % next to today's tokens.
@@ -81,16 +90,16 @@ final class MetricSlotTests: XCTestCase {
 
     func testFreshInstallDefaultTrio() {
         // A fresh install (no legacy textMode) ships the default bar:
-        // today's tokens · session % · session resets-in, all "all"-scoped.
+        // overall today tokens, then distinct Claude and Codex 5-hour limits.
         let d = UserDefaults(suiteName: "bb-fresh-\(UUID().uuidString)")!
         let store = MainActor.assumeIsolated { SettingsStore(defaults: d) }
         MainActor.assumeIsolated {
             XCTAssertEqual(store.metricSlot1, .todayTokens)
             XCTAssertEqual(store.metricSlot2, .sessionPercent)
-            XCTAssertEqual(store.metricSlot3, .sessionCountdown)
+            XCTAssertEqual(store.metricSlot3, .sessionPercent)
             XCTAssertEqual(store.metricProvider1, "all")
-            XCTAssertEqual(store.metricProvider2, "all")
-            XCTAssertEqual(store.metricProvider3, "all")
+            XCTAssertEqual(store.metricProvider2, "claude")
+            XCTAssertEqual(store.metricProvider3, "codex")
         }
     }
 
@@ -112,7 +121,7 @@ final class MetricSlotTests: XCTestCase {
         let base = inputs()
         let codex = MenuBarMetric.ProviderStats(
             sessionPercent: 71, sessionReset: Date(timeIntervalSince1970: 2_000_000 + 7200),
-            todayTokens: 98_600_000
+            todayTokens: 98_600_000, creditsRemaining: "42.5"
         )
         let claude = MenuBarMetric.ProviderStats(sessionPercent: 40, todayTokens: 12_300_000)
         let i = MenuBarMetric.Inputs(
@@ -125,10 +134,11 @@ final class MetricSlotTests: XCTestCase {
         // "all" tokens are bare; each scoped provider tags its OWN value.
         XCTAssertEqual(
             MenuBarMetric.slotsText([(.todayTokens, "all"), (.sessionPercent, "claude"), (.sessionPercent, "codex")], i),
-            "147.7M · C 40% · X 71%"
+            "147.7M · Claude 40% · Codex 71%"
         )
         // Codex today's tokens resolve from its own breakdown, tagged.
-        XCTAssertEqual(MenuBarMetric.slotsText([(.todayTokens, "codex")], i), "X 98.6M")
+        XCTAssertEqual(MenuBarMetric.slotsText([(.todayTokens, "codex")], i), "Codex 98.6M")
+        XCTAssertEqual(MenuBarMetric.slotsText([(.creditsRemaining, "codex")], i), "Codex 42.5 cr")
         // A provider with no stats for the metric collapses.
         XCTAssertNil(MenuBarMetric.slotsText([(.weeklyPercent, "codex")], i))
         // A slot scoped to a provider with NO data at all collapses — it must NOT
@@ -140,6 +150,25 @@ final class MetricSlotTests: XCTestCase {
         )
         // Global metric ignores the provider tag.
         XCTAssertEqual(MenuBarMetric.slotsText([(.tightestLimit, "codex")], i), "54%")
+    }
+
+    func testProviderCapabilitiesOnlyOfferTruthfulMetrics() {
+        XCTAssertEqual(
+            MenuBarMetric.availableMetrics(for: "all", allowNone: false),
+            [.todayTokens, .todayCost, .weekTokens, .weekCost, .tightestLimit]
+        )
+        XCTAssertTrue(MenuBarMetric.availableMetrics(for: "claude", allowNone: false).contains(.weeklyPercent))
+        XCTAssertTrue(MenuBarMetric.availableMetrics(for: "codex", allowNone: false).contains(.creditsRemaining))
+        XCTAssertFalse(MenuBarMetric.availableMetrics(for: "claude", allowNone: false).contains(.creditsRemaining))
+        XCTAssertEqual(
+            MenuBarMetric.availableMetrics(for: "gemini", allowNone: true),
+            [.todayTokens, .todayCost, .none]
+        )
+        XCTAssertEqual(MenuBarMetric.normalized(.weeklyPercent, for: "gemini", allowNone: true), .todayTokens)
+        XCTAssertEqual(MenuBarMetric.normalized(.none, for: "codex", allowNone: true), .none)
+        XCTAssertEqual(MenuBarMetric.sessionPercent.label(for: "claude"), "5-hour used")
+        XCTAssertEqual(MenuBarMetric.sessionPercent.label(for: "cursor"), "Plan used")
+        XCTAssertEqual(MenuBarMetric.creditsRemaining.label(for: "codex"), "Credits remaining")
     }
 
     func testCompactTokensUnitBoundaryPromotion() {
@@ -157,6 +186,21 @@ final class MetricSlotTests: XCTestCase {
         XCTAssertEqual(MenuBarMetric.migrate(from: .tokensPlusLimit).0, .todayTokens)
         XCTAssertEqual(MenuBarMetric.migrate(from: .tokensPlusLimit).1, .tightestLimit)
         XCTAssertEqual(MenuBarMetric.migrate(from: .iconOnly).0, MenuBarMetric.none)
+    }
+
+    func testLegacyAggregateClaudeLimitsBecomeExplicitlyClaude() {
+        let d = UserDefaults(suiteName: "bb-legacy-provider-\(UUID().uuidString)")!
+        d.set(MenuBarTextMode.sessionStatus.rawValue, forKey: SettingsStore.Keys.textMode)
+        d.set("all", forKey: SettingsStore.Keys.metricProvider1)
+        d.set("all", forKey: SettingsStore.Keys.metricProvider2)
+
+        let store = MainActor.assumeIsolated { SettingsStore(defaults: d) }
+        MainActor.assumeIsolated {
+            XCTAssertEqual(store.metricProvider1, "claude")
+            XCTAssertEqual(store.metricProvider2, "claude")
+            XCTAssertEqual(store.metricSlot1, .sessionPercent)
+            XCTAssertEqual(store.metricSlot2, .sessionCountdown)
+        }
     }
 
     func testSettingsStoreMetricSlotRoundTripAndMigration() {

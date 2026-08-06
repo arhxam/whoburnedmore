@@ -32,6 +32,13 @@ public enum Formatters {
         v >= 100 ? String(format: "$%.0f", v) : String(format: "$%.2f", v)
     }
 
+    /// A limit may briefly report above 100 after the provider has exhausted it.
+    /// Keep the raw value for alerting, but never render more than 100% to users.
+    public static func percent(_ value: Double?) -> String? {
+        guard let value, value.isFinite else { return nil }
+        return "\(Int(min(max(value, 0), 100).rounded()))%"
+    }
+
     /// "2h 14m", "14m", "38s"; nil → "—", past/zero → "now".
     public static func countdown(to date: Date?, from now: Date = Date()) -> String {
         guard let date else { return "—" }
@@ -77,6 +84,10 @@ public enum MeterState: String, Equatable, Sendable {
     public static func worst(of percents: [Double?]) -> MeterState {
         MeterState(percent: percents.compactMap { $0 }.max())
     }
+
+    public var iconName: String {
+        self == .normal ? "flame" : "flame.fill"
+    }
 }
 
 /// What the status item shows next to the icon.
@@ -115,26 +126,26 @@ public enum MenuBarTextMode: String, CaseIterable, Sendable {
         case .sessionStatus:
             // Fall back through worst limit, then tokens, so the bar is never blank.
             if let p = i.sessionPercent {
-                let pct = "\(Int(p.rounded()))%"
+                let pct = Formatters.percent(p) ?? "0%"
                 if let reset = i.sessionReset {
                     return "\(pct) · \(Formatters.countdown(to: reset, from: i.now))"
                 }
                 return pct
             }
-            if let p = i.worstPercent { return "\(Int(p.rounded()))%" }
+            if let p = i.worstPercent { return Formatters.percent(p) }
             return i.summary.map { Formatters.compactTokens($0.today.totalTokens) }
         case .todayTokens:
             guard let t = i.summary?.today.totalTokens else { return nil }
             return Formatters.compactTokens(t)
         case .limitPercent:
             guard let p = i.worstPercent else { return nil }
-            return "\(Int(p.rounded()))%"
+            return Formatters.percent(p)
         case .todayCost:
             guard let c = i.summary?.today.costUSD else { return nil }
             return Formatters.usd(c)
         case .tokensPlusLimit:
             let tokens = i.summary.map { Formatters.compactTokens($0.today.totalTokens) }
-            let pct = i.worstPercent.map { "\(Int($0.rounded()))%" }
+            let pct = Formatters.percent(i.worstPercent)
             switch (tokens, pct) {
             case let (.some(t), .some(p)): return "\(t) · \(p)"
             case let (.some(t), nil): return t

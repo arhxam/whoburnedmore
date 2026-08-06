@@ -38,7 +38,7 @@ struct MenuBarLabel: View {
 
     var body: some View {
         HStack(spacing: 3) {
-            Image(systemName: iconName)
+            Image(systemName: state.iconName)
             if let text {
                 Text(text)
                     .font(.system(size: 12, weight: .medium, design: .monospaced))
@@ -63,13 +63,6 @@ struct MenuBarLabel: View {
         }
     }
 
-    private var iconName: String {
-        switch state {
-        case .normal: return "flame"
-        case .amber: return "flame.fill"
-        case .critical: return "exclamationmark.triangle.fill"
-        }
-    }
 }
 
 
@@ -81,7 +74,7 @@ struct MenuBarRenderPreview: View {
 
     var body: some View {
         HStack(spacing: 3) {
-            Image(systemName: state == .critical ? "exclamationmark.triangle.fill" : (state == .amber ? "flame.fill" : "flame"))
+            Image(systemName: state.iconName)
             if let text {
                 Text(text).font(.system(size: 12, weight: .medium, design: .monospaced))
             }

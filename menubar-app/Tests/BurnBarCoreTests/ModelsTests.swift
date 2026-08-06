@@ -97,15 +97,15 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(context.count, 5)
     }
 
-    func testWbmLeaderboardContextFallsBackToTopTwoWhenPersonIsMissing() {
+    func testWbmLeaderboardContextFallsBackToTopFiveWhenPersonIsMissingToday() {
         let board = WbmLeaderboard(
-            period: "all",
+            period: "today",
             rows: (1...8).map {
                 WbmLeaderboardEntry(rank: $0, handle: "person-\($0)", displayName: "Person \($0)", tokens: $0 * 100, todayTokens: $0)
             }
         )
 
-        XCTAssertEqual(board.context(for: "not-listed").map(\.rank), [1, 2])
+        XCTAssertEqual(board.context(for: "not-listed").map(\.rank), [1, 2, 3, 4, 5])
         XCTAssertEqual(board.context(for: "person-8", maxRows: 4).map(\.rank), [1, 2, 7, 8])
     }
 

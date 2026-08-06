@@ -284,8 +284,8 @@ public struct WbmLeaderboard: Decodable, Equatable, Sendable {
             }
     }
 
-    /// The all-time leaders plus the connected person's nearest rows. The
-    /// separate daily-leader callout becomes the sixth person in the popover.
+    /// Today's top leaders plus the connected person's nearest daily rows.
+    /// When the person has not burned tokens today, show the full daily top five.
     public func context(for handle: String, maxRows: Int = 5) -> [WbmLeaderboardEntry] {
         guard maxRows > 0 else { return [] }
 
@@ -308,7 +308,7 @@ public struct WbmLeaderboard: Decodable, Equatable, Sendable {
 
         let normalizedHandle = handle.lowercased()
         guard let targetIndex = ranked.firstIndex(where: { $0.handle.lowercased() == normalizedHandle }) else {
-            return selected.sorted { $0.rank < $1.rank }
+            return Array(ranked.prefix(maxRows))
         }
 
         add(ranked[targetIndex])

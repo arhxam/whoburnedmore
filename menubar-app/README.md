@@ -67,13 +67,14 @@ open dist/BurnBar.app
 - `BURNBAR_API_BASE` / `WHOBURNEDMORE_WEB` override the whoburnedmore endpoints;
   `BURNBAR_SIDECAR` / `BURNBAR_CCUSAGE` point at dev binaries;
   `BURNBAR_CACHE_DIR`, `BURNBAR_DEBOUNCE_MS`, `BURNBAR_SLOW_INTERVAL_MS` tune the engine.
-- Menu bar text mode (today's tokens / tightest-limit % / cost / icon only),
-  notifications, and launch-at-login live in Settings.
+- Menu bar items are source-first (Overall / Claude / Codex / other providers),
+  and only offer metrics that source can truthfully provide. Notification,
+  Claude-limit, and launch-at-login permissions are explicit in Settings.
 
 ## Tests
 
 ```bash
-npx vitest run --root sidecar        # 22 tests: protocol, summarize, codex limits,
+npx vitest run --root sidecar        # protocol, summarize, codex limits,
                                      # forecast/thresholds, real-binary watch integration
 bash scripts/run-swift-tests.sh      # BurnBarCore: formatters, meter states, decoders
 ```
@@ -99,15 +100,16 @@ open. BurnBar detects which AI tools have local logs (`~/.claude`, `~/.codex`,
 Cursor's app storage, VS Code globalStorage, `~/.continue`) and starts the
 sidecar's file watchers immediately — the flame + your chosen metrics appear in
 the menu bar within seconds, all parsed on-device. The onboarding window shows
-which tools were found and offers ONE optional permission: reading the Claude
-Code Keychain item so the Limits zone can show your 5h/weekly windows (decline
-= burn tracking still works fully).
+which tools were found and separately offers launch at login, notification
+permission, and read-only Claude Code Keychain access for 5h/weekly limits.
+Declining any of them leaves local burn tracking fully functional; Codex limits
+come from local session files and need no additional permission.
 
 **The whoburnedmore interconnect (all optional):**
 1. *Already a CLI user?* BurnBar reads `~/.config/whoburnedmore/config.json` —
    the same file `npx whoburnedmore` writes — and the leaderboard context lights
-   up with today's highest burner, the all-time leaders, and the people around
-   your rank. Zero setup.
+   up with today's live top burners and the people around your daily rank. If
+   you have not burned yet today, it shows the daily top five. Zero setup.
 2. *New user?* Settings → Account → Connect runs the device flow against the
    real API (`POST /v1/auth/device` → browser approval → token polled), then
    writes the SAME config.json the CLI uses — app and CLI stay interchangeable,

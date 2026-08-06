@@ -2,9 +2,8 @@ import AppKit
 import BurnBarCore
 import SwiftUI
 
-/// First-run welcome: shows what was detected, offers the one-time Claude
-/// limits opt-in, and a soft whoburnedmore upsell. Never blocks the app —
-/// tracking already started before this window appears.
+/// First-run welcome: local tracking starts immediately, while every capability
+/// that asks macOS for access remains an explicit user choice.
 @MainActor
 enum OnboardingWindow {
     private static var window: NSWindow?
@@ -17,7 +16,7 @@ enum OnboardingWindow {
         hosting.sizingOptions = []  // see DebugWindow: sizing negotiation loops
         let w = NSWindow(contentViewController: hosting)
         w.title = "Welcome to BurnBar"
-        w.setContentSize(NSSize(width: 480, height: 560))
+        w.setContentSize(NSSize(width: 520, height: 650))
         w.styleMask = [.titled, .closable]
         w.isReleasedWhenClosed = false
         w.level = .floating
@@ -26,7 +25,7 @@ enum OnboardingWindow {
         w.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         window = w
-        WindowShot.arm { OnboardingView().environmentObject(model).environmentObject(settings).frame(width: 480).environment(\.colorScheme, .dark).background(Color(red: 0.11, green: 0.11, blue: 0.125)) }
+        WindowShot.arm { OnboardingView().environmentObject(model).environmentObject(settings).frame(width: 520).environment(\.colorScheme, .dark).background(Color(red: 0.11, green: 0.11, blue: 0.125)) }
     }
 
     static func close() {
@@ -38,7 +37,7 @@ enum OnboardingWindow {
 struct OnboardingView: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var settings: SettingsStore
-    @State private var limitsEnabled = false
+    @State private var launchAtLogin = LaunchAtLogin.isEnabled
 
     /// Cheap synchronous detection — good enough for the welcome chips; the
     /// live snapshot refines it seconds later.
@@ -64,10 +63,10 @@ struct OnboardingView: View {
                 BurnFlame(size: 20)
                 Text("BurnBar is watching your burn").font(.title2.weight(.bold))
             }
-            Text("Found these AI coding tools — live tracking already started, entirely on-device:")
+            Text("AI tools found — live tracking is already running on-device:")
                 .foregroundStyle(.secondary)
 
-            HStack(spacing: 8) {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 120), alignment: .leading)], alignment: .leading, spacing: 8) {
                 ForEach(tools, id: \.name) { tool in
                     HStack(spacing: 4) {
                         Image(systemName: tool.found ? "checkmark.circle.fill" : "circle.dashed")
@@ -82,18 +81,43 @@ struct OnboardingView: View {
 
             Divider()
 
-            Text("Want your Claude 5h-window limits too?").font(.headline)
-            Text("Needs one read-only Keychain approval — the token never leaves your Mac. macOS may ask once; choose \"Always Allow\".")
-                .font(.callout).foregroundStyle(.secondary)
-            HStack {
-                Button(limitsEnabled ? "Limits enabled ✓" : "Enable limits") {
-                    Task {
-                        await model.refreshRemote()
-                        limitsEnabled = true
+            Text("Choose what BurnBar may do").font(.headline)
+            VStack(alignment: .leading, spacing: 10) {
+                Toggle("Launch at login", isOn: $launchAtLogin)
+                    .onChange(of: launchAtLogin) { _, on in
+                        LaunchAtLogin.set(on)
+                        launchAtLogin = LaunchAtLogin.isEnabled
                     }
+                Text("Recommended for uninterrupted local history after a restart.")
+                    .font(.caption).foregroundStyle(.secondary)
+
+                HStack {
+                    Button(settings.notificationsEnabled ? "Notifications enabled ✓" : "Enable notifications") {
+                        model.setNotificationsEnabled(true)
+                    }
+                    .disabled(settings.notificationsEnabled)
+                    Text("Limit, reset, and daily-rank alerts")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
-                .buttonStyle(.borderedProminent).tint(.orange)
-                .disabled(limitsEnabled)
+
+                HStack {
+                    Button(settings.claudeLimitsEnabled ? "Claude limits enabled ✓" : "Enable Claude limits") {
+                        Task { await model.setClaudeLimitsEnabled(true) }
+                    }
+                    .buttonStyle(.borderedProminent).tint(.orange)
+                    .disabled(settings.claudeLimitsEnabled)
+                    Text("Read-only Keychain access")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Text("Codex limits are read locally from Codex session files and need no additional permission.")
+                    .font(.caption).foregroundStyle(.secondary)
+
+                Toggle("Keep my leaderboard total in sync", isOn: Binding(
+                    get: { settings.syncEnabled },
+                    set: { model.setLeaderboardSyncEnabled($0) }
+                ))
+                Text("Optional. Uploads token totals—not prompts or code—when you are signed in.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
 
             Divider()
@@ -101,7 +125,7 @@ struct OnboardingView: View {
             Label {
                 Text("Optional: get ranked").font(.headline)
             } icon: { Image(systemName: "trophy.fill").foregroundStyle(.orange) }
-            Text("whoburnedmore.com is the public leaderboard of AI token burners. One click to join — or ignore this forever; BurnBar works fully without it.")
+            Text("See your live daily rank and nearby burners. BurnBar works without an account.")
                 .font(.callout).foregroundStyle(.secondary)
             HStack {
                 Button("See the leaderboard ↗") {
@@ -121,6 +145,6 @@ struct OnboardingView: View {
             }
         }
         .padding(24)
-        .frame(width: 480)
+        .frame(width: 520)
     }
 }

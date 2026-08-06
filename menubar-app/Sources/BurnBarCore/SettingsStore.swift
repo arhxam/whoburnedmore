@@ -13,24 +13,39 @@ public final class SettingsStore: ObservableObject {
         if ProcessInfo.processInfo.environment["BURNBAR_RESET_DEFAULTS"] == "1" {
             for key in Keys.all { defaults.removeObject(forKey: key) }
         }
+        let didCompleteOnboarding = Self.bool(d, Keys.onboardingDone, false)
         textMode = MenuBarTextMode(rawValue: d.string(forKey: Keys.textMode) ?? "") ?? .sessionStatus
         // Metric slots. Explicit values win. A legacy user (only textMode stored)
         // migrates from it; a fresh install gets the default trio the bar ships
-        // with: today's tokens · session % · session resets-in.
+        // with: overall tokens · Claude 5h % · Codex 5h %.
         let hasLegacy = d.string(forKey: Keys.textMode) != nil
         let migrated = MenuBarMetric.migrate(
             from: MenuBarTextMode(rawValue: d.string(forKey: Keys.textMode) ?? "") ?? .sessionStatus
         )
         let def1: MenuBarMetric = hasLegacy ? migrated.0 : .todayTokens
         let def2: MenuBarMetric = hasLegacy ? migrated.1 : .sessionPercent
-        let def3: MenuBarMetric = hasLegacy ? .none : .sessionCountdown
-        metricSlot1 = MenuBarMetric(rawValue: d.string(forKey: Keys.metricSlot1) ?? "") ?? def1
-        metricSlot2 = MenuBarMetric(rawValue: d.string(forKey: Keys.metricSlot2) ?? "") ?? def2
-        metricSlot3 = MenuBarMetric(rawValue: d.string(forKey: Keys.metricSlot3) ?? "") ?? def3
-        // Each slot can be scoped to any provider (default "all" = aggregate/Claude).
-        metricProvider1 = d.string(forKey: Keys.metricProvider1) ?? "all"
-        metricProvider2 = d.string(forKey: Keys.metricProvider2) ?? "all"
-        metricProvider3 = d.string(forKey: Keys.metricProvider3) ?? "all"
+        let def3: MenuBarMetric = hasLegacy ? .none : .sessionPercent
+        let rawMetric1 = MenuBarMetric(rawValue: d.string(forKey: Keys.metricSlot1) ?? "") ?? def1
+        let rawMetric2 = MenuBarMetric(rawValue: d.string(forKey: Keys.metricSlot2) ?? "") ?? def2
+        let rawMetric3 = MenuBarMetric(rawValue: d.string(forKey: Keys.metricSlot3) ?? "") ?? def3
+        func explicitSource(_ stored: String?, metric: MenuBarMetric, fallback: String) -> String {
+            let source = stored ?? fallback
+            // In v0.6 "all" session/weekly fields were actually Claude fields.
+            // Preserve the value while making that ownership visible.
+            if source == "all", [.sessionPercent, .sessionCountdown, .sessionTokens, .weeklyPercent, .weeklyReset].contains(metric) {
+                return "claude"
+            }
+            return source
+        }
+        let source1 = explicitSource(d.string(forKey: Keys.metricProvider1), metric: rawMetric1, fallback: "all")
+        let source2 = explicitSource(d.string(forKey: Keys.metricProvider2), metric: rawMetric2, fallback: hasLegacy ? "all" : "claude")
+        let source3 = explicitSource(d.string(forKey: Keys.metricProvider3), metric: rawMetric3, fallback: hasLegacy ? "all" : "codex")
+        metricProvider1 = source1
+        metricProvider2 = source2
+        metricProvider3 = source3
+        metricSlot1 = MenuBarMetric.normalized(rawMetric1, for: source1, allowNone: true)
+        metricSlot2 = MenuBarMetric.normalized(rawMetric2, for: source2, allowNone: true)
+        metricSlot3 = MenuBarMetric.normalized(rawMetric3, for: source3, allowNone: true)
         tintThresholds = Self.bool(d, Keys.tintThresholds, true)
         showLimits = Self.bool(d, Keys.showLimits, true)
         showForecast = Self.bool(d, Keys.showForecast, true)
@@ -64,7 +79,11 @@ public final class SettingsStore: ObservableObject {
         digestHour = Int(Self.double(d, Keys.digestHour, 21))
         limitsRefreshSeconds = Int(Self.double(d, Keys.limitsRefresh, 60))
         syncEnabled = Self.bool(d, Keys.syncEnabled, false)
-        onboardingDone = Self.bool(d, Keys.onboardingDone, false)
+        // Fresh installs must opt in. Completed v0.6 users retain the behavior
+        // they already had so an update does not silently disable their limits.
+        claudeLimitsEnabled = Self.bool(d, Keys.claudeLimitsEnabled, didCompleteOnboarding)
+        notificationsEnabled = Self.bool(d, Keys.notificationsEnabled, didCompleteOnboarding)
+        onboardingDone = didCompleteOnboarding
     }
 
     // MARK: published + persisted
@@ -110,6 +129,8 @@ public final class SettingsStore: ObservableObject {
 
     @Published public var limitsRefreshSeconds: Int { didSet { d.set(Double(limitsRefreshSeconds), forKey: Keys.limitsRefresh) } }
     @Published public var syncEnabled: Bool { didSet { d.set(syncEnabled, forKey: Keys.syncEnabled) } }
+    @Published public var claudeLimitsEnabled: Bool { didSet { d.set(claudeLimitsEnabled, forKey: Keys.claudeLimitsEnabled) } }
+    @Published public var notificationsEnabled: Bool { didSet { d.set(notificationsEnabled, forKey: Keys.notificationsEnabled) } }
     @Published public var onboardingDone: Bool { didSet { d.set(onboardingDone, forKey: Keys.onboardingDone) } }
 
     /// Display filter: is this tool's UI row enabled?
@@ -162,6 +183,8 @@ public final class SettingsStore: ObservableObject {
         public static let digestHour = "notify.digestHour"
         public static let limitsRefresh = "refresh.limitsSeconds"
         public static let syncEnabled = "sync.enabled"
+        public static let claudeLimitsEnabled = "permissions.claudeLimits"
+        public static let notificationsEnabled = "permissions.notifications"
         public static let onboardingDone = "onboarding.done"
         public static let all: [String] = [
             textMode, metricSlot1, metricSlot2, metricSlot3,
@@ -169,7 +192,8 @@ public final class SettingsStore: ObservableObject {
             showStreak, showTools, showSessions, showWbm, showRival, showStatusDot,
             providerClaude, providerCodex, providerCursor, providerVscode, providerLongtail, providerCopilot, providerGemini, primaryProvider,
             warnThreshold, criticalThreshold, notifyThresholds, notifyReset, notifyForecast,
-            notifyOvertaken, digestEnabled, digestHour, limitsRefresh, syncEnabled, onboardingDone,
+            notifyOvertaken, digestEnabled, digestHour, limitsRefresh, syncEnabled,
+            claudeLimitsEnabled, notificationsEnabled, onboardingDone,
         ]
     }
 

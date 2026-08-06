@@ -119,7 +119,7 @@ struct SettingsRootView: View {
                     .buttonStyle(.plain)
                 }
                 Spacer()
-                Text("BurnBar 0.6.0").font(.caption2).foregroundStyle(.tertiary).padding(.leading, 8)
+                Text("BurnBar 0.7.0").font(.caption2).foregroundStyle(.tertiary).padding(.leading, 8)
             }
             .padding(10)
             .frame(width: 170)
@@ -170,6 +170,7 @@ private struct SectionHeader: View {
 }
 
 struct GeneralPane: View {
+    @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var settings: SettingsStore
     @State private var launchAtLogin = LaunchAtLogin.isEnabled
 
@@ -181,6 +182,22 @@ struct GeneralPane: View {
                     LaunchAtLogin.set(on)
                     launchAtLogin = LaunchAtLogin.isEnabled
                 }
+            Text("Off by default. Enable it to keep token history continuous after a Mac restart.")
+                .font(.caption).foregroundStyle(.secondary)
+
+            SectionHeader("Permissions")
+            Toggle("Claude limits access", isOn: Binding(
+                get: { settings.claudeLimitsEnabled },
+                set: { enabled in Task { await model.setClaudeLimitsEnabled(enabled) } }
+            ))
+            Text("Reads the existing Claude Code credential from Keychain to fetch Claude's 5-hour and weekly limits.")
+                .font(.caption).foregroundStyle(.secondary)
+            Toggle("Notification permission", isOn: Binding(
+                get: { settings.notificationsEnabled },
+                set: { model.setNotificationsEnabled($0) }
+            ))
+            Text("Codex limits are read locally and need no additional permission.")
+                .font(.caption).foregroundStyle(.secondary)
 
             SectionHeader("Refresh")
             HStack(spacing: 10) {
@@ -194,7 +211,10 @@ struct GeneralPane: View {
                 .font(.caption).foregroundStyle(.secondary)
 
             SectionHeader("Leaderboard sync")
-            Toggle("Sync my usage to whoburnedmore.com every 15 minutes", isOn: $settings.syncEnabled)
+            Toggle("Sync my usage to whoburnedmore.com every 15 minutes", isOn: Binding(
+                get: { settings.syncEnabled },
+                set: { model.setLeaderboardSyncEnabled($0) }
+            ))
             Text("Uses your existing whoburnedmore sign-in. Off = BurnBar never sends anything anywhere; everything stays on this Mac.")
                 .font(.caption).foregroundStyle(.secondary)
         }
@@ -204,44 +224,59 @@ struct GeneralPane: View {
 struct MenuBarPane: View {
     @EnvironmentObject private var settings: SettingsStore
 
-    /// Provider each slot can be scoped to. "all" = aggregate (session % / reset
-    /// follow Claude). Pick a specific tool to show e.g. Codex's session %.
+    /// Choose the source first so a Claude limit can never be mistaken for an
+    /// overall or Codex limit.
     static let providerOptions: [(String, String)] = [
-        ("all", "All / aggregate"), ("claude", "Claude"), ("codex", "Codex"),
+        ("all", "Overall"), ("claude", "Claude"), ("codex", "Codex"),
         ("cursor", "Cursor"), ("copilot", "Copilot"), ("gemini", "Gemini"),
     ]
 
     @ViewBuilder
-    private func slotColumn(
+    private func slotRow(
         _ title: String, metric: Binding<MenuBarMetric>, provider: Binding<String>,
         allowNone: Bool
     ) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title).font(.caption).foregroundStyle(.secondary)
-            RadioList(
-                options: MenuBarMetric.allCases.filter { allowNone || $0 != .none }.map { ($0, $0.label) },
-                selection: metric
-            )
-            Divider().padding(.vertical, 2)
-            Text("For provider").font(.caption2).foregroundStyle(.tertiary)
-            Picker("", selection: provider) {
-                ForEach(Self.providerOptions, id: \.0) { Text($0.1).tag($0.0) }
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title).font(.callout.weight(.semibold))
+            HStack(alignment: .bottom, spacing: 14) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Source").font(.caption2).foregroundStyle(.secondary)
+                    Picker("", selection: provider) {
+                        ForEach(Self.providerOptions, id: \.0) { Text($0.1).tag($0.0) }
+                    }
+                    .labelsHidden()
+                    .frame(width: 145)
+                }
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Value").font(.caption2).foregroundStyle(.secondary)
+                    Picker("", selection: metric) {
+                        ForEach(MenuBarMetric.availableMetrics(for: provider.wrappedValue, allowNone: allowNone), id: \.self) {
+                            Text($0.label(for: provider.wrappedValue)).tag($0)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 210)
+                }
             }
-            .labelsHidden().frame(maxWidth: 150)
-            .disabled(!metric.wrappedValue.isProviderScoped)
+        }
+        .padding(10)
+        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 8))
+        .onAppear {
+            metric.wrappedValue = MenuBarMetric.normalized(metric.wrappedValue, for: provider.wrappedValue, allowNone: allowNone)
+        }
+        .onChange(of: provider.wrappedValue) { _, source in
+            metric.wrappedValue = MenuBarMetric.normalized(metric.wrappedValue, for: source, allowNone: allowNone)
         }
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            SectionHeader("Build your own bar — three slots, any metric, any provider")
-            HStack(alignment: .top, spacing: 24) {
-                slotColumn("First slot", metric: $settings.metricSlot1, provider: $settings.metricProvider1, allowNone: false)
-                slotColumn("Second slot", metric: $settings.metricSlot2, provider: $settings.metricProvider2, allowNone: true)
-                slotColumn("Third slot", metric: $settings.metricSlot3, provider: $settings.metricProvider3, allowNone: true)
-            }
+            SectionHeader("Menu bar items — choose each source and value")
+            slotRow("Item 1", metric: $settings.metricSlot1, provider: $settings.metricProvider1, allowNone: false)
+            slotRow("Item 2", metric: $settings.metricSlot2, provider: $settings.metricProvider2, allowNone: true)
+            slotRow("Item 3", metric: $settings.metricSlot3, provider: $settings.metricProvider3, allowNone: true)
             MenuBarPreviewLine()
-            Text("Ships showing Today's tokens · Session % · Session resets-in. Scope any slot to a provider — e.g. Codex's session % — and it's tagged in the bar (\"X 71%\"). \"Tokens this session\" counts burn observed while BurnBar runs, inside the current 5-hour window.")
+            Text("Overall covers combined burn. Claude and Codex each use their own live 5-hour and weekly limits; Codex can also show credits. Provider names stay visible in the menu bar so the numbers are never ambiguous.")
                 .font(.caption).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -314,12 +349,20 @@ struct ProvidersPane: View {
 }
 
 struct NotificationsPane: View {
+    @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var settings: SettingsStore
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
+            SectionHeader("Permission")
+            Toggle("Allow BurnBar notifications", isOn: Binding(
+                get: { settings.notificationsEnabled },
+                set: { model.setNotificationsEnabled($0) }
+            ))
+
             SectionHeader("Limit alerts")
             Toggle("Alert at thresholds", isOn: $settings.notifyThresholds)
+                .disabled(!settings.notificationsEnabled)
             HStack(spacing: 10) {
                 Text("Warn at")
                 PillPicker(
@@ -327,7 +370,7 @@ struct NotificationsPane: View {
                     selection: $settings.warnThreshold
                 )
             }
-            .disabled(!settings.notifyThresholds)
+            .disabled(!settings.notificationsEnabled || !settings.notifyThresholds)
             HStack(spacing: 10) {
                 Text("Critical at")
                 PillPicker(
@@ -335,12 +378,15 @@ struct NotificationsPane: View {
                     selection: $settings.criticalThreshold
                 )
             }
-            .disabled(!settings.notifyThresholds)
+            .disabled(!settings.notificationsEnabled || !settings.notifyThresholds)
             Toggle("\"You're back\" when a window resets", isOn: $settings.notifyReset)
+                .disabled(!settings.notificationsEnabled)
             Toggle("Shoulder tap when projected to hit the cap within 30 min", isOn: $settings.notifyForecast)
+                .disabled(!settings.notificationsEnabled)
 
             SectionHeader("whoburnedmore")
             Toggle("Someone overtakes me on the daily board", isOn: $settings.notifyOvertaken)
+                .disabled(!settings.notificationsEnabled)
             HStack(spacing: 10) {
                 Toggle("Daily digest at", isOn: $settings.digestEnabled)
                 PillPicker(
@@ -349,6 +395,7 @@ struct NotificationsPane: View {
                 )
                 .disabled(!settings.digestEnabled)
             }
+            .disabled(!settings.notificationsEnabled)
             Text("— \"you burned 147M today, #4\"").font(.caption).foregroundStyle(.secondary)
         }
     }
@@ -423,7 +470,7 @@ struct MenuBarPreviewLine: View {
         HStack(spacing: 6) {
             Text("Preview:").font(.caption).foregroundStyle(.secondary)
             HStack(spacing: 3) {
-                Image(systemName: "flame")
+                Image(systemName: model.meterState.iconName)
                 Text(model.menuBarText ?? "")
                     .font(.system(size: 12, weight: .medium, design: .monospaced))
             }

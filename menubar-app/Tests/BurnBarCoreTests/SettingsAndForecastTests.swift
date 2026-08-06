@@ -18,7 +18,17 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertEqual(s.criticalThreshold, 95)
         XCTAssertFalse(s.syncEnabled)
         XCTAssertFalse(s.onboardingDone)
+        XCTAssertFalse(s.claudeLimitsEnabled)
+        XCTAssertFalse(s.notificationsEnabled)
         XCTAssertEqual(s.limitsRefreshSeconds, 60)
+    }
+
+    func testCompletedUsersKeepExistingPermissionBehaviorDuringMigration() {
+        let d = freshDefaults()
+        d.set(true, forKey: SettingsStore.Keys.onboardingDone)
+        let s = SettingsStore(defaults: d)
+        XCTAssertTrue(s.claudeLimitsEnabled)
+        XCTAssertTrue(s.notificationsEnabled)
     }
 
     func testSettingsStoreRoundTrip() {
@@ -34,6 +44,8 @@ final class SettingsStoreTests: XCTestCase {
         s1.digestHour = 19
         s1.syncEnabled = true
         s1.providerCursor = false
+        s1.claudeLimitsEnabled = true
+        s1.notificationsEnabled = true
         s1.onboardingDone = true
 
         // A brand-new store over the same defaults must read everything back.
@@ -48,6 +60,8 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertEqual(s2.digestHour, 19)
         XCTAssertTrue(s2.syncEnabled)
         XCTAssertFalse(s2.providerCursor)
+        XCTAssertTrue(s2.claudeLimitsEnabled)
+        XCTAssertTrue(s2.notificationsEnabled)
         XCTAssertTrue(s2.onboardingDone)
     }
 
