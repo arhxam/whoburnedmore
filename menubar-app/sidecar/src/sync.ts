@@ -25,7 +25,7 @@ import { loadConfig, recordSync, saveAuth } from "../../../src/config.js";
 
 import { collectNativeTier, collectSlowTier, mergeTiers } from "./collector.js";
 
-const SIDECAR_CLI_VERSION = "burnbar-0.1.0";
+const SIDECAR_CLI_VERSION = "burnbar-0.7.1";
 
 function tokensOf(e: {
   inputTokens: number;
@@ -40,10 +40,17 @@ function tokensOf(e: {
  *  both the real submit and `--dry-run` (so the dry-run count is honest). */
 export async function buildSyncPayload(
   env: NodeJS.ProcessEnv = process.env,
+  options: { nativeOnly?: boolean } = {},
 ): Promise<SubmitPayload> {
+  // Automatic live updates run up to twice a minute. Their watched providers
+  // are already covered by the fast native tier, so do not repeatedly launch
+  // the multi-source ccusage/network collector. Explicit Sync now keeps the
+  // full tier below for long-tail completeness.
   const [native, slow] = await Promise.all([
     collectNativeTier(env),
-    collectSlowTier(env).catch(() => null),
+    options.nativeOnly
+      ? Promise.resolve(null)
+      : collectSlowTier(env).catch(() => null),
   ]);
   const entries = mergeTiers(native, slow);
   const cappedEntries = capByTokens(entries, 20000, tokensOf);
@@ -65,6 +72,7 @@ export async function buildSyncPayload(
 
 export interface SyncOptions {
   dryRun?: boolean;
+  nativeOnly?: boolean;
   env?: NodeJS.ProcessEnv;
 }
 
@@ -104,7 +112,7 @@ export async function runSync(options: SyncOptions = {}): Promise<void> {
   const cfg = loadConfig();
 
   if (options.dryRun) {
-    const payload = await buildSyncPayload(env);
+    const payload = await buildSyncPayload(env, { nativeOnly: options.nativeOnly });
     console.log(
       JSON.stringify(
         {
@@ -126,7 +134,7 @@ export async function runSync(options: SyncOptions = {}): Promise<void> {
     return;
   }
 
-  const payload = await buildSyncPayload(env);
+  const payload = await buildSyncPayload(env, { nativeOnly: options.nativeOnly });
   if (payload.entries.length === 0) {
     console.log(JSON.stringify({ error: "no-usage" }));
     process.exitCode = 4;

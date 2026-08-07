@@ -45,6 +45,10 @@ final class AppModel: ObservableObject {
     private var statusTask: Task<Void, Never>?
     private var digestTask: Task<Void, Never>?
     private var syncTask: Task<Void, Never>?
+    /// Upload at most twice a minute while local totals keep changing. This is
+    /// a fixed-window throttle, so a long agent turn cannot defer the website
+    /// update until the turn ends.
+    private var liveSyncThrottle = LiveSyncThrottle(minimumInterval: 30)
     private var wakeObserver: NSObjectProtocol?
     private var started = false
 
@@ -295,7 +299,7 @@ final class AppModel: ObservableObject {
         syncTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.maybeSync()
-                try? await Task.sleep(for: .seconds(15 * 60))
+                try? await Task.sleep(for: .seconds(5))
             }
         }
 
@@ -450,6 +454,12 @@ final class AppModel: ObservableObject {
     }
 
     func syncLeaderboardNow() async {
+        let localTokens = summary?.today.totalTokens
+        if let localTokens { liveSyncThrottle.observe(tokens: localTokens) }
+        await performLeaderboardSync(markingTokens: localTokens, nativeOnly: false)
+    }
+
+    private func performLeaderboardSync(markingTokens: Int?, nativeOnly: Bool) async {
         guard settings.syncEnabled else {
             leaderboardSyncState = .off
             return
@@ -463,7 +473,7 @@ final class AppModel: ObservableObject {
 
         let p = Process()
         p.executableURL = sidecarURL
-        p.arguments = ["sync"]
+        p.arguments = nativeOnly ? ["sync", "--native-only"] : ["sync"]
         var env = ProcessInfo.processInfo.environment
         if let ccusage = SidecarClient.ccusageURL() { env["BURNBAR_CCUSAGE"] = ccusage.path }
         p.environment = env
@@ -486,6 +496,7 @@ final class AppModel: ObservableObject {
 
         if result.ok {
             let now = Date()
+            if let markingTokens { liveSyncThrottle.markSynced(tokens: markingTokens) }
             await refreshLeaderboardAfterSync()
             leaderboardSyncState = .synced(now)
             lastUpdatedAt = now
@@ -497,8 +508,11 @@ final class AppModel: ObservableObject {
     }
 
     private func maybeSync() async {
-        guard settings.syncEnabled else { return }
-        await syncLeaderboardNow()
+        guard settings.syncEnabled, leaderboardSyncState != .syncing,
+              let localTokens = summary?.today.totalTokens else { return }
+        liveSyncThrottle.observe(tokens: localTokens)
+        guard let dueTokens = liveSyncThrottle.beginIfDue() else { return }
+        await performLeaderboardSync(markingTokens: dueTokens, nativeOnly: true)
     }
 
     /// The public board serves stale data while its cache recomputes. A successful
@@ -536,12 +550,16 @@ final class AppModel: ObservableObject {
         switch event {
         case .snapshot(let s):
             summary = s
+            liveSyncThrottle.observe(tokens: s.today.totalTokens)
             sessionTokens = sessionMeter.feed(
                 todayTokens: s.today.totalTokens,
                 windowResetAt: sessionReset
             )
             recomputeStreak()
             lastUpdatedAt = Date()
+            if settings.syncEnabled {
+                Task { [weak self] in await self?.maybeSync() }
+            }
         case .limits(let l):
             codexLimits = l.codex
             cursorLimits = l.cursor

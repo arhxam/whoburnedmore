@@ -6,7 +6,7 @@
  */
 import { existsSync, watch, type FSWatcher } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 
 import { resolveClaudeProjectDirs } from "../../../src/native/claude.js";
@@ -28,16 +28,28 @@ import { summarize } from "./summarize.js";
 
 const DEBOUNCE_MS = Number(process.env.BURNBAR_DEBOUNCE_MS ?? 1500);
 const SLOW_INTERVAL_MS = Number(process.env.BURNBAR_SLOW_INTERVAL_MS ?? 5 * 60 * 1000);
+const WATCH_RESCAN_MS = Number(process.env.BURNBAR_WATCH_RESCAN_MS ?? 5_000);
+const NATIVE_POLL_MS = Number(process.env.BURNBAR_NATIVE_POLL_MS ?? 5_000);
 const HEARTBEAT_MS = 30_000;
 
 export function watchRoots(env: NodeJS.ProcessEnv = process.env): string[] {
-  const roots = [
+  const targets = [
     ...resolveClaudeProjectDirs(env),
     resolveCodexSessionsDir(env),
     ...vscodeGlobalStorageRoots(env),
     join(env.HOME ?? homedir(), ".continue", "dev_data"),
   ];
-  return [...new Set(roots)].filter((r) => existsSync(r));
+  // A provider often creates `projects/`, `sessions/`, or `dev_data/` only
+  // when its first conversation starts. Watching only those leaf directories
+  // means BurnBar, once launched earlier, never sees that first live session.
+  // Fall back one level to the provider-owned config directory so creation of
+  // the leaf is observable without recursively watching the user's whole home.
+  const roots = targets.flatMap((target) => {
+    if (existsSync(target)) return [target];
+    const parent = dirname(target);
+    return parent !== target && existsSync(parent) ? [parent] : [];
+  });
+  return [...new Set(roots)];
 }
 
 export async function runWatch(env: NodeJS.ProcessEnv = process.env): Promise<void> {
@@ -144,30 +156,54 @@ export async function runWatch(env: NodeJS.ProcessEnv = process.env): Promise<vo
     }
   };
 
-  const watchers: FSWatcher[] = [];
+  const watchers = new Map<string, FSWatcher>();
   let debounce: ReturnType<typeof setTimeout> | null = null;
   const onFsEvent = () => {
     if (debounce) clearTimeout(debounce);
     debounce = setTimeout(() => void collectAndEmit(), DEBOUNCE_MS);
   };
-  for (const root of watchRoots(env)) {
-    try {
-      const w = watch(root, { recursive: true }, onFsEvent);
-      // FSWatcher can emit 'error' AFTER creation (watched dir deleted/moved,
-      // EMFILE, FSEvents failure). With no listener, Node's EventEmitter throws
-      // and kills the whole sidecar. Drop the root instead — the slow timer covers it.
-      w.on("error", () => {
-        try {
-          w.close();
-        } catch {
-          /* already closed */
-        }
-      });
-      watchers.push(w);
-    } catch {
-      /* root vanished or unwatchable — the slow timer still covers it */
+  const attachNewWatchers = (): boolean => {
+    let added = false;
+    for (const root of watchRoots(env)) {
+      if (watchers.has(root)) continue;
+      try {
+        const w = watch(root, { recursive: true }, onFsEvent);
+        watchers.set(root, w);
+        added = true;
+        // FSWatcher can emit 'error' AFTER creation (watched dir deleted/moved,
+        // EMFILE, FSEvents failure). Drop the root and let the rescan timer
+        // attach again if/when the provider recreates it.
+        w.on("error", () => {
+          watchers.delete(root);
+          try {
+            w.close();
+          } catch {
+            /* already closed */
+          }
+        });
+      } catch {
+        /* root vanished or is not ready yet — the rescan timer will retry */
+      }
     }
-  }
+    return added;
+  };
+  attachNewWatchers();
+
+  // Provider config roots can be created after BurnBar starts (fresh install,
+  // first Codex/Claude conversation). Reconcile cheaply instead of requiring an
+  // app restart; when a new root appears, collect immediately because its first
+  // transcript may have been written before the watcher was attached.
+  const watchRescanTimer = setInterval(() => {
+    if (attachNewWatchers()) void collectAndEmit();
+  }, WATCH_RESCAN_MS);
+
+  // FSEvents is a latency accelerator, not a delivery guarantee. In practice,
+  // recursive watches on a large real-world transcript tree can miss an append
+  // even while the active rollout's size and mtime keep advancing. The native
+  // readers are persistent-cache incremental, so a five-second safety collect
+  // reads only changed active files and guarantees forward progress for every
+  // provider without falling back to the five-minute slow tier or archives.
+  const nativePollTimer = setInterval(() => void collectAndEmit(), NATIVE_POLL_MS);
 
   const slowTimer = setInterval(() => void refreshSlow(), SLOW_INTERVAL_MS);
   const heartbeat = setInterval(
@@ -176,8 +212,10 @@ export async function runWatch(env: NodeJS.ProcessEnv = process.env): Promise<vo
   );
 
   const shutdown = () => {
-    for (const w of watchers) w.close();
+    for (const w of watchers.values()) w.close();
     clearInterval(slowTimer);
+    clearInterval(watchRescanTimer);
+    clearInterval(nativePollTimer);
     clearInterval(heartbeat);
     if (debounce) clearTimeout(debounce);
     process.exit(0);

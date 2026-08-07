@@ -4,7 +4,7 @@
  * updated snapshot event on stdout within 5 seconds of the append.
  */
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, appendFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -27,17 +27,44 @@ function claudeLine(requestId: string, tokens: number): string {
   );
 }
 
+function codexLines(tokens: number): string {
+  const timestamp = new Date().toISOString();
+  return [
+    JSON.stringify({
+      timestamp,
+      type: "session_meta",
+      payload: { id: "live-session", model: "gpt-5-codex", model_provider: "openai" },
+    }),
+    codexTokenLine(tokens, timestamp).trimEnd(),
+  ].join("\n") + "\n";
+}
+
+function codexTokenLine(tokens: number, timestamp = new Date().toISOString()): string {
+  return JSON.stringify({
+    timestamp,
+    type: "event_msg",
+    payload: {
+      type: "token_count",
+      info: {
+        total_token_usage: {
+          input_tokens: tokens,
+          cached_input_tokens: 0,
+          output_tokens: 10,
+        },
+      },
+    },
+  }) + "\n";
+}
+
 describe("watch mode real-time integration", () => {
   let root: string;
   let child: ChildProcess | null = null;
 
   beforeAll(() => {
-    if (!existsSync(BIN)) {
-      execFileSync("bun", ["build", "--compile", "--outfile", BIN, join(__dirname, "..", "src", "main.ts")], {
-        stdio: "ignore",
-        timeout: 120_000,
-      });
-    }
+    execFileSync("bun", ["build", "--compile", "--outfile", BIN, join(__dirname, "..", "src", "main.ts")], {
+      stdio: "ignore",
+      timeout: 120_000,
+    });
     root = mkdtempSync(join(tmpdir(), "bb-watch-"));
     mkdirSync(join(root, "claude", "projects", "proj"), { recursive: true });
     mkdirSync(join(root, "codex", "sessions", "2026", "08", "02"), { recursive: true });
@@ -100,6 +127,62 @@ describe("watch mode real-time integration", () => {
 
     expect(events.some((e) => e.type === "hello")).toBe(true);
     expect(events.some((e) => e.type === "limits")).toBe(true);
+  });
+
+  it("starts live-counting Codex when its sessions directory is created after launch", { timeout: 60_000 }, async () => {
+    child?.kill("SIGTERM");
+    const lateRoot = mkdtempSync(join(tmpdir(), "bb-watch-late-codex-"));
+    const env = {
+      ...process.env,
+      CLAUDE_CONFIG_DIR: join(lateRoot, "missing-claude"),
+      CODEX_HOME: join(lateRoot, "codex"),
+      BURNBAR_CACHE_DIR: join(lateRoot, "cache"),
+      BURNBAR_CCUSAGE: "",
+      BURNBAR_DEBOUNCE_MS: "100",
+      BURNBAR_SLOW_INTERVAL_MS: "600000",
+      BURNBAR_WATCH_RESCAN_MS: "600000",
+      BURNBAR_NATIVE_POLL_MS: "100",
+      HOME: lateRoot,
+    };
+    child = spawn(BIN, ["watch"], { env, stdio: ["pipe", "pipe", "pipe"] });
+
+    const snapshots: Summary[] = [];
+    let buffer = "";
+    child.stdout!.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString();
+      let idx: number;
+      while ((idx = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 1);
+        const ev = parseEvent(line);
+        if (ev?.type === "snapshot") snapshots.push(ev.summary);
+      }
+    });
+
+    await waitFor(() => snapshots.length >= 1, 30_000, "empty initial snapshot");
+    expect(snapshots[0].today.totalTokens).toBe(0);
+
+    const liveDir = join(lateRoot, "codex", "sessions", "2026", "08", "08");
+    mkdirSync(liveDir, { recursive: true });
+    const liveFile = join(liveDir, "rollout-live.jsonl");
+    writeFileSync(liveFile, codexLines(7000));
+
+    await waitFor(
+      () => snapshots.some((s) => s.today.totalTokens === 7010),
+      3_000,
+      "new live Codex session snapshot",
+    );
+
+    // The rollout remains in the active sessions tree. A later cumulative
+    // usage event must replace the live total without waiting for a message to
+    // finish or for Codex to move the file into archived_sessions.
+    appendFileSync(liveFile, codexTokenLine(9000));
+    await waitFor(
+      () => snapshots.some((s) => s.today.totalTokens === 9010),
+      3_000,
+      "updated active Codex rollout snapshot",
+    );
+    rmSync(lateRoot, { recursive: true, force: true });
   });
 });
 

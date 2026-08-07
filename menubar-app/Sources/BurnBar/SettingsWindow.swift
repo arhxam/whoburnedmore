@@ -119,7 +119,7 @@ struct SettingsRootView: View {
                     .buttonStyle(.plain)
                 }
                 Spacer()
-                Text("BurnBar 0.7.0").font(.caption2).foregroundStyle(.tertiary).padding(.leading, 8)
+                Text("BurnBar 0.7.1").font(.caption2).foregroundStyle(.tertiary).padding(.leading, 8)
             }
             .padding(10)
             .frame(width: 170)
@@ -211,11 +211,11 @@ struct GeneralPane: View {
                 .font(.caption).foregroundStyle(.secondary)
 
             SectionHeader("Leaderboard sync")
-            Toggle("Sync my usage to whoburnedmore.com every 15 minutes", isOn: Binding(
+            Toggle("Keep my usage live on whoburnedmore.com", isOn: Binding(
                 get: { settings.syncEnabled },
                 set: { model.setLeaderboardSyncEnabled($0) }
             ))
-            Text("Uses your existing whoburnedmore sign-in. Off = BurnBar never sends anything anywhere; everything stays on this Mac.")
+            Text("Updates while agents run (at most twice a minute) using your existing sign-in. Off = BurnBar never sends anything anywhere; everything stays on this Mac.")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }

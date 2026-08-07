@@ -133,6 +133,42 @@ final class ForecastTests: XCTestCase {
     }
 }
 
+final class LiveSyncThrottleTests: XCTestCase {
+    func testStreamsChangedTotalsAtALeadingEdgeAndThenAtFixedIntervals() {
+        let base = Date(timeIntervalSince1970: 1_000_000)
+        var throttle = LiveSyncThrottle(minimumInterval: 30)
+
+        throttle.observe(tokens: 100)
+        XCTAssertEqual(throttle.beginIfDue(now: base), 100)
+
+        // Continuous token events do not postpone the next upload forever: the
+        // latest total is sent as soon as the fixed 30-second window expires.
+        throttle.observe(tokens: 200)
+        XCTAssertNil(throttle.beginIfDue(now: base.addingTimeInterval(5)))
+        throttle.observe(tokens: 300)
+        XCTAssertNil(throttle.beginIfDue(now: base.addingTimeInterval(29)))
+        XCTAssertEqual(throttle.beginIfDue(now: base.addingTimeInterval(30)), 300)
+
+        throttle.markSynced(tokens: 300)
+        XCTAssertNil(throttle.beginIfDue(now: base.addingTimeInterval(60)))
+
+        throttle.observe(tokens: 400)
+        XCTAssertEqual(throttle.beginIfDue(now: base.addingTimeInterval(60)), 400)
+    }
+
+    func testIgnoresEmptyAndAlreadySyncedTotals() {
+        let now = Date(timeIntervalSince1970: 2_000_000)
+        var throttle = LiveSyncThrottle(minimumInterval: 30)
+        throttle.observe(tokens: 0)
+        XCTAssertNil(throttle.beginIfDue(now: now))
+        throttle.observe(tokens: 50)
+        XCTAssertEqual(throttle.beginIfDue(now: now), 50)
+        throttle.markSynced(tokens: 50)
+        throttle.observe(tokens: 50)
+        XCTAssertNil(throttle.beginIfDue(now: now.addingTimeInterval(60)))
+    }
+}
+
 final class StatusPageTests: XCTestCase {
     func testStatusPageDecode() {
         let healthy = #"{"page":{"id":"x"},"status":{"indicator":"none","description":"All Systems Operational"}}"#

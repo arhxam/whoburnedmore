@@ -22,7 +22,7 @@ import { summarize } from "./summarize.js";
 import { runSync } from "./sync.js";
 import { runWatch } from "./watch.js";
 
-const VERSION = "0.4.0";
+const VERSION = "0.7.1";
 
 async function snapshot(): Promise<void> {
   const [native, slow] = await Promise.all([
@@ -54,7 +54,10 @@ switch (cmd) {
     await limits();
     break;
   case "sync":
-    await runSync({ dryRun: process.argv.includes("--dry-run") });
+    await runSync({
+      dryRun: process.argv.includes("--dry-run"),
+      nativeOnly: process.argv.includes("--native-only"),
+    });
     break;
   case "watch":
     await runWatch();
