@@ -56,6 +56,22 @@ function codexTokenLine(tokens: number, timestamp = new Date().toISOString()): s
   }) + "\n";
 }
 
+function codexRateLimitLine(percent: number, resetsAt: number): string {
+  return JSON.stringify({
+    timestamp: new Date().toISOString(),
+    type: "event_msg",
+    payload: {
+      type: "token_count",
+      rate_limits: {
+        limit_id: "codex",
+        plan_type: "pro",
+        primary: { used_percent: percent, window_minutes: 10080, resets_at: resetsAt },
+        secondary: null,
+      },
+    },
+  }) + "\n";
+}
+
 describe("watch mode real-time integration", () => {
   let root: string;
   let child: ChildProcess | null = null;
@@ -183,6 +199,58 @@ describe("watch mode real-time integration", () => {
       "updated active Codex rollout snapshot",
     );
     rmSync(lateRoot, { recursive: true, force: true });
+  });
+
+  it("emits Codex limit changes without waiting for the token collector", { timeout: 60_000 }, async () => {
+    child?.kill("SIGTERM");
+    const limitRoot = mkdtempSync(join(tmpdir(), "bb-watch-live-limits-"));
+    const liveDir = join(limitRoot, "codex", "sessions", "2026", "08", "09");
+    mkdirSync(liveDir, { recursive: true });
+    const liveFile = join(liveDir, "rollout-live-limits.jsonl");
+    const futureReset = Math.floor(Date.now() / 1000) + 7 * 24 * 3600;
+    writeFileSync(liveFile, codexLines(7000) + codexRateLimitLine(99, futureReset));
+
+    const env = {
+      ...process.env,
+      CLAUDE_CONFIG_DIR: join(limitRoot, "missing-claude"),
+      CODEX_HOME: join(limitRoot, "codex"),
+      BURNBAR_CACHE_DIR: join(limitRoot, "cache"),
+      BURNBAR_CCUSAGE: "",
+      // Disable every existing collection trigger. Only the dedicated limits
+      // poll is allowed to observe the appended 100% event.
+      BURNBAR_DEBOUNCE_MS: "600000",
+      BURNBAR_SLOW_INTERVAL_MS: "600000",
+      BURNBAR_WATCH_RESCAN_MS: "600000",
+      BURNBAR_NATIVE_POLL_MS: "600000",
+      BURNBAR_LIMITS_POLL_MS: "100",
+      HOME: limitRoot,
+    };
+    child = spawn(BIN, ["watch"], { env, stdio: ["pipe", "pipe", "pipe"] });
+
+    const percents: number[] = [];
+    let buffer = "";
+    child.stdout!.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString();
+      let idx: number;
+      while ((idx = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 1);
+        const ev = parseEvent(line);
+        if (ev?.type === "limits") {
+          const percent = ev.limits.codex.secondary?.usedPercent;
+          if (percent !== null && percent !== undefined) percents.push(percent);
+        }
+      }
+    });
+
+    await waitFor(() => percents.includes(99), 30_000, "initial Codex limit");
+    const appendedAt = Date.now();
+    appendFileSync(liveFile, codexRateLimitLine(100, futureReset));
+    await waitFor(() => percents.includes(100), 2_000, "live Codex 100% limit");
+    expect(Date.now() - appendedAt).toBeLessThan(2_000);
+
+    child.kill("SIGTERM");
+    rmSync(limitRoot, { recursive: true, force: true });
   });
 });
 

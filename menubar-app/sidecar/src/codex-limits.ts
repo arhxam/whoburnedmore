@@ -9,7 +9,7 @@
  *  - sparse:    {"limit_id":"codex","primary":null,"secondary":null,"credits":{...},"plan_type":"go"}
  * Reset info arrives as either `resets_in_seconds` (relative) or `resets_at`.
  */
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { closeSync, openSync, readSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import { resolveCodexSessionsDir } from "../../../src/native/codex.js";
@@ -31,6 +31,11 @@ function num(v: unknown): number | null {
   return typeof v === "number" && Number.isFinite(v) ? v : null;
 }
 
+function isoFromEpochMs(epochMs: number): string | null {
+  const date = new Date(epochMs);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : null;
+}
+
 function parseWindow(
   raw: unknown,
   label: string,
@@ -42,13 +47,42 @@ function parseWindow(
   const windowMinutes = num(w.window_minutes);
   let resetsAt: string | null = null;
   if (typeof w.resets_at === "string") {
-    resetsAt = w.resets_at;
+    const absolute = Date.parse(w.resets_at);
+    if (Number.isFinite(absolute)) resetsAt = w.resets_at;
   } else {
+    const absolute = num(w.resets_at);
+    if (absolute !== null) {
+      // Current Codex emits Unix seconds; tolerate milliseconds as well so a
+      // provider-side serialization change cannot turn the countdown blank.
+      const epochMs = absolute >= 1_000_000_000_000 ? absolute : absolute * 1000;
+      if (Number.isFinite(epochMs)) resetsAt = isoFromEpochMs(epochMs);
+    }
+  }
+  if (resetsAt === null) {
     const rel = num(w.resets_in_seconds);
-    if (rel !== null && eventTs !== null) resetsAt = new Date(eventTs + rel * 1000).toISOString();
+    if (rel !== null && eventTs !== null) resetsAt = isoFromEpochMs(eventTs + rel * 1000);
   }
   if (usedPercent === null && windowMinutes === null && resetsAt === null) return null;
   return { label, usedPercent, windowMinutes, resetsAt };
+}
+
+function normalizedWindows(
+  primary: WindowLimit | null,
+  secondary: WindowLimit | null,
+): Pick<CodexLimits, "primary" | "secondary"> {
+  const isWeekly = (w: WindowLimit | null) => (w?.windowMinutes ?? 0) >= 6 * 24 * 60;
+  const session = [primary, secondary].find((w) => w !== null && !isWeekly(w)) ?? null;
+  const weekly = [primary, secondary].find((w) => isWeekly(w)) ?? null;
+
+  // Preserve structural meaning for older/sparse payloads without durations,
+  // but classify the newer Pro shape where a lone 10,080-minute window appears
+  // in `primary` and `secondary` is null.
+  const normalizedPrimary = session ?? (weekly === null ? primary : null);
+  const normalizedSecondary = weekly ?? secondary;
+  return {
+    primary: normalizedPrimary ? { ...normalizedPrimary, label: "session" } : null,
+    secondary: normalizedSecondary ? { ...normalizedSecondary, label: "weekly" } : null,
+  };
 }
 
 /** Parse the LAST rate_limits event out of one rollout file's lines. */
@@ -73,13 +107,17 @@ export function parseCodexLimitLines(lines: Iterable<string>): CodexLimits {
         typeof rl.credits === "object" && rl.credits !== null
           ? (rl.credits as Record<string, unknown>)
           : null;
+      const windows = normalizedWindows(
+        parseWindow(rl.primary, "session", eventTs),
+        parseWindow(rl.secondary, "weekly", eventTs),
+      );
       latest = {
         present: true,
         capturedAt: eventTs !== null ? new Date(eventTs).toISOString() : null,
         planType: typeof rl.plan_type === "string" ? rl.plan_type : null,
         limitId: typeof rl.limit_id === "string" ? rl.limit_id : null,
-        primary: parseWindow(rl.primary, "session", eventTs),
-        secondary: parseWindow(rl.secondary, "weekly", eventTs),
+        primary: windows.primary,
+        secondary: windows.secondary,
         creditsBalance:
           credits && typeof credits.balance === "string" ? credits.balance : null,
         hasCredits: credits && typeof credits.has_credits === "boolean" ? credits.has_credits : null,
@@ -90,6 +128,57 @@ export function parseCodexLimitLines(lines: Iterable<string>): CodexLimits {
     }
   }
   return latest;
+}
+
+/**
+ * Read backwards until the newest rate-limit line is found. Active rollout
+ * files can be tens of megabytes; re-reading each one every five seconds caused
+ * avoidable I/O and made limit refresh compete with token collection.
+ */
+function readLatestLimitFromFile(file: string): CodexLimits {
+  const chunkSize = 256 * 1024;
+  let fd: number | null = null;
+  try {
+    const size = statSync(file).size;
+    fd = openSync(file, "r");
+    let end = size;
+    let suffix = "";
+    while (end > 0) {
+      const start = Math.max(0, end - chunkSize);
+      const buffer = Buffer.allocUnsafe(end - start);
+      const bytesRead = readSync(fd, buffer, 0, buffer.length, start);
+      // A rollout can vanish or be replaced between stat() and read(). Never
+      // decode the unread portion of an unsafe buffer; retry on the next poll.
+      if (bytesRead !== buffer.length) return EMPTY;
+      const text = buffer.toString("utf8") + suffix;
+      const lines = text.split("\n");
+      suffix = start > 0 ? (lines.shift() ?? "") : "";
+      for (let i = lines.length - 1; i >= 0; i -= 1) {
+        const parsed = parseCodexLimitLines([lines[i]]);
+        if (parsed.present) return parsed;
+      }
+      end = start;
+    }
+    if (suffix) return parseCodexLimitLines([suffix]);
+  } catch {
+    /* raced/unreadable file */
+  } finally {
+    if (fd !== null) {
+      try {
+        closeSync(fd);
+      } catch {
+        /* already closed */
+      }
+    }
+  }
+  return EMPTY;
+}
+
+function clearExpiredWindow(window: WindowLimit | null, now: number): WindowLimit | null {
+  if (window?.resetsAt === null || window?.resetsAt === undefined) return window;
+  const reset = Date.parse(window.resetsAt);
+  if (!Number.isFinite(reset) || reset > now) return window;
+  return { ...window, usedPercent: 0, resetsAt: null, forecastHitAt: null };
 }
 
 /** Newest-first .jsonl files under the codex sessions tree (bounded walk). */
@@ -122,12 +211,29 @@ export function newestSessionFiles(root: string, max = 5): string[] {
 }
 
 /** Read current codex limits from the local sessions dir (never throws). */
-export function readCodexLimits(env: NodeJS.ProcessEnv = process.env): CodexLimits {
+export function readCodexLimits(
+  env: NodeJS.ProcessEnv = process.env,
+  now: number = Date.now(),
+): CodexLimits {
   try {
     const root = resolveCodexSessionsDir(env);
-    for (const file of newestSessionFiles(root)) {
-      const limits = parseCodexLimitLines(readFileSync(file, "utf8").split("\n"));
-      if (limits.present) return limits;
+    let latest: CodexLimits | null = null;
+    let latestCapturedAt = Number.NEGATIVE_INFINITY;
+    for (const file of newestSessionFiles(root, 20)) {
+      const limits = readLatestLimitFromFile(file);
+      if (!limits.present) continue;
+      const capturedAt = limits.capturedAt === null ? Number.NEGATIVE_INFINITY : Date.parse(limits.capturedAt);
+      if (latest === null || (Number.isFinite(capturedAt) && capturedAt > latestCapturedAt)) {
+        latest = limits;
+        latestCapturedAt = Number.isFinite(capturedAt) ? capturedAt : latestCapturedAt;
+      }
+    }
+    if (latest) {
+      return {
+        ...latest,
+        primary: clearExpiredWindow(latest.primary, now),
+        secondary: clearExpiredWindow(latest.secondary, now),
+      };
     }
   } catch {
     /* missing dir / unreadable — fall through */

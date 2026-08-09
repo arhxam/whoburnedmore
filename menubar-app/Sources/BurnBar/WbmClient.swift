@@ -63,7 +63,7 @@ final class WbmClient {
     private func fetchData(from url: URL) async -> Data? {
         var req = URLRequest(url: url)
         req.timeoutInterval = 10
-        req.setValue("burnbar/0.7.1", forHTTPHeaderField: "User-Agent")
+        req.setValue("burnbar/0.7.2", forHTTPHeaderField: "User-Agent")
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
             guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else { return nil }

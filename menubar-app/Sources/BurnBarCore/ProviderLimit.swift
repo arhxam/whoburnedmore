@@ -24,6 +24,13 @@ public struct ProviderMetric: Identifiable, Equatable, Sendable {
         self.forecast = forecast
         self.note = note
     }
+
+    /// Compact reset text shared by every provider usage row. Keeping this on
+    /// the model makes missing reset data explicit instead of rendering a fake
+    /// dash that can be mistaken for a provider response.
+    public func resetCountdown(from now: Date = Date()) -> String? {
+        reset.map { Formatters.countdown(to: $0, from: now) }
+    }
 }
 
 /// A provider's full limit picture: a headline + detail metrics + brand.

@@ -48,6 +48,16 @@ final class ProviderLimitTests: XCTestCase {
         XCTAssertTrue(p.hasData)
     }
 
+    func testProviderMetricResetCountdownIsAvailableForEveryUsageRow() {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let metric = ProviderMetric(
+            id: "weekly", label: "weekly", percent: 100,
+            reset: now.addingTimeInterval(6 * 24 * 3600 + 7 * 3600)
+        )
+        XCTAssertEqual(metric.resetCountdown(from: now), "6d 7h")
+        XCTAssertNil(ProviderMetric(id: "credits", label: "credits", percent: nil).resetCountdown(from: now))
+    }
+
     @MainActor func testDefaultProvidersAreClaudeAndCodexOnly() {
         let d = UserDefaults(suiteName: "bb-defaults-\(UUID().uuidString)")!
         let s = SettingsStore(defaults: d)

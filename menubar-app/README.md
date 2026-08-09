@@ -27,7 +27,9 @@ Two processes, one privacy rule — nothing sensitive crosses a boundary:
 
 Real-time: the sidecar `watch` command puts `fs.watch` (FSEvents) recursively on
 every tool's log root, debounces 1.5s, re-collects the native tier (warm cache =
-sub-second) and emits events; the ccusage/Cursor tier refreshes every 5 min.
+sub-second) and emits events. A 5-second native safety poll covers missed
+FSEvents, while a separate 1-second Codex-limit poll publishes cap/reset changes
+without waiting for transcript aggregation. The ccusage/Cursor tier refreshes every 5 min.
 Caches live in `~/.config/burnbar`, isolated from the CLI's launchd sync.
 
 ## Sidecar protocol
@@ -66,7 +68,8 @@ open dist/BurnBar.app
   (used by `scripts/debug-window-shot.sh` for screenshot verification).
 - `BURNBAR_API_BASE` / `WHOBURNEDMORE_WEB` override the whoburnedmore endpoints;
   `BURNBAR_SIDECAR` / `BURNBAR_CCUSAGE` point at dev binaries;
-  `BURNBAR_CACHE_DIR`, `BURNBAR_DEBOUNCE_MS`, `BURNBAR_SLOW_INTERVAL_MS` tune the engine.
+  `BURNBAR_CACHE_DIR`, `BURNBAR_DEBOUNCE_MS`, `BURNBAR_NATIVE_POLL_MS`,
+  `BURNBAR_LIMITS_POLL_MS`, and `BURNBAR_SLOW_INTERVAL_MS` tune the engine.
 - Menu bar items are source-first (Overall / Claude / Codex / other providers),
   and only offer metrics that source can truthfully provide. Notification,
   Claude-limit, and launch-at-login permissions are explicit in Settings.

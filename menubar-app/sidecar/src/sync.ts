@@ -25,7 +25,7 @@ import { loadConfig, recordSync, saveAuth } from "../../../src/config.js";
 
 import { collectNativeTier, collectSlowTier, mergeTiers } from "./collector.js";
 
-const SIDECAR_CLI_VERSION = "burnbar-0.7.1";
+const SIDECAR_CLI_VERSION = "burnbar-0.7.2";
 
 function tokensOf(e: {
   inputTokens: number;

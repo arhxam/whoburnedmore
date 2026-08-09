@@ -152,6 +152,24 @@ final class MetricSlotTests: XCTestCase {
         XCTAssertEqual(MenuBarMetric.slotsText([(.tightestLimit, "codex")], i), "54%")
     }
 
+    func testCodexCurrentLimitSlotFallsBackToWeeklyOnlyProPayload() {
+        let base = inputs()
+        let now = Date(timeIntervalSince1970: 2_000_000)
+        let codex = MenuBarMetric.ProviderStats(
+            weeklyPercent: 100,
+            weeklyReset: now.addingTimeInterval(6 * 86_400 + 7 * 3600)
+        )
+        let i = MenuBarMetric.Inputs(
+            summary: base.summary, worstPercent: 100,
+            sessionPercent: nil, sessionReset: nil, sessionTokens: nil,
+            weeklyPercent: nil, byProvider: ["codex": codex], now: now
+        )
+        XCTAssertEqual(MenuBarMetric.slotsText([(.sessionPercent, "codex")], i), "Codex 100%")
+        XCTAssertEqual(MenuBarMetric.slotsText([(.sessionCountdown, "codex")], i), "Codex 6d 7h")
+        XCTAssertEqual(MenuBarMetric.sessionPercent.label(for: "codex"), "Current limit used")
+        XCTAssertEqual(MenuBarMetric.sessionCountdown.label(for: "codex"), "Current limit reset")
+    }
+
     func testProviderCapabilitiesOnlyOfferTruthfulMetrics() {
         XCTAssertEqual(
             MenuBarMetric.availableMetrics(for: "all", allowNone: false),

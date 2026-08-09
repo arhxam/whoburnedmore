@@ -104,7 +104,8 @@ struct HeroRing: View {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) { ProviderMark(id: provider.id, size: 14); Text("\(provider.name) · \(m?.label ?? "")").font(.callout.weight(.semibold)) }
                 if let r = m?.reset {
-                    Text("resets in \(Formatters.countdown(to: r))").font(.caption).foregroundStyle(.secondary)
+                    LiveResetCountdown(reset: r, prefix: "resets in ")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 if settings.showForecast, let f = m?.forecast, f.timeIntervalSinceNow < 12 * 3600 {
                     Label("hits cap ~\(f.formatted(date: .omitted, time: .shortened)) at this pace",
@@ -136,8 +137,12 @@ struct MiniRing: View {
                 ProviderMark(id: provider.id, size: 11)
                 Text(provider.name).font(.system(size: 10)).foregroundStyle(.secondary)
             }
-            Text(m?.reset.map { Formatters.countdown(to: $0) } ?? " ")
-                .font(.system(size: 9)).foregroundStyle(.tertiary)
+            if let reset = m?.reset {
+                LiveResetCountdown(reset: reset)
+                    .font(.system(size: 9)).foregroundStyle(.tertiary)
+            } else {
+                Text(" ").font(.system(size: 9))
+            }
         }
     }
 }
@@ -174,6 +179,12 @@ struct ProviderDetail: View {
             ForEach(provider.metrics) { m in
                 HStack(spacing: 8) {
                     Text(m.label).font(.caption).foregroundStyle(.secondary)
+                    if let reset = m.reset {
+                        LiveResetCountdown(reset: reset, prefix: "resets ")
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundStyle(.tertiary)
+                            .fixedSize()
+                    }
                     Spacer(minLength: 6)
                     if let note = m.note {
                         Text(note).font(.caption2).foregroundStyle(.tertiary)
@@ -188,6 +199,22 @@ struct ProviderDetail: View {
                 }
                 .padding(.leading, 2)
             }
+        }
+    }
+}
+
+/// A countdown must keep moving while the popover is open, even when a
+/// provider has not emitted a new usage payload. SwiftUI suspends this periodic
+/// timeline with the view, so it costs nothing while the menu is closed.
+struct LiveResetCountdown: View {
+    let reset: Date
+    var prefix = ""
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            Text("\(prefix)\(Formatters.countdown(to: reset, from: context.date))")
+                .monospacedDigit()
+                .lineLimit(1)
         }
     }
 }

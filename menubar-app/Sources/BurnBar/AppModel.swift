@@ -63,30 +63,37 @@ final class AppModel: ObservableObject {
     var worstPercent: Double? {
         var percents: [Double] = []
         if settings.providerClaude, case .ready(let usage) = claudeState {
-            if let p = usage.fiveHour?.utilization { percents.append(p) }
-            if let p = usage.sevenDay?.utilization { percents.append(p) }
+            if let window = usage.fiveHour,
+               let p = Self.effectiveWindow(window.utilization, window.resetsAt).percent { percents.append(p) }
+            if let window = usage.sevenDay,
+               let p = Self.effectiveWindow(window.utilization, window.resetsAt).percent { percents.append(p) }
             // Only the scoped limits the popover actually surfaces — otherwise the
             // menu bar could tint red for a limit the user can't see anywhere.
             percents.append(contentsOf: usage.scoped
                 .filter { $0.kind == "weekly_scoped" && $0.modelName != nil }
-                .compactMap(\.percent))
+                .compactMap { Self.effectiveWindow($0.percent, $0.resetsAt).percent })
         }
         if settings.providerCodex, let c = codexLimits {
-            if let p = c.primary?.usedPercent { percents.append(p) }
-            if let p = c.secondary?.usedPercent { percents.append(p) }
+            if let window = c.primary,
+               let p = Self.effectiveWindow(window.usedPercent, window.resetsAt).percent { percents.append(p) }
+            if let window = c.secondary,
+               let p = Self.effectiveWindow(window.usedPercent, window.resetsAt).percent { percents.append(p) }
         }
-        if settings.providerCursor, let p = cursorLimits?.planPercent { percents.append(p) }
+        if settings.providerCursor, let cursor = cursorLimits,
+           let p = Self.effectiveWindow(cursor.planPercent, cursor.renewsAt).percent { percents.append(p) }
         return percents.max()
     }
 
     var sessionPercent: Double? {
         guard case .ready(let usage) = claudeState else { return nil }
-        return usage.fiveHour?.utilization
+        guard let window = usage.fiveHour else { return nil }
+        return Self.effectiveWindow(window.utilization, window.resetsAt).percent
     }
 
     var sessionReset: Date? {
         guard case .ready(let usage) = claudeState else { return nil }
-        return Formatters.parseISO(usage.fiveHour?.resetsAt)
+        guard let window = usage.fiveHour else { return nil }
+        return Self.effectiveWindow(window.utilization, window.resetsAt).reset
     }
 
     var meterState: MeterState {
@@ -99,12 +106,24 @@ final class AppModel: ObservableObject {
 
     var weeklyPercent: Double? {
         guard case .ready(let usage) = claudeState else { return nil }
-        return usage.sevenDay?.utilization
+        guard let window = usage.sevenDay else { return nil }
+        return Self.effectiveWindow(window.utilization, window.resetsAt).percent
     }
 
     var weeklyReset: Date? {
         guard case .ready(let usage) = claudeState else { return nil }
-        return Formatters.parseISO(usage.sevenDay?.resetsAt)
+        guard let window = usage.sevenDay else { return nil }
+        return Self.effectiveWindow(window.utilization, window.resetsAt).reset
+    }
+
+    private static func effectiveWindow(
+        _ percent: Double?, _ resetAt: String?, now: Date = Date()
+    ) -> (percent: Double?, reset: Date?) {
+        let reset = Formatters.parseISO(resetAt)
+        return (
+            Formatters.effectiveLimitPercent(percent, resetAt: reset, now: now),
+            Formatters.futureReset(reset, now: now)
+        )
     }
 
     /// Whether to inject the full 5-provider demo stack (screenshots / preview).
@@ -122,16 +141,19 @@ final class AppModel: ObservableObject {
         if settings.providerClaude, case .ready(let usage) = claudeState {
             var m: [ProviderMetric] = []
             if let fh = usage.fiveHour {
-                m.append(.init(id: "c5", label: "5h window", percent: fh.utilization,
-                               reset: Formatters.parseISO(fh.resetsAt), forecast: claudeForecastHit))
+                let window = Self.effectiveWindow(fh.utilization, fh.resetsAt)
+                m.append(.init(id: "c5", label: "5h window", percent: window.percent,
+                               reset: window.reset, forecast: claudeForecastHit))
             }
             if let wk = usage.sevenDay {
-                m.append(.init(id: "cw", label: "weekly", percent: wk.utilization,
-                               reset: Formatters.parseISO(wk.resetsAt)))
+                let window = Self.effectiveWindow(wk.utilization, wk.resetsAt)
+                m.append(.init(id: "cw", label: "weekly", percent: window.percent,
+                               reset: window.reset))
             }
             for s in usage.scoped where s.kind == "weekly_scoped" && s.modelName != nil {
+                let window = Self.effectiveWindow(s.percent, s.resetsAt)
                 m.append(.init(id: "cs-\(s.modelName!)", label: "\(s.modelName!) weekly",
-                               percent: s.percent, reset: Formatters.parseISO(s.resetsAt)))
+                               percent: window.percent, reset: window.reset))
             }
             if !m.isEmpty { out.append(.init(id: "claude", name: "Claude", metrics: m)) }
         }
@@ -139,13 +161,15 @@ final class AppModel: ObservableObject {
         if settings.providerCodex, let codex = codexLimits, codex.present {
             var m: [ProviderMetric] = []
             if let p = codex.primary {
-                m.append(.init(id: "x-p", label: p.label, percent: p.usedPercent,
-                               reset: Formatters.parseISO(p.resetsAt),
+                let window = Self.effectiveWindow(p.usedPercent, p.resetsAt)
+                m.append(.init(id: "x-p", label: p.label, percent: window.percent,
+                               reset: window.reset,
                                forecast: Formatters.parseISO(p.forecastHitAt)))
             }
             if let s = codex.secondary {
-                m.append(.init(id: "x-s", label: s.label, percent: s.usedPercent,
-                               reset: Formatters.parseISO(s.resetsAt)))
+                let window = Self.effectiveWindow(s.usedPercent, s.resetsAt)
+                m.append(.init(id: "x-s", label: s.label, percent: window.percent,
+                               reset: window.reset))
             }
             if let bal = codex.creditsBalance {
                 m.append(.init(id: "x-c", label: "credits", percent: nil, note: "\(bal) left"))
@@ -158,9 +182,10 @@ final class AppModel: ObservableObject {
         }
 
         if settings.providerCursor, let cursor = cursorLimits, cursor.present {
+            let window = Self.effectiveWindow(cursor.planPercent, cursor.renewsAt)
             out.append(.init(id: "cursor", name: "Cursor", metrics: [
-                .init(id: "u", label: "plan usage", percent: cursor.planPercent,
-                      reset: Formatters.parseISO(cursor.renewsAt)),
+                .init(id: "u", label: "plan usage", percent: window.percent,
+                      reset: window.reset),
             ]))
         }
 
@@ -206,26 +231,39 @@ final class AppModel: ObservableObject {
         }
         if case .ready(let u) = claudeState {
             var s = out["claude"] ?? .init()
-            s.sessionPercent = u.fiveHour?.utilization
-            s.sessionReset = Formatters.parseISO(u.fiveHour?.resetsAt)
-            s.weeklyPercent = u.sevenDay?.utilization
-            s.weeklyReset = Formatters.parseISO(u.sevenDay?.resetsAt)
+            if let fiveHour = u.fiveHour {
+                let window = Self.effectiveWindow(fiveHour.utilization, fiveHour.resetsAt)
+                s.sessionPercent = window.percent
+                s.sessionReset = window.reset
+            }
+            if let sevenDay = u.sevenDay {
+                let window = Self.effectiveWindow(sevenDay.utilization, sevenDay.resetsAt)
+                s.weeklyPercent = window.percent
+                s.weeklyReset = window.reset
+            }
             s.sessionTokens = sessionTokens
             out["claude"] = s
         }
         if let c = codexLimits, c.present {
             var s = out["codex"] ?? .init()
-            s.sessionPercent = c.primary?.usedPercent
-            s.sessionReset = Formatters.parseISO(c.primary?.resetsAt)
-            s.weeklyPercent = c.secondary?.usedPercent
-            s.weeklyReset = Formatters.parseISO(c.secondary?.resetsAt)
+            if let primary = c.primary {
+                let window = Self.effectiveWindow(primary.usedPercent, primary.resetsAt)
+                s.sessionPercent = window.percent
+                s.sessionReset = window.reset
+            }
+            if let secondary = c.secondary {
+                let window = Self.effectiveWindow(secondary.usedPercent, secondary.resetsAt)
+                s.weeklyPercent = window.percent
+                s.weeklyReset = window.reset
+            }
             s.creditsRemaining = c.creditsBalance
             out["codex"] = s
         }
         if let cu = cursorLimits, cu.present {
             var s = out["cursor"] ?? .init()
-            s.sessionPercent = cu.planPercent
-            s.sessionReset = Formatters.parseISO(cu.renewsAt)
+            let window = Self.effectiveWindow(cu.planPercent, cu.renewsAt)
+            s.sessionPercent = window.percent
+            s.sessionReset = window.reset
             out["cursor"] = s
         }
         return out

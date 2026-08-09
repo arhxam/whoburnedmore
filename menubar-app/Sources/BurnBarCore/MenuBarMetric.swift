@@ -120,8 +120,14 @@ public enum MenuBarMetric: String, CaseIterable, Sendable {
         guard provider != "all", isProviderScoped else { return text(i) }
         guard let s = i.byProvider[provider] else { return nil }
         switch self {
-        case .sessionPercent: return Formatters.percent(s.sessionPercent)
-        case .sessionCountdown: return s.sessionReset.map { Formatters.countdown(to: $0, from: i.now) }
+        case .sessionPercent:
+            // Current Codex Pro payloads can expose only a weekly window. A
+            // previously configured "current limit" slot must keep showing the
+            // truthful live value instead of disappearing after an upgrade.
+            return Formatters.percent(s.sessionPercent ?? (provider == "codex" ? s.weeklyPercent : nil))
+        case .sessionCountdown:
+            return (s.sessionReset ?? (provider == "codex" ? s.weeklyReset : nil))
+                .map { Formatters.countdown(to: $0, from: i.now) }
         case .sessionTokens: return s.sessionTokens.map { Formatters.compactTokens($0) }
         case .todayTokens: return s.todayTokens.map { Formatters.compactTokens($0) }
         case .todayCost: return s.todayCost.map { Formatters.usd($0) }
@@ -189,8 +195,14 @@ public enum MenuBarMetric: String, CaseIterable, Sendable {
 
     public func label(for provider: String) -> String {
         switch self {
-        case .sessionPercent: return provider == "cursor" ? "Plan used" : "5-hour used"
-        case .sessionCountdown: return provider == "cursor" ? "Plan reset" : "5-hour reset"
+        case .sessionPercent:
+            if provider == "cursor" { return "Plan used" }
+            if provider == "codex" { return "Current limit used" }
+            return "5-hour used"
+        case .sessionCountdown:
+            if provider == "cursor" { return "Plan reset" }
+            if provider == "codex" { return "Current limit reset" }
+            return "5-hour reset"
         case .weeklyPercent: return "Weekly used"
         default: return label
         }

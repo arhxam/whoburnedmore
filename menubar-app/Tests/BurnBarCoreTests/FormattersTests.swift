@@ -29,6 +29,22 @@ final class FormattersTests: XCTestCase {
         XCTAssertEqual(Formatters.countdown(to: nil, from: now), "—")
     }
 
+    func testExpiredProviderWindowStopsShowingStalePressureAndReset() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        XCTAssertEqual(
+            Formatters.effectiveLimitPercent(100, resetAt: now.addingTimeInterval(1), now: now),
+            100
+        )
+        XCTAssertEqual(
+            Formatters.effectiveLimitPercent(100, resetAt: now.addingTimeInterval(-1), now: now),
+            0
+        )
+        XCTAssertEqual(Formatters.effectiveLimitPercent(nil, resetAt: now.addingTimeInterval(-1), now: now), nil)
+        XCTAssertNotNil(Formatters.futureReset(now.addingTimeInterval(1), now: now))
+        XCTAssertNil(Formatters.futureReset(now, now: now))
+        XCTAssertNil(Formatters.futureReset(nil, now: now))
+    }
+
     func testParseISOBothForms() {
         // The usage endpoint mixes fractional and plain ISO8601.
         XCTAssertNotNil(Formatters.parseISO("2026-08-02T00:30:00.698242+00:00"))

@@ -53,6 +53,24 @@ public enum Formatters {
         return "\(h / dayH)d \(h % dayH)h"
     }
 
+    /// Provider APIs can keep returning the last pre-reset snapshot until their
+    /// next network poll. Once the advertised boundary passes, the old pressure
+    /// is no longer truthful: treat a known percentage as reset locally.
+    public static func effectiveLimitPercent(
+        _ value: Double?, resetAt: Date?, now: Date = Date()
+    ) -> Double? {
+        guard value != nil else { return nil }
+        guard let resetAt, resetAt <= now else { return value }
+        return 0
+    }
+
+    /// Expired countdowns disappear instead of sitting at "now" for an entire
+    /// remote refresh interval.
+    public static func futureReset(_ resetAt: Date?, now: Date = Date()) -> Date? {
+        guard let resetAt, resetAt > now else { return nil }
+        return resetAt
+    }
+
     /// ISO8601 with or without fractional seconds (the usage endpoint mixes both).
     public static func parseISO(_ s: String?) -> Date? {
         guard let s else { return nil }

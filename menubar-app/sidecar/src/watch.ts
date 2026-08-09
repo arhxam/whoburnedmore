@@ -26,10 +26,19 @@ import { ALERT_THRESHOLDS, detectAlerts, forecastLimitHit, type PercentSample } 
 import { emit, PROTOCOL_VERSION, type CursorLimits, type Limits } from "./protocol.js";
 import { summarize } from "./summarize.js";
 
-const DEBOUNCE_MS = Number(process.env.BURNBAR_DEBOUNCE_MS ?? 1500);
-const SLOW_INTERVAL_MS = Number(process.env.BURNBAR_SLOW_INTERVAL_MS ?? 5 * 60 * 1000);
-const WATCH_RESCAN_MS = Number(process.env.BURNBAR_WATCH_RESCAN_MS ?? 5_000);
-const NATIVE_POLL_MS = Number(process.env.BURNBAR_NATIVE_POLL_MS ?? 5_000);
+function envInterval(name: string, fallback: number): number {
+  const value = Number(process.env[name] ?? fallback);
+  return Number.isFinite(value) && value >= 50 ? value : fallback;
+}
+
+const DEBOUNCE_MS = envInterval("BURNBAR_DEBOUNCE_MS", 1500);
+const SLOW_INTERVAL_MS = envInterval("BURNBAR_SLOW_INTERVAL_MS", 5 * 60 * 1000);
+const WATCH_RESCAN_MS = envInterval("BURNBAR_WATCH_RESCAN_MS", 5_000);
+const NATIVE_POLL_MS = envInterval("BURNBAR_NATIVE_POLL_MS", 5_000);
+// Limits are tiny tail reads and need a tighter SLA than transcript totals.
+// A dedicated poll also means a cold/large token collection cannot delay a
+// 100% lockout or reset transition in the menu bar.
+const LIMITS_POLL_MS = envInterval("BURNBAR_LIMITS_POLL_MS", 1_000);
 const HEARTBEAT_MS = 30_000;
 
 export function watchRoots(env: NodeJS.ProcessEnv = process.env): string[] {
@@ -68,31 +77,27 @@ export async function runWatch(env: NodeJS.ProcessEnv = process.env): Promise<vo
   let pending = false;
   let prevCodexPercent: number | null = null;
   const codexSamples: PercentSample[] = [];
+  let lastCodexSampleAt: string | null = null;
+  let lastLimitsSignature: string | null = null;
 
-  const collectAndEmit = async () => {
-    if (collecting) {
-      pending = true;
-      return;
-    }
-    collecting = true;
-    emit({ type: "status", collecting: true, lastFullCollectAt });
-    try {
-      const native = await collectNativeTier(env);
-      const entries = mergeTiers(native, slow);
-      const toolsFound = [...new Set([...native.toolsFound, ...(slow?.toolsFound ?? [])])];
-      emit({
-        type: "snapshot",
-        summary: summarize(entries, toolsFound, native.partial, new Date(), slow?.sessions ?? [], claudeSessionNames(env)),
-      });
+  const refreshLimits = () => {
+    const codex = readCodexLimits(env);
+    const now = Date.now();
+    const observedPercents = [codex.primary?.usedPercent, codex.secondary?.usedPercent]
+      .filter((percent): percent is number => percent !== null && percent !== undefined);
+    const percent = observedPercents.length > 0 ? Math.max(...observedPercents) : null;
 
-      const codex = readCodexLimits(env);
-      const now = Date.now();
-      if (codex.present && codex.primary?.usedPercent != null) {
-        const percent = codex.primary.usedPercent;
-        codexSamples.push({ at: now, percent });
+    // A single rate-limit payload can be observed by many 1s polls. Only feed
+    // trend/alert state for a new provider observation (or our synthetic reset
+    // transition), otherwise duplicate flat samples drown the real slope.
+    const observationKey = `${codex.capturedAt ?? "none"}:${percent ?? "none"}`;
+    if (codex.present && observationKey !== lastCodexSampleAt) {
+      lastCodexSampleAt = observationKey;
+      if (codex.primary?.usedPercent != null) {
+        codexSamples.push({ at: now, percent: codex.primary.usedPercent });
         while (codexSamples.length > 240) codexSamples.shift();
-        const hit = forecastLimitHit(codexSamples, now);
-        codex.primary.forecastHitAt = hit === null ? null : new Date(hit).toISOString();
+      }
+      if (percent !== null) {
         for (const alert of detectAlerts(prevCodexPercent, percent)) {
           emit({
             type: "alert",
@@ -104,8 +109,40 @@ export async function runWatch(env: NodeJS.ProcessEnv = process.env): Promise<vo
         }
         prevCodexPercent = percent;
       }
-      const limits: Limits = { codex, cursor: cursorLimits };
+    }
+    // Re-attach the current forecast to every freshly parsed object so an
+    // unchanged poll cannot make it disappear from the next emitted payload.
+    if (codex.primary?.usedPercent != null) {
+      const hit = forecastLimitHit(codexSamples, now);
+      codex.primary.forecastHitAt = hit === null ? null : new Date(hit).toISOString();
+    }
+
+    const limits: Limits = { codex, cursor: cursorLimits };
+    const signature = JSON.stringify(limits);
+    if (signature !== lastLimitsSignature) {
+      lastLimitsSignature = signature;
       emit({ type: "limits", limits });
+    }
+  };
+
+  const collectAndEmit = async () => {
+    if (collecting) {
+      pending = true;
+      return;
+    }
+    collecting = true;
+    emit({ type: "status", collecting: true, lastFullCollectAt });
+    try {
+      // Publish cap/reset changes before any transcript aggregation awaits.
+      refreshLimits();
+      const native = await collectNativeTier(env);
+      const entries = mergeTiers(native, slow);
+      const toolsFound = [...new Set([...native.toolsFound, ...(slow?.toolsFound ?? [])])];
+      emit({
+        type: "snapshot",
+        summary: summarize(entries, toolsFound, native.partial, new Date(), slow?.sessions ?? [], claudeSessionNames(env)),
+      });
+
       lastFullCollectAt = new Date().toISOString();
       emit({ type: "status", collecting: false, lastFullCollectAt });
     } catch (err) {
@@ -204,6 +241,7 @@ export async function runWatch(env: NodeJS.ProcessEnv = process.env): Promise<vo
   // reads only changed active files and guarantees forward progress for every
   // provider without falling back to the five-minute slow tier or archives.
   const nativePollTimer = setInterval(() => void collectAndEmit(), NATIVE_POLL_MS);
+  const limitsPollTimer = setInterval(refreshLimits, LIMITS_POLL_MS);
 
   const slowTimer = setInterval(() => void refreshSlow(), SLOW_INTERVAL_MS);
   const heartbeat = setInterval(
@@ -216,6 +254,7 @@ export async function runWatch(env: NodeJS.ProcessEnv = process.env): Promise<vo
     clearInterval(slowTimer);
     clearInterval(watchRescanTimer);
     clearInterval(nativePollTimer);
+    clearInterval(limitsPollTimer);
     clearInterval(heartbeat);
     if (debounce) clearTimeout(debounce);
     process.exit(0);
