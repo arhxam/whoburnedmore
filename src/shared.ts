@@ -328,6 +328,13 @@ export interface LeaderboardRow {
    * accounts that haven't had a token-increasing submit yet.
    */
   lastCodedAt?: string | null;
+  /**
+   * Optional short "what I'm burning tokens on" status the owner sets. Absent
+   * when unset or when the owner's optional deadline has passed (the server
+   * omits an expired status). Free text, ≤100 chars, profanity-filtered.
+   * Optional (back-compat).
+   */
+  statusMessage?: string | null;
 }
 
 export interface LeaderboardResponse {
@@ -366,6 +373,12 @@ export interface UserProfileResponse {
   leaderboardSocial?: "auto" | "x" | "instagram" | "github";
   /** Short free-text bio shown on the profile. Optional (back-compat). */
   bio?: string | null;
+  /** The owner's current leaderboard "burn status" (what they're working on),
+   *  or null. Optional (back-compat). */
+  statusMessage?: string | null;
+  /** ISO deadline after which the status stops showing, or null for no expiry.
+   *  Optional (back-compat). */
+  statusExpiresAt?: string | null;
   /** Which image avatarUrl points at: a user upload ("custom"), the OAuth image
    *  ("provider"), or none ("default"). Lets the owner UI offer "remove photo"
    *  only for a custom upload. Optional (back-compat). */
