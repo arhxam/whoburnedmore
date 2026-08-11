@@ -26,8 +26,16 @@
  *    corpus too large for one tick is finished across ticks — the cold first
  *    pass converges instead of starving forever.
  */
-import { mkdirSync, renameSync, writeFileSync } from "node:fs";
-import { readFile, stat } from "node:fs/promises";
+import {
+  chmodSync,
+  constants,
+  mkdirSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { open, stat } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 import { defaultConfigDir } from "../config.js";
 
@@ -40,6 +48,64 @@ interface CachedFile<T> {
 interface CacheShape<T> {
   v: number;
   files: Record<string, CachedFile<T>>;
+}
+
+/** One corrupt local agent file must not allocate the sidecar/CLI without bound. */
+export const MAX_NATIVE_FILE_BYTES = 64 * 1024 * 1024;
+export const MAX_NATIVE_CACHE_BYTES = 128 * 1024 * 1024;
+const READ_CHUNK_BYTES = 64 * 1024;
+
+export type CappedTextRead =
+  | { ok: true; content: string }
+  | { ok: false; reason: "unreadable" | "too-large" | "timed-out" };
+
+/**
+ * Owner-safe, symlink-refusing, bounded text read. Reads in chunks so a file
+ * that grows after stat() still cannot cross the byte ceiling, and checks the
+ * caller's wall-clock deadline between I/O operations.
+ */
+export async function readTextFileCapped(
+  path: string,
+  opts: {
+    maxBytes?: number;
+    deadline?: number;
+    now?: () => number;
+  } = {},
+): Promise<CappedTextRead> {
+  const maxBytes = Math.max(1, opts.maxBytes ?? MAX_NATIVE_FILE_BYTES);
+  const deadline = opts.deadline ?? Number.POSITIVE_INFINITY;
+  const now = opts.now ?? Date.now;
+  let handle: Awaited<ReturnType<typeof open>> | null = null;
+  try {
+    handle = await open(
+      path,
+      constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
+    );
+    const metadata = await handle.stat();
+    if (!metadata.isFile()) return { ok: false, reason: "unreadable" };
+    if (metadata.size > maxBytes) return { ok: false, reason: "too-large" };
+
+    const chunks: Buffer[] = [];
+    let total = 0;
+    while (true) {
+      if (now() > deadline) return { ok: false, reason: "timed-out" };
+      // Leave room for one sentinel byte once the cap is reached. If a file
+      // grew after stat(), that next byte detects it without unbounded growth.
+      const allowance = Math.min(READ_CHUNK_BYTES, maxBytes + 1 - total);
+      if (allowance <= 0) return { ok: false, reason: "too-large" };
+      const chunk = Buffer.allocUnsafe(allowance);
+      const { bytesRead } = await handle.read(chunk, 0, allowance, null);
+      if (bytesRead === 0) break;
+      total += bytesRead;
+      if (total > maxBytes) return { ok: false, reason: "too-large" };
+      chunks.push(chunk.subarray(0, bytesRead));
+    }
+    return { ok: true, content: Buffer.concat(chunks, total).toString("utf8") };
+  } catch {
+    return { ok: false, reason: "unreadable" };
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
 }
 
 /**
@@ -61,10 +127,12 @@ export function nativeCachePath(
 async function loadCache<T>(
   path: string,
   version: number,
+  maxBytes: number,
 ): Promise<Record<string, CachedFile<T>>> {
   try {
-    const raw = await readFile(path, "utf8");
-    const parsed = JSON.parse(raw) as CacheShape<T>;
+    const read = await readTextFileCapped(path, { maxBytes });
+    if (!read.ok) return {};
+    const parsed = JSON.parse(read.content) as CacheShape<T>;
     if (parsed && parsed.v === version && parsed.files && typeof parsed.files === "object") {
       return parsed.files;
     }
@@ -78,16 +146,33 @@ function saveCache<T>(
   path: string,
   version: number,
   files: Record<string, CachedFile<T>>,
+  maxBytes: number,
 ): void {
+  let tmp: string | null = null;
   try {
-    mkdirSync(dirname(path), { recursive: true });
+    const dir = dirname(path);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    chmodSync(dir, 0o700);
     // Atomic replace: a crash mid-write must never leave a truncated JSON that
     // a later run would half-trust. rename() is atomic on the same volume.
-    const tmp = `${path}.tmp-${process.pid}`;
-    writeFileSync(tmp, JSON.stringify({ v: version, files }));
+    tmp = `${path}.tmp-${process.pid}-${randomBytes(8).toString("hex")}`;
+    const serialized = JSON.stringify({ v: version, files });
+    if (Buffer.byteLength(serialized, "utf8") > maxBytes) return;
+    writeFileSync(tmp, serialized, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    // Explicit chmod also repairs platforms/filesystems that ignored creation mode.
+    chmodSync(tmp, 0o600);
     renameSync(tmp, path);
+    tmp = null;
   } catch {
     // Cache persistence is best-effort; the reader still returns correct data.
+  } finally {
+    if (tmp) {
+      try {
+        unlinkSync(tmp);
+      } catch {
+        // Best-effort cleanup of a failed atomic write.
+      }
+    }
   }
 }
 
@@ -121,9 +206,13 @@ export async function readFilesWithCache<T>(opts: {
   parseFile: (content: string, path: string) => T[];
   deadline: number;
   now?: () => number;
+  maxFileBytes?: number;
+  maxCacheBytes?: number;
 }): Promise<FileCacheResult<T>> {
   const now = opts.now ?? Date.now;
-  const cached = await loadCache<T>(opts.cachePath, opts.version);
+  const maxFileBytes = Math.max(1, opts.maxFileBytes ?? MAX_NATIVE_FILE_BYTES);
+  const maxCacheBytes = Math.max(1, opts.maxCacheBytes ?? MAX_NATIVE_CACHE_BYTES);
+  const cached = await loadCache<T>(opts.cachePath, opts.version, maxCacheBytes);
   const fresh: Record<string, CachedFile<T>> = {};
   const itemsByFile: T[][] = [];
   let filesRead = 0;
@@ -138,6 +227,10 @@ export async function readFilesWithCache<T>(opts: {
     } catch {
       continue; // vanished between listing and stat — skip
     }
+    if (size > maxFileBytes) {
+      // Never reuse an old cache row for a file that has since become hostile.
+      continue;
+    }
     const hit = cached[f];
     if (hit && hit.size === size && hit.mtimeMs === mtimeMs) {
       fresh[f] = hit;
@@ -147,16 +240,22 @@ export async function readFilesWithCache<T>(opts: {
     if (now() > opts.deadline) {
       // Persist the progress made so far (keep prior entries for files not yet
       // revisited this run, so partial passes accumulate monotonic progress).
-      saveCache(opts.cachePath, opts.version, { ...cached, ...fresh });
+      saveCache(opts.cachePath, opts.version, { ...cached, ...fresh }, maxCacheBytes);
       return { itemsByFile: null, filesRead, timedOut: true };
     }
-    let content: string;
-    try {
-      content = await readFile(f, "utf8");
-    } catch {
-      continue; // unreadable — skip, and drop any stale cache entry for it
+    const read = await readTextFileCapped(f, {
+      maxBytes: maxFileBytes,
+      deadline: opts.deadline,
+      now,
+    });
+    if (!read.ok) {
+      if (read.reason === "timed-out") {
+        saveCache(opts.cachePath, opts.version, { ...cached, ...fresh }, maxCacheBytes);
+        return { itemsByFile: null, filesRead, timedOut: true };
+      }
+      continue; // unreadable/oversized — skip and drop stale cache entry
     }
-    const items = opts.parseFile(content, f);
+    const items = opts.parseFile(read.content, f);
     // Stat was taken BEFORE the read: if the file grew in between, the recorded
     // mtime is older than the content we parsed — the next run simply re-reads
     // it. Never the reverse (a recorded mtime newer than the parsed content).
@@ -167,6 +266,6 @@ export async function readFilesWithCache<T>(opts: {
 
   // Completed pass: persist ONLY files that still exist (deleted transcripts
   // must drop out, or their usage would survive on disk forever).
-  saveCache(opts.cachePath, opts.version, fresh);
+  saveCache(opts.cachePath, opts.version, fresh, maxCacheBytes);
   return { itemsByFile, filesRead, timedOut: false };
 }

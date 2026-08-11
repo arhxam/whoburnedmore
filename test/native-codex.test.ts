@@ -1,8 +1,12 @@
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import path from "node:path";
 import {
   CODEX_CACHE_VERSION,
   aggregateCodexSessions,
+  collectCodexNative,
+  inspectCodexRollout,
   parseCodexRollout,
   resolveCodexSessionsDir,
   resolveCodexSessionsDirs,
@@ -80,8 +84,21 @@ describe("parseCodexRollout — cumulative handling", () => {
     expect(s.cacheCreationTokens).toBe(0);
   });
 
-  it("invalidates caches created before reasoning output was de-duplicated", () => {
-    expect(CODEX_CACHE_VERSION).toBe(2);
+  it("never lets a malformed cached delta exceed the inclusive input delta", () => {
+    const lines = [
+      meta("gpt-5-codex"),
+      tokenCount("2026-06-10T12:00:00Z", { input: 100, cached: 80, output: 10 }),
+      tokenCount("2026-06-11T12:00:00Z", { input: 120, cached: 150, output: 20 }),
+    ];
+    const out = parseCodexRollout(lines);
+    const second = out.find((s) => s.date === "2026-06-11")!;
+    expect(second.cacheReadTokens).toBe(20);
+    expect(second.inputTokens).toBe(0);
+    expect(total(second)).toBe(30);
+  });
+
+  it("invalidates caches created before forked rollouts failed closed", () => {
+    expect(CODEX_CACHE_VERSION).toBe(7);
   });
 
   it("reads the nested info.total_token_usage layout", () => {
@@ -101,6 +118,36 @@ describe("parseCodexRollout — cumulative handling", () => {
 
   it("returns an empty array for a session with no token_count events", () => {
     expect(parseCodexRollout([meta("gpt-5"), turnCtx("gpt-5")])).toEqual([]);
+  });
+
+  it("fails closed for a forked rollout whose inherited prefix is not file-locally separable", () => {
+    const forkedMeta = JSON.stringify({
+      timestamp: "2026-06-10T12:00:00Z",
+      type: "session_meta",
+      payload: {
+        id: "child-session",
+        forked_from_id: "parent-session",
+        parent_thread_id: "parent-session",
+        source: {
+          subagent: { thread_spawn: { parent_thread_id: "parent-session" } },
+        },
+      },
+    });
+    expect(
+      parseCodexRollout([
+        forkedMeta,
+        tokenCount("2026-06-10T12:01:00Z", { input: 100_000, output: 5_000 }),
+      ]),
+    ).toEqual([]);
+    const inspected = inspectCodexRollout([
+        forkedMeta,
+        tokenCount("2026-06-10T12:01:00Z", { input: 100_000, output: 5_000 }),
+        tokenCount("2026-06-11T12:01:00Z", { input: 100_000, output: 5_000 }),
+      ]);
+    expect(inspected.replayCandidateDates).toEqual(["2026-06-10", "2026-06-11"]);
+    expect(inspected.replaySessions.map((session) => session.date)).toEqual([
+      "2026-06-10",
+    ]);
   });
 
   it("does not emit a poisonous day when the first timestamp is out of range", () => {
@@ -142,15 +189,13 @@ describe("resolveCodexSessionsDir", () => {
     expect(resolveCodexSessionsDir({} as NodeJS.ProcessEnv)).toMatch(/\.codex[\/\\]sessions$/);
     expect(
       resolveCodexSessionsDir({ CODEX_HOME: "/custom/codex" } as NodeJS.ProcessEnv),
-    ).toBe(path.resolve("/custom/codex", "sessions"));
+    ).toBe(join("/custom/codex", "sessions"));
   });
-});
 
-describe("resolveCodexSessionsDirs", () => {
-  it("covers both the live and the archived rollout roots", () => {
+  it("covers both live and archived rollout roots", () => {
     expect(resolveCodexSessionsDirs({ CODEX_HOME: "/custom/codex" } as NodeJS.ProcessEnv)).toEqual([
-      path.join("/custom/codex", "sessions"),
-      path.join("/custom/codex", "archived_sessions"),
+      join("/custom/codex", "sessions"),
+      join("/custom/codex", "archived_sessions"),
     ]);
   });
 
@@ -158,5 +203,34 @@ describe("resolveCodexSessionsDirs", () => {
     const dirs = resolveCodexSessionsDirs({} as NodeJS.ProcessEnv);
     expect(dirs[0]).toMatch(/\.codex[\/\\]sessions$/);
     expect(dirs[1]).toMatch(/\.codex[\/\\]archived_sessions$/);
+  });
+
+  it("counts an active/archive overlap once while retaining unique archives", async () => {
+    const home = await mkdtemp(join(tmpdir(), "wbm-codex-roots-"));
+    const relative = join("2026", "06", "10");
+    const liveDir = join(home, "sessions", relative);
+    // Archives can be flattened instead of preserving the live YYYY/MM/DD
+    // nesting; the rollout filename/session identity must still deduplicate it.
+    const archiveDir = join(home, "archived_sessions");
+    await Promise.all([
+      mkdir(liveDir, { recursive: true }),
+      mkdir(archiveDir, { recursive: true }),
+    ]);
+    const live = [meta("gpt-5-codex"), tokenCount("2026-06-10T12:00:00Z", { input: 100, output: 50 })].join("\n");
+    const archived = [meta("gpt-5-codex"), tokenCount("2026-06-10T13:00:00Z", { input: 200, output: 50 })].join("\n");
+    await Promise.all([
+      writeFile(join(liveDir, "rollout-overlap.jsonl"), live),
+      writeFile(join(archiveDir, "rollout-overlap.jsonl"), live),
+      writeFile(join(archiveDir, "rollout-archive-only.jsonl"), archived),
+    ]);
+
+    const result = await collectCodexNative(
+      { CODEX_HOME: home } as NodeJS.ProcessEnv,
+      { cachePath: join(home, "native-cache.json") },
+    );
+    expect(result.found).toBe(true);
+    expect(result.filesScanned).toBe(3);
+    expect(result.entries.reduce((sum, e) => sum + total(e), 0)).toBe(400);
+    expect(result.legacyEntries!.reduce((sum, e) => sum + total(e), 0)).toBe(550);
   });
 });

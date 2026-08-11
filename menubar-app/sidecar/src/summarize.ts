@@ -4,6 +4,7 @@
  * produced the entries' date strings in the first place.
  */
 import type { DailyUsageEntry, SessionEntry } from "../../../src/shared.js";
+import { sanitizeMachineLabel } from "../../../src/wire-sanitize.js";
 
 import type {
   DayPoint,
@@ -33,11 +34,12 @@ function sessionTokens(s: SessionEntry): number {
  */
 export function sessionName(s: SessionEntry, names?: Map<string, string>): string {
   const mapped = names?.get(s.sessionId);
-  if (mapped) return mapped;
+  if (mapped) return mapped.replace(/[\u0000-\u001f\u007f]/g, "").slice(0, 64) || "session";
   const raw = s.sessionId;
   const parts = raw.split("/").filter(Boolean);
   const last = parts[parts.length - 1] || raw;
-  return last.length > 24 ? last.slice(0, 24) : last;
+  const clean = last.replace(/[\u0000-\u001f\u007f]/g, "");
+  return (clean.length > 24 ? clean.slice(0, 24) : clean) || "session";
 }
 
 /** The last `n` local days ending today, ascending. */
@@ -77,15 +79,17 @@ export function summarize(
 
   for (const e of entries) {
     const tokens = entryTokens(e);
+    const tool = sanitizeMachineLabel(e.tool, "agent", 64);
+    const model = sanitizeMachineLabel(e.model, "model", 128);
     if (tokens <= 0 && e.costUSD <= 0) continue;
     if (e.date === today) {
       todayTokens += tokens;
       todayCost += e.costUSD;
-      const t = toolToday.get(e.tool) ?? { tool: e.tool, tokens: 0, costUSD: 0 };
+      const t = toolToday.get(tool) ?? { tool, tokens: 0, costUSD: 0 };
       t.tokens += tokens;
       t.costUSD += e.costUSD;
-      toolToday.set(e.tool, t);
-      modelToday.set(e.model, (modelToday.get(e.model) ?? 0) + tokens);
+      toolToday.set(tool, t);
+      modelToday.set(model, (modelToday.get(model) ?? 0) + tokens);
     }
     if (window7.has(e.date)) {
       weekTokens += tokens;
@@ -95,10 +99,10 @@ export function summarize(
       const day = perDay.get(e.date)!;
       day.tokens += tokens;
       day.costUSD += e.costUSD;
-      const t = tool14.get(e.tool) ?? { tool: e.tool, tokens: 0, costUSD: 0 };
+      const t = tool14.get(tool) ?? { tool, tokens: 0, costUSD: 0 };
       t.tokens += tokens;
       t.costUSD += e.costUSD;
-      tool14.set(e.tool, t);
+      tool14.set(tool, t);
     }
   }
 
@@ -110,7 +114,11 @@ export function summarize(
     .filter((s) => localDay(new Date(s.lastActivity)) === today)
     .sort((a, b) => sessionTokens(b) - sessionTokens(a))
     .slice(0, 5)
-    .map((s) => ({ name: sessionName(s, sessionNames), tool: s.tool, tokens: sessionTokens(s) }));
+    .map((s) => ({
+      name: sessionName(s, sessionNames),
+      tool: sanitizeMachineLabel(s.tool, "agent", 64),
+      tokens: sessionTokens(s),
+    }));
 
   return {
     generatedAt: now.toISOString(),
@@ -120,13 +128,15 @@ export function summarize(
       const p = perDay.get(d)!;
       return { ...p, costUSD: Number(p.costUSD.toFixed(2)) };
     }),
-    byToolToday: round([...toolToday.values()].sort(byTokens)),
-    byTool14d: round([...tool14.values()].sort(byTokens)),
+    byToolToday: round([...toolToday.values()].sort(byTokens).slice(0, 32)),
+    byTool14d: round([...tool14.values()].sort(byTokens).slice(0, 32)),
     topModelsToday: [...modelToday.entries()]
       .map(([model, tokens]): ModelBreakdown => ({ model, tokens }))
       .sort(byTokens)
       .slice(0, 5),
-    toolsFound: [...new Set(toolsFound)].sort(),
+    toolsFound: [
+      ...new Set(toolsFound.map((tool) => sanitizeMachineLabel(tool, "agent", 64))),
+    ].sort().slice(0, 32),
     sessionsToday,
     partial,
   };

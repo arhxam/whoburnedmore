@@ -1,8 +1,34 @@
 import XCTest
 @testable import BurnBarCore
 
+final class ProviderSamplePolicyTests: XCTestCase {
+    func testRetainsLastKnownGoodOnTransientAbsence() {
+        XCTAssertFalse(ProviderSamplePolicy.shouldAccept(
+            previousHasData: true,
+            incomingHasData: false
+        ))
+        XCTAssertTrue(ProviderSamplePolicy.shouldAccept(
+            previousHasData: false,
+            incomingHasData: false
+        ))
+        XCTAssertTrue(ProviderSamplePolicy.shouldAccept(
+            previousHasData: true,
+            incomingHasData: true
+        ))
+        XCTAssertTrue(ProviderSamplePolicy.shouldAccept(
+            previousHasData: true,
+            incomingHasData: false,
+            authoritativeAbsence: true
+        ))
+    }
+}
+
 @MainActor
 final class SettingsStoreTests: XCTestCase {
+    func testLeaderboardNetworkPolicyIsClosedWhenSyncIsOff() {
+        XCTAssertFalse(OutboundPrivacyPolicy.allowsLeaderboardNetwork(syncEnabled: false))
+        XCTAssertTrue(OutboundPrivacyPolicy.allowsLeaderboardNetwork(syncEnabled: true))
+    }
     private func freshDefaults() -> UserDefaults {
         let name = "burnbar-test-\(UUID().uuidString)"
         let d = UserDefaults(suiteName: name)!

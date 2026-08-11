@@ -17,10 +17,12 @@
  * Conservative + back-compat: with nothing stored it is a no-op, and it never
  * inflates a day beyond what a real scan actually observed.
  */
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import type { AgentStat, DailyUsageEntry } from "./shared.js";
 import { defaultConfigDir } from "./config.js";
+import { readTextFileSyncCapped, writePrivateFileAtomic } from "./safe-local-file.js";
+
+const MAX_PROVENANCE_STORE_BYTES = 4 * 1024 * 1024;
 
 /** Bump when the store shape changes — a mismatched version is ignored (rebuilt). */
 export const PROVENANCE_STORE_VERSION = 1;
@@ -58,7 +60,9 @@ export function provenanceStorePath(env: NodeJS.ProcessEnv = process.env): strin
 /** Load the store, or null if missing/corrupt/version-mismatched (never throws). */
 export function loadProvenanceStore(path: string): ProvenanceStore | null {
   try {
-    const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<ProvenanceStore>;
+    const content = readTextFileSyncCapped(path, MAX_PROVENANCE_STORE_BYTES);
+    if (content === null) return null;
+    const parsed = JSON.parse(content) as Partial<ProvenanceStore>;
     if (
       parsed &&
       parsed.v === PROVENANCE_STORE_VERSION &&
@@ -80,10 +84,7 @@ export function loadProvenanceStore(path: string): ProvenanceStore | null {
 /** Persist the store atomically (best-effort; a failure is never fatal). */
 export function saveProvenanceStore(path: string, store: ProvenanceStore): void {
   try {
-    mkdirSync(dirname(path), { recursive: true });
-    const tmp = `${path}.tmp-${process.pid}`;
-    writeFileSync(tmp, JSON.stringify(store));
-    renameSync(tmp, path);
+    writePrivateFileAtomic(path, JSON.stringify(store), MAX_PROVENANCE_STORE_BYTES);
   } catch {
     // Best-effort: the run still submits correct data without the store.
   }

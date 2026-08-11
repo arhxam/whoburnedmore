@@ -68,19 +68,24 @@ final class SidecarClient {
         p.standardInput = stdin
         p.standardError = FileHandle.nullDevice
 
-        var buffer = Data()
+        var framer = BoundedNDJSONFramer()
         stdout.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let chunk = handle.availableData
             guard !chunk.isEmpty else { return }
-            buffer.append(chunk)
-            while let nl = buffer.firstIndex(of: UInt8(ascii: "\n")) {
-                let lineData = buffer[buffer.startIndex..<nl]
-                buffer.removeSubrange(buffer.startIndex...nl)
-                guard let line = String(data: Data(lineData), encoding: .utf8),
-                      let event = SidecarEvent.parse(line: line) else { continue }
-                Task { @MainActor [weak self] in
-                    self?.restartDelay = 1
-                    self?.onEvent?(event)
+            do {
+                for line in try framer.append(chunk) {
+                    guard let event = SidecarEvent.parse(line: line) else { continue }
+                    Task { @MainActor [weak self] in
+                        self?.restartDelay = 1
+                        self?.onEvent?(event)
+                    }
+                }
+            } catch {
+                Task { @MainActor [weak self, weak p] in
+                    guard let self, let p, self.process === p else { return }
+                    self.log.error("sidecar protocol frame exceeded 1 MiB — restarting")
+                    stdout.fileHandleForReading.readabilityHandler = nil
+                    p.terminate()
                 }
             }
         }

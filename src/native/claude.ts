@@ -23,12 +23,17 @@
  * This module is split into a PURE core (`aggregateClaudeLines`) that the unit
  * tests drive with fixtures, and a thin filesystem wrapper (`collectClaudeNative`).
  */
-import { readdir, readFile } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { DailyUsageEntry } from "../shared.js";
 import { estimateCostUSD } from "../pricing.js";
-import { nativeCachePath, readFilesWithCache } from "./file-cache.js";
+import {
+  MAX_NATIVE_FILE_BYTES,
+  nativeCachePath,
+  readFilesWithCache,
+  readTextFileCapped,
+} from "./file-cache.js";
 import { localUsageDate } from "./usage-date.js";
 
 /** One deduped provider request extracted from a transcript line. */
@@ -418,7 +423,7 @@ export async function collectClaudeNative(
  */
 export async function collectClaudeRequests(
   env = process.env,
-  opts: { budgetMs?: number; now?: () => number } = {},
+  opts: { budgetMs?: number; now?: () => number; maxFileBytes?: number } = {},
 ): Promise<{ requests: ParsedRequest[]; found: boolean; timedOut?: boolean }> {
   const dirs = resolveClaudeProjectDirs(env);
   const files: string[] = [];
@@ -432,13 +437,18 @@ export async function collectClaudeRequests(
     if (now() > deadline) {
       return { requests: [...acc.values()], found: true, timedOut: true };
     }
-    let content: string;
-    try {
-      content = await readFile(f, "utf8");
-    } catch {
-      continue; // skip unreadable file
+    const read = await readTextFileCapped(f, {
+      maxBytes: opts.maxFileBytes ?? MAX_NATIVE_FILE_BYTES,
+      deadline,
+      now,
+    });
+    if (!read.ok) {
+      if (read.reason === "timed-out") {
+        return { requests: [...acc.values()], found: true, timedOut: true };
+      }
+      continue;
     }
-    accumulateClaudeLines(acc, splitLines(content));
+    accumulateClaudeLines(acc, splitLines(read.content));
   }
   return { requests: [...acc.values()], found: true };
 }

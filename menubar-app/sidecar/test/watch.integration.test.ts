@@ -4,7 +4,15 @@
  * updated snapshot event on stdout within 5 seconds of the append.
  */
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync, appendFileSync } from "node:fs";
+import {
+  appendFileSync,
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -12,6 +20,14 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { parseEvent, type Event, type Summary } from "../src/protocol.js";
 
 const BIN = join(__dirname, "..", "dist", "burnbar-sidecar");
+const CCUSAGE = join(
+  realpathSync(join(__dirname, "..", "..", "node_modules", "ccusage")),
+  "..",
+  "@ccusage",
+  `ccusage-${process.platform}-${process.arch}`,
+  "bin",
+  "ccusage",
+);
 
 function claudeLine(requestId: string, tokens: number): string {
   return (
@@ -72,8 +88,61 @@ function codexRateLimitLine(percent: number, resetsAt: number): string {
   }) + "\n";
 }
 
+/** Deterministic parser stand-in for the directory-discovery test. Replay
+ * correctness against the real bundled binary is covered in collector.test and
+ * packages/cli/test/ccusage-codex-replay.test; this test is specifically about
+ * a watch process noticing a sessions tree that did not exist at launch. */
+function fakeCodexParser(root: string): string {
+  const file = join(root, "fake-ccusage.cjs");
+  writeFileSync(
+    file,
+    `#!/usr/bin/env node
+const fs = require("node:fs");
+const path = require("node:path");
+if (process.argv[2] !== "codex") {
+  process.stdout.write(JSON.stringify(process.argv[2] === "session" ? { sessions: [] } : { daily: [] }));
+  process.exit(0);
+}
+let latest = null;
+const walk = (dir) => {
+  if (!fs.existsSync(dir)) return;
+  for (const name of fs.readdirSync(dir)) {
+    const target = path.join(dir, name);
+    const stat = fs.statSync(target);
+    if (stat.isDirectory()) walk(target);
+    else if (name.endsWith(".jsonl")) {
+      for (const line of fs.readFileSync(target, "utf8").trim().split("\\n")) {
+        try {
+          const parsed = JSON.parse(line);
+          const usage = parsed?.payload?.info?.total_token_usage;
+          if (usage) latest = usage;
+        } catch {}
+      }
+    }
+  }
+};
+walk(process.env.CODEX_HOME || "");
+const daily = latest ? [{
+  date: new Date().toISOString().slice(0, 10),
+  totalCost: 0,
+  modelBreakdowns: [{
+    modelName: "gpt-5-codex",
+    inputTokens: latest.input_tokens || 0,
+    outputTokens: latest.output_tokens || 0,
+    cacheCreationTokens: 0,
+    cacheReadTokens: latest.cached_input_tokens || 0,
+    cost: 0
+  }]
+}] : [];
+process.stdout.write(JSON.stringify({ daily }));
+`,
+  );
+  chmodSync(file, 0o755);
+  return file;
+}
+
 describe("watch mode real-time integration", () => {
-  let root: string;
+  let root = "";
   let child: ChildProcess | null = null;
 
   beforeAll(() => {
@@ -90,9 +159,9 @@ describe("watch mode real-time integration", () => {
     );
   });
 
-  afterAll(() => {
-    child?.kill("SIGTERM");
-    rmSync(root, { recursive: true, force: true });
+  afterAll(async () => {
+    await stopChild(child);
+    if (root) rmSync(root, { recursive: true, force: true });
   });
 
   it("emits an updated snapshot within 5s of a transcript append", { timeout: 60_000 }, async () => {
@@ -143,21 +212,26 @@ describe("watch mode real-time integration", () => {
 
     expect(events.some((e) => e.type === "hello")).toBe(true);
     expect(events.some((e) => e.type === "limits")).toBe(true);
+    await stopChild(child);
+    child = null;
   });
 
   it("starts live-counting Codex when its sessions directory is created after launch", { timeout: 60_000 }, async () => {
-    child?.kill("SIGTERM");
+    await stopChild(child);
+    child = null;
     const lateRoot = mkdtempSync(join(tmpdir(), "bb-watch-late-codex-"));
+    const parser = fakeCodexParser(lateRoot);
     const env = {
       ...process.env,
       CLAUDE_CONFIG_DIR: join(lateRoot, "missing-claude"),
       CODEX_HOME: join(lateRoot, "codex"),
       BURNBAR_CACHE_DIR: join(lateRoot, "cache"),
-      BURNBAR_CCUSAGE: "",
+      BURNBAR_CCUSAGE: parser,
       BURNBAR_DEBOUNCE_MS: "100",
       BURNBAR_SLOW_INTERVAL_MS: "600000",
       BURNBAR_WATCH_RESCAN_MS: "600000",
       BURNBAR_NATIVE_POLL_MS: "100",
+      BURNBAR_CODEX_MIN_INTERVAL_MS: "0",
       HOME: lateRoot,
     };
     child = spawn(BIN, ["watch"], { env, stdio: ["pipe", "pipe", "pipe"] });
@@ -185,7 +259,7 @@ describe("watch mode real-time integration", () => {
 
     await waitFor(
       () => snapshots.some((s) => s.today.totalTokens === 7010),
-      3_000,
+      10_000,
       "new live Codex session snapshot",
     );
 
@@ -195,14 +269,17 @@ describe("watch mode real-time integration", () => {
     appendFileSync(liveFile, codexTokenLine(9000));
     await waitFor(
       () => snapshots.some((s) => s.today.totalTokens === 9010),
-      3_000,
+      10_000,
       "updated active Codex rollout snapshot",
     );
+    await stopChild(child);
+    child = null;
     rmSync(lateRoot, { recursive: true, force: true });
   });
 
   it("emits Codex limit changes without waiting for the token collector", { timeout: 60_000 }, async () => {
-    child?.kill("SIGTERM");
+    await stopChild(child);
+    child = null;
     const limitRoot = mkdtempSync(join(tmpdir(), "bb-watch-live-limits-"));
     const liveDir = join(limitRoot, "codex", "sessions", "2026", "08", "09");
     mkdirSync(liveDir, { recursive: true });
@@ -249,10 +326,92 @@ describe("watch mode real-time integration", () => {
     await waitFor(() => percents.includes(100), 2_000, "live Codex 100% limit");
     expect(Date.now() - appendedAt).toBeLessThan(2_000);
 
-    child.kill("SIGTERM");
+    await stopChild(child);
+    child = null;
+    rmSync(limitRoot, { recursive: true, force: true });
+  });
+
+  it("keeps the last valid Codex limit through a transient missing read", { timeout: 60_000 }, async () => {
+    await stopChild(child);
+    child = null;
+    const limitRoot = mkdtempSync(join(tmpdir(), "bb-watch-limit-lkg-"));
+    const liveDir = join(limitRoot, "codex", "sessions", "2026", "08", "10");
+    mkdirSync(liveDir, { recursive: true });
+    const liveFile = join(liveDir, "rollout-limit-lkg.jsonl");
+    const futureReset = Math.floor(Date.now() / 1000) + 7 * 24 * 3600;
+    writeFileSync(liveFile, codexRateLimitLine(61, futureReset));
+
+    const env = {
+      ...process.env,
+      CLAUDE_CONFIG_DIR: join(limitRoot, "missing-claude"),
+      CODEX_HOME: join(limitRoot, "codex"),
+      BURNBAR_CACHE_DIR: join(limitRoot, "cache"),
+      BURNBAR_CCUSAGE: "",
+      BURNBAR_DEBOUNCE_MS: "600000",
+      BURNBAR_SLOW_INTERVAL_MS: "600000",
+      BURNBAR_WATCH_RESCAN_MS: "600000",
+      BURNBAR_NATIVE_POLL_MS: "600000",
+      BURNBAR_LIMITS_POLL_MS: "100",
+      HOME: limitRoot,
+    };
+    child = spawn(BIN, ["watch"], { env, stdio: ["pipe", "pipe", "pipe"] });
+
+    const observations: Array<{ present: boolean; percent: number | null }> = [];
+    let buffer = "";
+    child.stdout!.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString();
+      let idx: number;
+      while ((idx = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 1);
+        const ev = parseEvent(line);
+        if (ev?.type === "limits") {
+          observations.push({
+            present: ev.limits.codex.present,
+            percent: ev.limits.codex.secondary?.usedPercent ?? null,
+          });
+        }
+      }
+    });
+
+    await waitFor(
+      () => observations.some((sample) => sample.percent === 61),
+      30_000,
+      "initial Codex limit",
+    );
+    const afterValid = observations.length;
+
+    // Active rollouts are routinely moved/replaced while Codex is writing.
+    // One poll that sees no readable rate-limit line is not an authoritative
+    // reset and must never flash the menu bar back to 0/unavailable.
+    rmSync(liveFile);
+    await delay(500);
+    expect(observations.slice(afterValid).some((sample) => !sample.present)).toBe(false);
+
+    writeFileSync(liveFile, codexRateLimitLine(62, futureReset));
+    await waitFor(
+      () => observations.some((sample) => sample.percent === 62),
+      2_000,
+      "restored Codex limit",
+    );
+
+    await stopChild(child);
+    child = null;
     rmSync(limitRoot, { recursive: true, force: true });
   });
 });
+
+function stopChild(child: ChildProcess | null): Promise<void> {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  return new Promise((resolve) => {
+    const force = setTimeout(() => child.kill("SIGKILL"), 2_000);
+    child.once("exit", () => {
+      clearTimeout(force);
+      resolve();
+    });
+    child.kill("SIGTERM");
+  });
+}
 
 function waitFor(cond: () => boolean, ms: number, what: string): Promise<void> {
   const start = Date.now();
@@ -267,4 +426,8 @@ function waitFor(cond: () => boolean, ms: number, what: string): Promise<void> {
       }
     }, 50);
   });
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

@@ -9,7 +9,8 @@
  * network, corrupt cache) we fall back to a stale cache, then to the baked
  * snapshot — a run never fails or blocks long because of pricing.
  */
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { chmod, mkdir, rename, unlink, writeFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 import {
   LITELLM_PRICING_URL,
@@ -18,11 +19,14 @@ import {
   type PriceRow,
 } from "./shared.js";
 import { defaultConfigDir } from "./config.js";
+import { readJsonResponseCapped } from "./http-bounds.js";
+import { readTextFileCapped } from "./native/file-cache.js";
 
 /** How long a cached table stays fresh (LiteLLM updates a few times a week). */
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 /** Hard cap on the fetch — pricing must never make a run feel slow. */
 const FETCH_TIMEOUT_MS = 5_000;
+const MAX_PRICING_BYTES = 32 * 1024 * 1024;
 
 export type PricingSource = "live" | "cache" | "baked";
 
@@ -37,7 +41,9 @@ export function pricingCachePath(dir = defaultConfigDir()): string {
 
 async function readCache(path: string): Promise<CacheFile | null> {
   try {
-    const parsed = JSON.parse(await readFile(path, "utf8")) as CacheFile;
+    const read = await readTextFileCapped(path, { maxBytes: MAX_PRICING_BYTES });
+    if (!read.ok) return null;
+    const parsed = JSON.parse(read.content) as CacheFile;
     if (
       typeof parsed?.fetchedAt === "number" &&
       parsed.table &&
@@ -57,9 +63,10 @@ async function fetchLiveTable(
   try {
     const res = await fetch(url, {
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      redirect: "error",
     });
     if (!res.ok) return null;
-    const table = litellmToTable(await res.json());
+    const table = litellmToTable(await readJsonResponseCapped(res, MAX_PRICING_BYTES));
     return Object.keys(table).length > 0 ? table : null;
   } catch {
     return null;
@@ -89,12 +96,22 @@ export async function loadLivePricing(
   if (live) {
     setLivePricing(live);
     try {
-      await mkdir(dirname(path), { recursive: true });
+      const dir = dirname(path);
+      await mkdir(dir, { recursive: true, mode: 0o700 });
+      await chmod(dir, 0o700);
       // Write-then-rename so a concurrent run (foreground + background sync)
       // can never read a torn half-written cache.
-      const tmp = `${path}.${process.pid}.tmp`;
-      await writeFile(tmp, JSON.stringify({ fetchedAt: now(), table: live }));
-      await rename(tmp, path);
+      const serialized = JSON.stringify({ fetchedAt: now(), table: live });
+      if (Buffer.byteLength(serialized, "utf8") <= MAX_PRICING_BYTES) {
+        const tmp = `${path}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
+        try {
+          await writeFile(tmp, serialized, { encoding: "utf8", flag: "wx", mode: 0o600 });
+          await chmod(tmp, 0o600);
+          await rename(tmp, path);
+        } finally {
+          await unlink(tmp).catch(() => undefined);
+        }
+      }
     } catch {
       // cache write is best-effort; live rates are already active
     }

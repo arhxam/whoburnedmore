@@ -14,7 +14,16 @@ export const DateString = z
   .string()
   .regex(/^\d{4}-\d{2}-\d{2}$/, "must be YYYY-MM-DD");
 
-const tokenCount = z.number().int().nonnegative();
+// Chosen so even the largest accepted arrays can be summed without exceeding
+// Number.MAX_SAFE_INTEGER (20k daily rows / 10k session rows). The API's tighter
+// per-day policy still applies after parsing; this is the wire-level arithmetic
+// safety ceiling.
+export const MAX_TOKEN_COUNT = 100_000_000_000;
+export const MAX_ROLLUP_COUNT = 1_000_000_000;
+export const MAX_COST_USD = 100_000;
+const tokenCount = z.number().int().nonnegative().max(MAX_TOKEN_COUNT);
+const rollupCount = z.number().int().nonnegative().max(MAX_ROLLUP_COUNT);
+const costUSD = z.number().nonnegative().max(MAX_COST_USD);
 
 /** Provider/gateway sources a user can connect a read-only key for. */
 export const ConnectorProvider = z.enum([
@@ -55,7 +64,7 @@ export const DailyUsageEntry = z.object({
   cacheCreationTokens: tokenCount,
   cacheReadTokens: tokenCount,
   /** Estimated cost in USD for this entry. */
-  costUSD: z.number().nonnegative(),
+  costUSD,
   /** Where this entry came from. Defaults to the local CLI for back-compat. */
   origin: UsageOrigin.default("cli"),
   /** True when the numbers come from a provider's authoritative usage API. */
@@ -70,7 +79,7 @@ export const DailyUsageEntry = z.object({
    * cannot see request ids) omit it, and an omitted fingerprint is never
    * penalized.
    */
-  requestCount: z.number().int().nonnegative().optional(),
+  requestCount: rollupCount.optional(),
 });
 export type DailyUsageEntry = z.infer<typeof DailyUsageEntry>;
 
@@ -90,10 +99,10 @@ export const SessionEntry = z.object({
   outputTokens: tokenCount,
   cacheCreationTokens: tokenCount,
   cacheReadTokens: tokenCount,
-  costUSD: z.number().nonnegative(),
+  costUSD,
   lastActivity: Timestamp,
   /** Number of assistant messages in this session (from transcripts). Optional. */
-  messageCount: z.number().int().nonnegative().optional(),
+  messageCount: rollupCount.optional(),
 });
 export type SessionEntry = z.infer<typeof SessionEntry>;
 
@@ -104,7 +113,7 @@ export type SessionEntry = z.infer<typeof SessionEntry>;
 export const BlockEntry = z.object({
   startTime: Timestamp,
   totalTokens: tokenCount,
-  costUSD: z.number().nonnegative(),
+  costUSD,
 });
 export type BlockEntry = z.infer<typeof BlockEntry>;
 
@@ -115,11 +124,11 @@ export type BlockEntry = z.infer<typeof BlockEntry>;
  */
 export const ToolStat = z.object({
   name: z.string().min(1).max(128),
-  count: z.number().int().nonnegative(),
+  count: rollupCount,
   /** How many of those calls returned an error/interrupt (tool reliability). Optional. */
-  errors: z.number().int().nonnegative().optional(),
+  errors: rollupCount.optional(),
   /** Tokens burned on turns that used this tool (turn tokens split across its tool calls). Optional. */
-  tokens: z.number().int().nonnegative().optional(),
+  tokens: tokenCount.optional(),
 });
 export type ToolStat = z.infer<typeof ToolStat>;
 
@@ -129,34 +138,65 @@ export type ToolStat = z.infer<typeof ToolStat>;
  */
 export const AgentStat = z.object({
   /** Total assistant messages across transcripts. */
-  messageCount: z.number().int().nonnegative(),
+  messageCount: rollupCount,
   /** Assistant messages that ran inside a subagent sidechain. */
-  subagentMessages: z.number().int().nonnegative(),
+  subagentMessages: rollupCount,
   /** Tokens spent inside subagent sidechains. */
-  subagentTokens: z.number().int().nonnegative(),
+  subagentTokens: tokenCount,
   /** Total tokens observed across transcripts (denominator for the share). */
-  totalTokens: z.number().int().nonnegative(),
+  totalTokens: tokenCount,
   /**
    * Messages the human actually sent (their prompts) — non-sidechain user turns
    * carrying real text, NOT tool results or injected/meta turns. Denominator for
    * "avg cost per message". Optional (back-compat with older CLIs).
    */
-  userMessageCount: z.number().int().nonnegative().optional(),
+  userMessageCount: rollupCount.optional(),
 });
 export type AgentStat = z.infer<typeof AgentStat>;
 
 /** One skill's usage frequency (records produced while the skill was active). */
 export const SkillStat = z.object({
   name: z.string().min(1).max(128),
-  count: z.number().int().nonnegative(),
+  count: rollupCount,
   /** Tokens burned in records produced while this skill was active. Optional. */
-  tokens: z.number().int().nonnegative().optional(),
+  tokens: tokenCount.optional(),
 });
 export type SkillStat = z.infer<typeof SkillStat>;
+
+export const CodexReplayPriorRow = z.object({
+  model: z.string().min(1).max(128),
+  inputTokens: tokenCount,
+  outputTokens: tokenCount,
+  cacheCreationTokens: tokenCount,
+  cacheReadTokens: tokenCount,
+});
+export type CodexReplayPriorRow = z.infer<typeof CodexReplayPriorRow>;
+
+export const CodexReplayPriorScope = z.object({
+  date: DateString,
+  rows: z.array(CodexReplayPriorRow).min(1).max(100),
+});
+export type CodexReplayPriorScope = z.infer<typeof CodexReplayPriorScope>;
 
 export const SubmitPayload = z.object({
   cliVersion: z.string().min(1).max(32),
   entries: z.array(DailyUsageEntry).min(1).max(20000),
+  /**
+   * Dates observed only inside replayed Codex fork/subagent rollouts and absent
+   * from a successful replay-aware parse. The API may remove an old
+   * self-reported Codex scope for these targeted dates only when the account has
+   * one confirmed device and the accompanying prior scope matches exactly.
+   * Omitted on parser failure, timeout, capped payloads, and older clients.
+   */
+  codexReplayTombstoneDates: z.array(DateString).max(5000).optional(),
+  /**
+   * Compare-and-swap proof for destructive Codex correction. Each scope is the
+   * exact model/token snapshot the legacy native reader would have submitted.
+   * The API corrects only when its stored scope matches these rows exactly.
+   */
+  codexReplayPriorScopes: z.array(CodexReplayPriorScope).max(5000).optional(),
+  /** sha256 of this machine's bound secret; required by the API for correction authority. */
+  deviceKeyHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   /** Optional per-conversation rollups (ccusage session). Back-compat: omittable. */
   sessions: z.array(SessionEntry).max(10000).optional(),
   /** Optional time-window rollups (ccusage blocks) for peak-hours analysis. */
@@ -354,6 +394,81 @@ export interface LeaderboardResponse {
   to?: string | null;
   generatedAt: string;
   rows: LeaderboardRow[];
+}
+
+// ---------------------------------------------------------------------------
+// Public insights (aggregate, cross-user; read-only — no wire schema needed).
+// Powers the /models, /agents and /skills pages: real-usage rankings computed
+// over listed users' DailyUsage rows plus the tool/skill transcript rollups.
+// ---------------------------------------------------------------------------
+
+export const InsightsPeriod = z.enum(["7d", "30d", "all"]);
+export type InsightsPeriod = z.infer<typeof InsightsPeriod>;
+
+export interface InsightsModelRow {
+  /** Normalized model id (display key), e.g. "claude-opus-4-6". */
+  model: string;
+  /** Raw model ids merged into this row (date-suffixed variants etc.). */
+  variants: string[];
+  totalTokens: number;
+  /** Share of all eligible tokens in the window, 0..1. */
+  share: number;
+  costUSD: number;
+  /** Distinct listed developers who burned this model in the window. */
+  devs: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
+  /** Tools (agents) this model was burned through, heaviest first. */
+  tools: string[];
+}
+
+export interface InsightsToolRow {
+  /** Tool/agent id as submitted, e.g. "claude", "codex", "cursor". */
+  tool: string;
+  totalTokens: number;
+  /** Share of all eligible tokens in the window, 0..1. */
+  share: number;
+  costUSD: number;
+  devs: number;
+  /** Heaviest model burned through this tool, normalized. */
+  topModel: string | null;
+}
+
+export interface InsightsTrendDay {
+  /** Submitter-local calendar day, YYYY-MM-DD. */
+  date: string;
+  totalTokens: number;
+  /** Tokens per normalized model id; only the window's top models are keyed. */
+  byModel: Record<string, number>;
+}
+
+export interface InsightsUsageStatRow {
+  /** Tool-call / skill name as reported (MCP tools keep mcp__server__tool). */
+  name: string;
+  calls: number;
+  tokens: number;
+  /** Distinct listed developers whose latest snapshot includes this entry. */
+  devs: number;
+  /** Tool calls only; skills carry no error signal. */
+  errors?: number;
+}
+
+export interface InsightsResponse {
+  period: InsightsPeriod;
+  generatedAt: string;
+  /** Listed developers with at least one usage row in the window. */
+  devs: number;
+  totals: { tokens: number; costUSD: number };
+  models: InsightsModelRow[];
+  tools: InsightsToolRow[];
+  /** Trailing-30-day daily burn split by top model (window-independent). */
+  trend: InsightsTrendDay[];
+  /** Claude Code skill usage, from users' latest transcript snapshots. */
+  skills: InsightsUsageStatRow[];
+  /** Built-in + MCP tool-call usage, from users' latest transcript snapshots. */
+  toolCalls: InsightsUsageStatRow[];
 }
 
 export interface UserProfileResponse {
@@ -559,7 +674,7 @@ export interface DeviceCodeResponse {
 export type DeviceTokenResponse =
   | { status: "pending" }
   | { status: "expired" }
-  | { status: "ok"; token: string; handle: string };
+  | { status: "ok"; token: string; handle: string; refreshToken: string };
 
 export interface SubmitResponse {
   ok: true;

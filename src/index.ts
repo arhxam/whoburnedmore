@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { platform } from "node:os";
 import { join } from "node:path";
@@ -10,8 +9,8 @@ import pc from "picocolors";
 import type { SubmitPayload } from "./shared.js";
 import {
   applyScope,
+  hasUnsafeInstallTokenArg,
   parseBoard,
-  parseInstallToken,
   parseOrg,
   parsePass,
   resolveCommand,
@@ -50,14 +49,16 @@ import { prepareVerifyUpload } from "./verify-upload.js";
 import {
   clearAuth,
   defaultConfigDir,
+  deviceKeyHash,
   ensureAnonKey,
   loadConfig,
+  needsDeviceBind,
   recordDeviceBound,
   recordSync,
   saveAuth,
 } from "./config.js";
 import { agentStatusReport } from "./status.js";
-import { renderDashboardHtml } from "./local-dashboard.js";
+import { renderDashboardHtml, writeLocalDashboard } from "./local-dashboard.js";
 import { sanitizeServerText, signedInNextStepLines } from "./output.js";
 import { publishLocal } from "./publish.js";
 
@@ -180,10 +181,8 @@ interface Flags {
 /** Render the standalone local dashboard to the config dir and open it. */
 function showLocalDashboard(payload: SubmitPayload): void {
   const dir = defaultConfigDir();
-  mkdirSync(dir, { recursive: true });
-  const file = join(dir, "dashboard.html");
-  writeFileSync(
-    file,
+  const file = writeLocalDashboard(
+    dir,
     renderDashboardHtml(payload.entries, new Date(), { webBaseUrl: webBase() }),
   );
   // Build a proper file URL (pathToFileURL emits file:///C:/… on Windows —
@@ -223,8 +222,16 @@ async function run(flags: Flags): Promise<void> {
   } finally {
     progress.stop();
   }
-  const { entries, sessions, blocks, tools, skills, agent, attributionComplete } =
-    collected;
+  const {
+    entries,
+    codexReplayTombstoneDates,
+    codexReplayPriorScopes,
+    blocks,
+    tools,
+    skills,
+    agent,
+    attributionComplete,
+  } = collected;
   if (entries.length === 0) {
     console.log();
     console.log("  Nothing to burn yet — no local usage found from any coding agent.");
@@ -239,11 +246,20 @@ async function run(flags: Flags): Promise<void> {
   }
 
   const payload: SubmitPayload = { cliVersion: VERSION, entries };
+  if (codexReplayTombstoneDates.length > 0)
+    payload.codexReplayTombstoneDates = codexReplayTombstoneDates;
+  if (codexReplayPriorScopes.length > 0)
+    payload.codexReplayPriorScopes = codexReplayPriorScopes;
+  const configuredMachineKey = loadConfig()?.anonKey;
+  if (configuredMachineKey)
+    payload.deviceKeyHash = deviceKeyHash(configuredMachineKey);
   // ccusage dates usage in the machine's LOCAL timezone, so report that zone's
   // UTC offset (minutes east of UTC; getTimezoneOffset is the inverse sign) and
   // let the server compute this member's daily/weekly board in their local day.
   payload.tzOffsetMinutes = -new Date().getTimezoneOffset();
-  if (sessions.length > 0) payload.sessions = sessions;
+  // Per-conversation identifiers never cross the local/cloud boundary. Session
+  // parsing remains local-only for the dashboard; hosted sync sends daily usage
+  // and coarse aggregate rollups only.
   if (blocks.length > 0) payload.blocks = blocks;
   if (tools.length > 0) payload.tools = tools;
   if (skills.length > 0) payload.skills = skills;
@@ -275,18 +291,13 @@ async function run(flags: Flags): Promise<void> {
         confirm,
         signIn: ensureSignedIn,
         submit: async (token, p) => {
-          const result = await submitSignedInUsage(token, p);
+          // Use the same bind-before-submit path as a normal signed-in run. This
+          // also attaches the just-created device hash to first-run Codex proof
+          // metadata; binding after the write made a valid first correction fail
+          // closed and left the inflated total in place.
+          const result = await submitFromBoundDevice(token, p);
           try {
             recordSync();
-          } catch {
-            /* best-effort */
-          }
-          try {
-            const cfgNow = loadConfig();
-            if (!cfgNow?.deviceBoundAt) {
-              const key = ensureAnonKey();
-              if (await bindDeviceKey(token, key)) recordDeviceBound();
-            }
           } catch {
             /* best-effort */
           }
@@ -330,7 +341,7 @@ async function run(flags: Flags): Promise<void> {
   // background sync whose token died — e.g. a server-side JWT secret rotation
   // 401'd every machine at once and the 401 handler cleared the stored token —
   // without anyone touching the machine.
-  const healed = cfg?.anonKey ? await refreshCliToken(cfg.anonKey) : null;
+  const healed = cfg?.refreshToken ? await refreshCliToken(cfg.refreshToken) : null;
   if (healed) {
     saveAuth(undefined, { cliToken: healed.token, handle: healed.handle });
     await submitSignedIn(healed.token, payload, flags, canSignIn);
@@ -347,7 +358,7 @@ async function run(flags: Flags): Promise<void> {
     console.log(pc.yellow("  Sign in to put your usage on the leaderboard."));
     console.log(
       pc.dim(
-        "  Run `npx whoburnedmore` in an interactive terminal to sign in, or `npx whoburnedmore link --token=…` (from your signed-in profile) for servers/CI.",
+        "  Run `npx whoburnedmore` in an interactive terminal to sign in, or generate a one-time `npx whoburnedmore link` code from your profile for servers/CI.",
       ),
     );
   } else {
@@ -362,14 +373,14 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Try the silent device-key token refresh using this machine's stored key. */
+/** Try silent token recovery using this machine's server-issued credential. */
 async function refreshCliTokenFromConfig(): Promise<{
   token: string;
   handle: string;
 } | null> {
   const cfg = loadConfig();
-  if (!cfg?.anonKey) return null;
-  return refreshCliToken(cfg.anonKey);
+  if (!cfg?.refreshToken) return null;
+  return refreshCliToken(cfg.refreshToken);
 }
 
 /**
@@ -411,7 +422,11 @@ async function ensureSignedIn(): Promise<{ token: string; handle: string } | nul
       continue; // transient network blip — keep polling until the deadline
     }
     if (res.status === "ok") {
-      saveAuth(undefined, { cliToken: res.token, handle: res.handle });
+      saveAuth(undefined, {
+        cliToken: res.token,
+        handle: res.handle,
+        refreshToken: res.refreshToken,
+      });
       console.log(pc.green(`  ✓ Signed in as @${sanitizeServerText(res.handle)}.`));
       return { token: res.token, handle: res.handle };
     }
@@ -437,24 +452,21 @@ async function submitSignedIn(
   flags: Flags,
   interactive: boolean,
 ): Promise<void> {
-  let activeToken = token;
   let result;
   try {
-    result = await submitSignedInUsage(token, payload);
+    result = await submitFromBoundDevice(token, payload);
   } catch (err) {
     if (err instanceof UnauthorizedError) {
       const healed = await refreshCliTokenFromConfig();
       if (healed) {
         saveAuth(undefined, { cliToken: healed.token, handle: healed.handle });
-        activeToken = healed.token;
-        result = await submitSignedInUsage(healed.token, payload);
+        result = await submitFromBoundDevice(healed.token, payload);
       } else {
         clearAuth();
         if (!interactive) return; // background can't re-auth — stay silent
         const auth = await ensureSignedIn();
         if (!auth) return;
-        activeToken = auth.token;
-        result = await submitSignedInUsage(auth.token, payload);
+        result = await submitFromBoundDevice(auth.token, payload);
       }
     } else {
       throw err;
@@ -465,22 +477,6 @@ async function submitSignedIn(
     recordSync();
   } catch {
     /* best-effort — never fail a submit over a freshness stamp */
-  }
-
-  // One-time per machine: bind this machine's device key to the account so a
-  // future dead token can self-heal (see the 401 branch above). Machines that
-  // onboarded through the browser device flow hold no server-verifiable secret
-  // without this — a JWT rotation would strand them until a human re-runs the
-  // CLI. Stamped only on a definitive server answer; network blips retry on a
-  // later submit. Never lets a bookkeeping failure break a successful submit.
-  try {
-    const cfgNow = loadConfig();
-    if (!cfgNow?.deviceBoundAt) {
-      const key = ensureAnonKey();
-      if (await bindDeviceKey(activeToken, key)) recordDeviceBound();
-    }
-  } catch {
-    /* best-effort */
   }
 
   // Signed-in users are already on the board, so there's no claim handoff —
@@ -554,6 +550,41 @@ async function submitSignedIn(
 }
 
 /**
+ * Bind this machine before its first usage write. The API only performs a
+ * destructive whole-day Codex correction for exactly one confirmed device, so
+ * pre-binding prevents a second machine's first sync from being mistaken for a
+ * single-device snapshot. Binding remains best-effort; an auth/network failure
+ * must not turn a normal submit into data loss or a dead CLI.
+ */
+async function submitFromBoundDevice(
+  token: string,
+  payload: SubmitPayload,
+) {
+  let machineKey = loadConfig()?.anonKey;
+  try {
+    const cfg = loadConfig();
+    if (!cfg || needsDeviceBind(cfg)) {
+      machineKey = ensureAnonKey();
+      const bound = await bindDeviceKey(token, machineKey);
+      if (bound.refreshToken) {
+        saveAuth(undefined, {
+          cliToken: token,
+          handle: cfg?.handle,
+          refreshToken: bound.refreshToken,
+        });
+      }
+      if (bound.definitive) recordDeviceBound();
+    }
+  } catch {
+    /* best-effort */
+  }
+  if (machineKey) {
+    payload.deviceKeyHash = deviceKeyHash(machineKey);
+  }
+  return submitSignedInUsage(token, payload);
+}
+
+/**
  * Post-submit housekeeping shared by both submit paths: heal-on-run reconcile of
  * the background sync (install if absent, repair if drifted) and the one-line
  * background-sync status footer. Best-effort — never fails an already-good submit.
@@ -585,16 +616,43 @@ function afterSubmitChores(flags: Flags): void {
   );
 }
 
+async function readServerInstallToken(): Promise<string | undefined> {
+  const fromEnvironment = process.env.WHOBURNEDMORE_INSTALL_TOKEN?.trim();
+  if (fromEnvironment) return fromEnvironment;
+
+  if (process.stdin.isTTY) {
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    const value = (await rl.question("  Paste the one-time link code: ")).trim();
+    rl.close();
+    return value || undefined;
+  }
+
+  // CI may pipe a secret from its protected store. Bound input so a forgotten
+  // pipe or hostile producer cannot make the CLI accumulate arbitrary data.
+  let value = "";
+  for await (const chunk of process.stdin) {
+    value += String(chunk);
+    if (value.length > 512) {
+      throw new Error("install code input is too large");
+    }
+  }
+  return value.trim() || undefined;
+}
+
 async function linkServerInstall(token: string | undefined): Promise<void> {
   if (!token) {
-    throw new Error("missing install token — use `npx whoburnedmore link --token=<token>`");
+    throw new Error("missing install code — generate one from your signed-in profile, then paste it when prompted");
   }
   const anonKey = ensureAnonKey();
   const linked = await redeemServerInstall(token, anonKey);
   // Store the authenticated CLI token the server issues so subsequent runs submit
   // via /v1/submit (the anon device-key submit path has been retired).
   if (linked.cliToken) {
-    saveAuth(undefined, { cliToken: linked.cliToken, handle: linked.handle });
+    saveAuth(undefined, {
+      cliToken: linked.cliToken,
+      handle: linked.handle,
+      refreshToken: linked.refreshToken,
+    });
   }
   const handle = sanitizeServerText(linked.handle);
   console.log(
@@ -692,7 +750,7 @@ async function runDaemon(): Promise<void> {
       // was (or could be) submitted: say so instead of faking success.
       if (!loadConfig()?.cliToken) {
         throw new Error(
-          "not linked — nothing submitted (run `npx whoburnedmore link --token=…` from your signed-in profile first)",
+          "not linked — nothing submitted (generate a one-time link code from your signed-in profile first)",
         );
       }
     },
@@ -958,7 +1016,10 @@ async function main(): Promise<void> {
       break;
     }
     case "link":
-      await linkServerInstall(parseInstallToken(args));
+      if (hasUnsafeInstallTokenArg(args)) {
+        throw new Error("`--token` is no longer accepted because command-line secrets leak into shell history and process listings; run `npx whoburnedmore link` and paste the code when prompted");
+      }
+      await linkServerInstall(await readServerInstallToken());
       break;
     case "daemon":
       await runDaemon();
@@ -1014,7 +1075,7 @@ function printHelp(): void {
     npx whoburnedmore --local      build the dashboard on your machine and open it (offline)
     npx whoburnedmore --dry-run    print exactly what would be sent, send nothing
     npx whoburnedmore --no-submit  collect locally, send nothing (no dashboard)
-    npx whoburnedmore link --token=TOKEN  link this server/VM to your signed-in account
+    npx whoburnedmore link                link this server/VM (prompts for a one-time code)
     npx whoburnedmore daemon       keep syncing in the foreground (VMs/containers with no cron)
     npx whoburnedmore private      take yourself off the public leaderboard
     npx whoburnedmore public       put yourself back on it

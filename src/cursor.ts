@@ -1,9 +1,10 @@
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
 import type { BlockEntry, DailyUsageEntry } from "./shared.js";
+import { readJsonResponseCapped } from "./http-bounds.js";
 import { localUsageDate } from "./native/usage-date.js";
 import { collectCursorViaTokscale } from "./tokscale.js";
 
@@ -16,6 +17,7 @@ import { collectCursorViaTokscale } from "./tokscale.js";
 // change) just yields no Cursor data, never an error.
 
 const EVENTS_URL = "https://cursor.com/api/dashboard/get-filtered-usage-events";
+const MAX_CURSOR_PAGE_BYTES = 4 * 1024 * 1024;
 
 /** Path to Cursor's globalStorage SQLite DB, per platform; null if absent. */
 export function cursorDbPath(): string | null {
@@ -30,7 +32,28 @@ export function cursorDbPath(): string | null {
   return existsSync(p) ? p : null;
 }
 
-/** Read cursorAuth/accessToken — built-in node:sqlite (Node 22.5+), else the sqlite3 CLI. */
+function trustedSqliteBinaries(): string[] {
+  const candidates =
+    platform() === "darwin"
+      ? ["/usr/bin/sqlite3", "/opt/homebrew/bin/sqlite3", "/usr/local/bin/sqlite3"]
+      : platform() === "linux"
+        ? ["/usr/bin/sqlite3", "/usr/local/bin/sqlite3"]
+        : [];
+  const trusted: string[] = [];
+  for (const candidate of candidates) {
+    try {
+      const resolved = realpathSync(candidate);
+      const stat = statSync(resolved);
+      if (stat.isFile() && (stat.mode & 0o022) === 0) trusted.push(resolved);
+    } catch {
+      // Not installed or not a trustworthy regular file.
+    }
+  }
+  return [...new Set(trusted)];
+}
+
+/** Read cursorAuth/accessToken — built-in node:sqlite (Node 22.5+), else a
+ * trusted absolute sqlite3 binary. Never resolve an executable through PATH. */
 export function readCursorToken(db: string): string | null {
   const require = createRequire(import.meta.url);
   try {
@@ -44,16 +67,18 @@ export function readCursorToken(db: string): string | null {
   } catch {
     // node:sqlite unavailable or locked — fall back to the sqlite3 binary.
   }
-  try {
-    const res = spawnSync(
-      "sqlite3",
-      [db, "SELECT value FROM ItemTable WHERE key='cursorAuth/accessToken';"],
-      { encoding: "utf8", timeout: 10_000 },
-    );
-    const out = res.stdout?.trim();
-    if (res.status === 0 && out) return out;
-  } catch {
-    /* sqlite3 not installed */
+  for (const sqlite3 of trustedSqliteBinaries()) {
+    try {
+      const res = spawnSync(
+        sqlite3,
+        [db, "SELECT value FROM ItemTable WHERE key='cursorAuth/accessToken';"],
+        { encoding: "utf8", timeout: 10_000 },
+      );
+      const out = res.stdout?.trim();
+      if (res.status === 0 && out) return out;
+    } catch {
+      /* try the next trusted location */
+    }
   }
   return null;
 }
@@ -176,6 +201,7 @@ export async function fetchCursorEvents(
       },
       body: JSON.stringify({ page, pageSize }),
       signal: AbortSignal.timeout(20_000),
+      redirect: "error",
     });
     // Data consistency: a mid-pagination failure must NOT yield a partial set.
     // Returning fewer events here would make the server overwrite recent-day
@@ -185,7 +211,10 @@ export async function fetchCursorEvents(
     if (!res.ok) {
       throw new Error(`cursor usage page ${page} failed (HTTP ${res.status})`);
     }
-    const body = (await res.json()) as { usageEventsDisplay?: CursorEvent[] };
+    const body = await readJsonResponseCapped<{ usageEventsDisplay?: CursorEvent[] }>(
+      res,
+      MAX_CURSOR_PAGE_BYTES,
+    );
     const batch = body.usageEventsDisplay ?? [];
     all.push(...batch);
     // A short page is the natural end of data (not an error) — stop cleanly.

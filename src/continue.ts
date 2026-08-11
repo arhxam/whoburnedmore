@@ -134,21 +134,41 @@ export function parseContinueJsonl(content: string): DailyUsageEntry[] {
   return mapContinueRecords(records);
 }
 
-/** Recursively list every `*.jsonl` under a directory (best effort). */
-async function listJsonl(dir: string): Promise<string[]> {
-  let dirents;
-  try {
-    dirents = await readdir(dir, { withFileTypes: true });
-  } catch {
-    return [];
+/** Iteratively discover ledgers with explicit work/depth/time ceilings. */
+async function listJsonl(
+  root: string,
+  opts: { deadline: number; now: () => number; maxFiles: number },
+): Promise<{ files: string[]; aborted: boolean }> {
+  const queue: Array<{ dir: string; depth: number }> = [{ dir: root, depth: 0 }];
+  let queueIndex = 0;
+  const files: string[] = [];
+  let visitedEntries = 0;
+  const maxEntries = Math.max(1_000, opts.maxFiles * 20);
+  while (queueIndex < queue.length) {
+    if (opts.now() > opts.deadline) return { files: [], aborted: true };
+    const current = queue[queueIndex++];
+    let dirents;
+    try {
+      dirents = await readdir(current.dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const d of dirents) {
+      visitedEntries += 1;
+      if (visitedEntries > maxEntries || opts.now() > opts.deadline) {
+        return { files: [], aborted: true };
+      }
+      const full = join(current.dir, d.name);
+      if (d.isDirectory()) {
+        if (current.depth >= 32) return { files: [], aborted: true };
+        queue.push({ dir: full, depth: current.depth + 1 });
+      } else if (d.isFile() && d.name === "tokensGenerated.jsonl") {
+        files.push(full);
+        if (files.length > opts.maxFiles) return { files: [], aborted: true };
+      }
+    }
   }
-  const out: string[] = [];
-  for (const d of dirents) {
-    const full = join(dir, d.name);
-    if (d.isDirectory()) out.push(...(await listJsonl(full)));
-    else if (d.isFile() && d.name === "tokensGenerated.jsonl") out.push(full);
-  }
-  return out;
+  return { files, aborted: false };
 }
 
 /** Bump when the parse/aggregate semantics change — invalidates the per-file cache. */
@@ -164,6 +184,7 @@ export interface CollectContinueOpts {
   budgetMs?: number;
   now?: () => number;
   cachePath?: string;
+  maxFiles?: number;
 }
 
 /**
@@ -177,10 +198,19 @@ export async function collectContinue(
 ): Promise<NativeCollectResult> {
   const env = opts.env ?? process.env;
   const home = opts.continueDir ?? join(env.HOME || homedir(), ".continue");
-  const files = await listJsonl(join(home, "dev_data"));
+  const now = opts.now ?? Date.now;
+  const deadline = now() + (opts.budgetMs ?? NATIVE_READ_BUDGET_MS);
+  const discovery = await listJsonl(join(home, "dev_data"), {
+    deadline,
+    now,
+    maxFiles: Math.max(1, opts.maxFiles ?? 10_000),
+  });
+  if (discovery.aborted) {
+    return { entries: [], found: false, filesScanned: 0, timedOut: true };
+  }
+  const files = discovery.files;
   if (files.length === 0) return { entries: [], found: false, filesScanned: 0 };
 
-  const now = opts.now ?? Date.now;
   const res = await readFilesWithCache<CachedRow>({
     files,
     cachePath: opts.cachePath ?? nativeCachePath("continue", env),
@@ -194,7 +224,7 @@ export async function collectContinue(
         e.costUSD,
         e.requestCount ?? 0,
       ]),
-    deadline: now() + (opts.budgetMs ?? NATIVE_READ_BUDGET_MS),
+    deadline,
     now,
   });
   if (!res.itemsByFile) {

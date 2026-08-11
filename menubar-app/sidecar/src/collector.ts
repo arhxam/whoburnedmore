@@ -6,9 +6,9 @@
  * (shipped in BurnBar.app/Contents/Resources, path via BURNBAR_CCUSAGE).
  *
  * Two tiers:
- *  - collectNative(): the fast, file-watch-driven tier — Claude Code, Codex,
- *    Cline, Roo, Continue via the CLI's battle-tested native readers with their
- *    persistent per-file caches (steady-state = only changed files re-parsed).
+ *  - collectNative(): the fast, file-watch-driven tier — Claude Code, Cline,
+ *    Roo, Continue via native readers, plus Codex via the bundled replay-aware
+ *    ccusage binary (native Codex is diagnostic-only and never published).
  *  - collectSlow(): the long-tail tier on a timer — every ccusage source plus
  *    the Cursor dashboard API (network) — merged over the latest native tier.
  */
@@ -21,11 +21,14 @@ import { promisify } from "node:util";
 import type { DailyUsageEntry, SessionEntry } from "../../../src/shared.js";
 
 import {
+  CCUSAGE_MAX_CONCURRENCY,
+  mapConcurrent,
   SOURCES,
   ccusageClaudeEnv,
   dedupeDaily,
   mapCcusageDaily,
   mapCcusageSessions,
+  resolveCcusageBin,
   selectSourceEntries,
 } from "../../../src/collect.js";
 import { readdirSync } from "node:fs";
@@ -37,7 +40,6 @@ import {
   collectClaudeNative,
   type NativeCollectResult,
 } from "../../../src/native/claude.js";
-import { collectCodexNative } from "../../../src/native/codex.js";
 import {
   VSCODE_AGENTS,
   collectVscodeAgent,
@@ -47,6 +49,17 @@ import { loadLivePricing } from "../../../src/pricing-live.js";
 const execFileAsync = promisify(execFile);
 
 const EMPTY_NATIVE: NativeCollectResult = { entries: [], found: false, filesScanned: 0 };
+type FastCodexResult = { result: NativeCollectResult; replayAware: boolean };
+const fastCodexCache = new Map<string, { at: number; value: FastCodexResult }>();
+
+function fastCodexCacheKey(env: NodeJS.ProcessEnv, command: CcusageCommand | null): string {
+  return `${command?.cmd ?? "none"}|${env.CODEX_HOME ?? ""}`;
+}
+
+function fastCodexMinInterval(env: NodeJS.ProcessEnv): number {
+  const configured = Number(env.BURNBAR_CODEX_MIN_INTERVAL_MS ?? 30_000);
+  return Number.isFinite(configured) && configured >= 0 ? configured : 30_000;
+}
 
 /** BurnBar keeps its own cache dir so it never races the launchd CLI sync's caches. */
 export function burnbarCacheDir(env: NodeJS.ProcessEnv = process.env): string {
@@ -61,6 +74,8 @@ export interface NativeTier {
   /** Per-source entries, pre-merge (claude/codex kept separate for selectSourceEntries). */
   claude: NativeCollectResult;
   codex: NativeCollectResult;
+  /** True only when `codex` came from the replay-aware ccusage parser. */
+  codexReplayAware: boolean;
   others: DailyUsageEntry[];
   toolsFound: string[];
   partial: boolean;
@@ -69,13 +84,15 @@ export interface NativeTier {
 export async function collectNativeTier(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<NativeTier> {
-  await loadLivePricing().catch(() => {});
   const cacheDir = burnbarCacheDir(env);
+  await loadLivePricing(env, Date.now, join(cacheDir, "pricing-cache.json")).catch(
+    () => {},
+  );
   const cache = (name: string) => join(cacheDir, `native-cache-${name}.json`);
 
-  const [claude, codex, cont, ...vscode] = await Promise.all([
+  const [claude, fastCodex, cont, ...vscode] = await Promise.all([
     collectClaudeNative(env, { cachePath: cache("claude") }).catch(() => EMPTY_NATIVE),
-    collectCodexNative(env, { cachePath: cache("codex") }).catch(() => EMPTY_NATIVE),
+    collectFastCodex(env),
     collectContinue({ env, cachePath: cache("continue") }).catch(() => EMPTY_NATIVE),
     ...VSCODE_AGENTS.map((a) =>
       collectVscodeAgent({ tool: a.tool, extIds: a.extIds, env, cachePath: cache(`vscode-${a.tool}`) }).catch(
@@ -83,6 +100,7 @@ export async function collectNativeTier(
       ),
     ),
   ]);
+  const { result: codex, replayAware: codexReplayAware } = fastCodex;
 
   const toolsFound: string[] = [];
   if (claude.found) toolsFound.push("claude");
@@ -95,6 +113,7 @@ export async function collectNativeTier(
   return {
     claude,
     codex,
+    codexReplayAware,
     others: [...cont.entries, ...vscode.flatMap((r) => r.entries)],
     toolsFound,
     partial: [claude, codex, cont, ...vscode].some((r) => r.timedOut === true),
@@ -104,60 +123,142 @@ export async function collectNativeTier(
 export interface SlowTier {
   /** ccusage entries per source (claude/codex included as fallback candidates). */
   bySource: Map<string, DailyUsageEntry[]>;
+  /** Sources whose parser completed successfully, including valid empty results. */
+  succeededSources: Set<string>;
   cursor: DailyUsageEntry[];
   /** ccusage `session` rollup (aggregate per-conversation totals). */
   sessions: SessionEntry[];
   toolsFound: string[];
 }
 
-/** Locate the standalone ccusage binary: env override, else the workspace dep (dev). */
-export function resolveCcusageStandalone(env: NodeJS.ProcessEnv = process.env): string | null {
-  if (env.BURNBAR_CCUSAGE) return env.BURNBAR_CCUSAGE;
-  return null;
+interface CcusageCommand {
+  cmd: string;
+  prefixArgs: string[];
+}
+
+/** Locate ccusage: bundled standalone override in-app, workspace dependency in development. */
+export function resolveCcusageStandalone(
+  env: NodeJS.ProcessEnv = process.env,
+): CcusageCommand | null {
+  if (env.BURNBAR_CCUSAGE) return { cmd: env.BURNBAR_CCUSAGE, prefixArgs: [] };
+  try {
+    return resolveCcusageBin();
+  } catch {
+    return null;
+  }
 }
 
 async function runCcusageBinary(
-  bin: string,
+  command: CcusageCommand,
   args: string[],
   env?: NodeJS.ProcessEnv,
 ): Promise<unknown | null> {
   try {
-    const { stdout } = await execFileAsync(bin, args, {
-      encoding: "utf8",
-      maxBuffer: 64 * 1024 * 1024,
-      timeout: 25_000,
-      ...(env ? { env: { ...process.env, ...env } } : {}),
-    });
+    const { stdout } = await execFileAsync(
+      command.cmd,
+      [...command.prefixArgs, ...args],
+      {
+        encoding: "utf8",
+        maxBuffer: 32 * 1024 * 1024,
+        timeout: 25_000,
+        ...(env ? { env: { ...process.env, ...env } } : {}),
+      },
+    );
     return stdout ? JSON.parse(stdout) : null;
   } catch {
     return null;
   }
 }
 
+/**
+ * BurnBar needs a correct Codex number on its first, file-watch-driven snapshot,
+ * not only after the slower all-source refresh. The bundled ccusage Codex reader
+ * removes replayed parent prefixes from forked/subagent rollouts. If that binary
+ * is unavailable or transiently fails, return no Codex rows. The native reader
+ * intentionally omits fork/subagent rollouts, so publishing it could turn a
+ * partial snapshot into an irreversible downward API correction.
+ */
+async function collectFastCodex(
+  env: NodeJS.ProcessEnv,
+): Promise<FastCodexResult> {
+  const command = resolveCcusageStandalone(env);
+  const cacheKey = fastCodexCacheKey(env, command);
+  const cached = fastCodexCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < fastCodexMinInterval(env)) return cached.value;
+  let value: FastCodexResult = { result: EMPTY_NATIVE, replayAware: false };
+  if (command) {
+    const json = await runCcusageBinary(
+      command,
+      ["codex", "daily", "--json", "--offline"],
+      env,
+    );
+    if (json !== null) {
+      const entries = mapCcusageDaily("codex", json);
+      value = {
+        result: { entries, found: entries.length > 0, filesScanned: 0 },
+        replayAware: true,
+      };
+    }
+  }
+  fastCodexCache.set(cacheKey, { at: Date.now(), value });
+  return value;
+}
+
 export async function collectSlowTier(
   env: NodeJS.ProcessEnv = process.env,
+  options: { offline?: boolean } = {},
 ): Promise<SlowTier> {
-  const bin = resolveCcusageStandalone(env);
+  const command = resolveCcusageStandalone(env);
   const bySource = new Map<string, DailyUsageEntry[]>();
+  const succeededSources = new Set<string>();
   let toolsFound: string[] = [];
   let sessions: SessionEntry[] = [];
 
-  const cursorTask = collectCursor().catch(() => ({ entries: [], blocks: [], found: false }));
+  const cursorTask = collectCursor({ offline: options.offline }).catch(() => ({
+    entries: [],
+    blocks: [],
+    found: false,
+  }));
 
-  if (bin) {
+  if (command) {
     const [results, sessionsJson] = await Promise.all([
-      Promise.all(
-        SOURCES.map(async (source) => {
-          const extraEnv = source === "claude" ? ccusageClaudeEnv(env) : undefined;
-          const json = await runCcusageBinary(bin, [source, "daily", "--json", "--offline"], extraEnv);
-          return { source, mapped: json ? mapCcusageDaily(source, json) : [] };
-        }),
+      mapConcurrent(
+        SOURCES,
+        CCUSAGE_MAX_CONCURRENCY,
+        async (source) => {
+          const sourceEnv = source === "claude" ? ccusageClaudeEnv(env) : env;
+          const json = await runCcusageBinary(
+            command,
+            [source, "daily", "--json", "--offline"],
+            sourceEnv,
+          );
+          return {
+            source,
+            mapped: json ? mapCcusageDaily(source, json) : [],
+            succeeded: json !== null,
+          };
+        },
       ),
-      runCcusageBinary(bin, ["session", "--json", "--offline"]),
+      runCcusageBinary(
+        command,
+        ["session", "--json", "--offline"],
+        ccusageClaudeEnv(env),
+      ),
     ]);
-    for (const { source, mapped } of results) {
+    for (const { source, mapped, succeeded } of results) {
       bySource.set(source, mapped);
+      if (succeeded) succeededSources.add(source);
       if (mapped.length > 0) toolsFound.push(source);
+      if (source === "codex" && succeeded) {
+        const command = resolveCcusageStandalone(env);
+        fastCodexCache.set(fastCodexCacheKey(env, command), {
+          at: Date.now(),
+          value: {
+            result: { entries: mapped, found: mapped.length > 0, filesScanned: 0 },
+            replayAware: true,
+          },
+        });
+      }
     }
     sessions = sessionsJson ? mapCcusageSessions(sessionsJson) : [];
   }
@@ -165,15 +266,34 @@ export async function collectSlowTier(
   const cursor = await cursorTask;
   if (cursor.found) toolsFound.push("cursor");
   toolsFound = [...new Set(toolsFound)];
-  return { bySource, cursor: cursor.entries, sessions, toolsFound };
+  return { bySource, succeededSources, cursor: cursor.entries, sessions, toolsFound };
 }
 
-/** Merge the two tiers into the final deduped entry set (native wins for claude/codex). */
-export function mergeTiers(native: NativeTier, slow: SlowTier | null): DailyUsageEntry[] {
+/** Merge tiers: native wins for Claude; the freshest replay-aware read wins for Codex. */
+export function mergeTiers(
+  native: NativeTier,
+  slow: SlowTier | null,
+  options: { preferSlowCodex?: boolean } = {},
+): DailyUsageEntry[] {
   const nativePick = { claude: native.claude, codex: native.codex };
   const merged: DailyUsageEntry[] = [...native.others];
   const sources = new Set<string>([...(slow?.bySource.keys() ?? []), "claude", "codex"]);
   for (const source of sources) {
+    // An explicit slow collection is newer than the throttled fast cache. Its
+    // successful empty result is authoritative too: retaining old rows after
+    // the parser says the scope is empty would visibly resurrect an overcount.
+    if (
+      source === "codex" &&
+      options.preferSlowCodex &&
+      slow?.succeededSources.has("codex")
+    ) {
+      merged.push(...(slow.bySource.get("codex") ?? []));
+      continue;
+    }
+    if (source === "codex" && native.codexReplayAware) {
+      merged.push(...native.codex.entries);
+      continue;
+    }
     merged.push(...selectSourceEntries(source, slow?.bySource.get(source) ?? [], nativePick));
   }
   merged.push(...(slow?.cursor ?? []));

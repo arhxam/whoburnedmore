@@ -10,10 +10,10 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 
 import { resolveClaudeProjectDirs } from "../../../src/native/claude.js";
-import { resolveCodexSessionsDir } from "../../../src/native/codex.js";
+import { resolveCodexSessionsDirs } from "../../../src/native/codex.js";
 import { vscodeGlobalStorageRoots } from "../../../src/native/vscode-agents.js";
 
-import { readCodexLimits } from "./codex-limits.js";
+import { readCodexLimits, reconcileCodexLimits } from "./codex-limits.js";
 import {
   claudeSessionNames,
   collectNativeTier,
@@ -21,7 +21,7 @@ import {
   mergeTiers,
   type SlowTier,
 } from "./collector.js";
-import { fetchCursorLimits } from "./cursor-limits.js";
+import { fetchCursorLimits, reconcileCursorLimits } from "./cursor-limits.js";
 import { ALERT_THRESHOLDS, detectAlerts, forecastLimitHit, type PercentSample } from "./forecast.js";
 import { emit, PROTOCOL_VERSION, type CursorLimits, type Limits } from "./protocol.js";
 import { summarize } from "./summarize.js";
@@ -44,7 +44,7 @@ const HEARTBEAT_MS = 30_000;
 export function watchRoots(env: NodeJS.ProcessEnv = process.env): string[] {
   const targets = [
     ...resolveClaudeProjectDirs(env),
-    resolveCodexSessionsDir(env),
+    ...resolveCodexSessionsDirs(env),
     ...vscodeGlobalStorageRoots(env),
     join(env.HOME ?? homedir(), ".continue", "dev_data"),
   ];
@@ -79,10 +79,12 @@ export async function runWatch(env: NodeJS.ProcessEnv = process.env): Promise<vo
   const codexSamples: PercentSample[] = [];
   let lastCodexSampleAt: string | null = null;
   let lastLimitsSignature: string | null = null;
+  let lastCodexLimits: Limits["codex"] | null = null;
 
   const refreshLimits = () => {
-    const codex = readCodexLimits(env);
     const now = Date.now();
+    const codex = reconcileCodexLimits(lastCodexLimits, readCodexLimits(env), now);
+    if (codex.present) lastCodexLimits = codex;
     const observedPercents = [codex.primary?.usedPercent, codex.secondary?.usedPercent]
       .filter((percent): percent is number => percent !== null && percent !== undefined);
     const percent = observedPercents.length > 0 ? Math.max(...observedPercents) : null;
@@ -182,7 +184,7 @@ export async function runWatch(env: NodeJS.ProcessEnv = process.env): Promise<vo
       } catch {
         /* keep previous slow tier */
       }
-      cursorLimits = await fetchCursorLimits(env);
+      cursorLimits = reconcileCursorLimits(cursorLimits, await fetchCursorLimits(env));
       void collectAndEmit();
     } finally {
       slowInFlight = false;

@@ -7,6 +7,8 @@ const execFileAsync = promisify(execFile);
 import type {
   AgentStat,
   BlockEntry,
+  CodexReplayPriorRow,
+  CodexReplayPriorScope,
   DailyUsageEntry,
   SessionEntry,
   SkillStat,
@@ -31,12 +33,21 @@ import {
   reconcileProvenance,
   saveProvenanceStore,
 } from "./provenance-store.js";
+import {
+  sanitizeAgentStat,
+  sanitizeBlocks,
+  sanitizeCodexReplayScopes,
+  sanitizeDailyEntries,
+  sanitizeSessions,
+  sanitizeSkillStats,
+  sanitizeToolStats,
+} from "./wire-sanitize.js";
 
 /**
- * Sources our OWN native readers cover. ccusage is only ever a fallback for
- * these (see `selectSourceEntries`), so `collectAll` no longer probes them in
- * the parallel phase — doing so re-read the very same multi-GB transcript
- * corpus concurrently with the reader it exists to back up.
+ * Sources scanned natively before a deferred ccusage pass. Claude uses ccusage
+ * only as fallback; Codex always uses the deferred replay-aware result and keeps
+ * its native scan for diagnostics/tombstone discovery. Neither is probed in the
+ * parallel phase, avoiding concurrent passes over the same multi-GB corpus.
  */
 export const NATIVE_COVERED_SOURCES = new Set(["claude", "codex"]);
 
@@ -68,6 +79,31 @@ export const CCUSAGE_FALLBACK_TIMEOUT_MS = NATIVE_READ_BUDGET_MS;
  * has no message field), dashboards showed "0 messages" indefinitely.
  */
 export const CCUSAGE_AGGREGATE_TIMEOUT_MS = 180_000;
+export const CCUSAGE_MAX_CONCURRENCY = 4;
+const CCUSAGE_MAX_BUFFER_BYTES = 32 * 1024 * 1024;
+
+/** Ordered map with a hard worker cap, avoiding one large child per provider. */
+export async function mapConcurrent<T, R>(
+  items: readonly T[],
+  concurrency: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (true) {
+      const index = next++;
+      if (index >= items.length) return;
+      out[index] = await fn(items[index]!, index);
+    }
+  };
+  const workers = Math.min(
+    items.length,
+    Math.max(1, Math.floor(concurrency) || 1),
+  );
+  await Promise.all(Array.from({ length: workers }, () => worker()));
+  return out;
+}
 
 /** Sources ccusage can read, in the order we probe them. */
 export const SOURCES = [
@@ -279,6 +315,10 @@ export function resolveCcusageBin(): { cmd: string; prefixArgs: string[] } {
 
 export interface CollectResult {
   entries: DailyUsageEntry[];
+  /** Targeted replay-only Codex dates, emitted only after both readers complete safely. */
+  codexReplayTombstoneDates: string[];
+  /** Exact legacy Codex scopes used as compare-and-swap proof for corrections. */
+  codexReplayPriorScopes: CodexReplayPriorScope[];
   sessions: SessionEntry[];
   blocks: BlockEntry[];
   toolsFound: string[];
@@ -290,6 +330,109 @@ export interface CollectResult {
   agent: AgentStat;
   /** True when transcript scanning finished within its time budget (full snapshot). */
   attributionComplete: boolean;
+}
+
+export function codexReplayTombstoneDates(
+  native: Pick<import("./native/codex.js").NativeCollectResult, "timedOut" | "replayCandidateDates">,
+  correctedEntries: DailyUsageEntry[],
+  replayReadSucceeded: boolean,
+): string[] {
+  if (!replayReadSucceeded || native.timedOut) return [];
+  const correctedDates = new Set(
+    correctedEntries.filter((entry) => entry.tool === "codex").map((entry) => entry.date),
+  );
+  return [...new Set(native.replayCandidateDates ?? [])]
+    .filter((date) => !correctedDates.has(date))
+    .sort()
+    .slice(0, 5000);
+}
+
+export interface CodexReplayCorrectionMetadata {
+  tombstoneDates: string[];
+  priorScopes: CodexReplayPriorScope[];
+}
+
+function codexRowsByDate(entries: DailyUsageEntry[]): Map<string, CodexReplayPriorRow[]> {
+  const grouped = new Map<string, Map<string, CodexReplayPriorRow>>();
+  for (const entry of entries) {
+    if (entry.tool !== "codex" || entry.origin !== "cli" || entry.verified === true)
+      continue;
+    const byModel = grouped.get(entry.date) ?? new Map<string, CodexReplayPriorRow>();
+    const row = byModel.get(entry.model) ?? {
+      model: entry.model,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheCreationTokens: 0,
+      cacheReadTokens: 0,
+    };
+    row.inputTokens += entry.inputTokens;
+    row.outputTokens += entry.outputTokens;
+    row.cacheCreationTokens += entry.cacheCreationTokens;
+    row.cacheReadTokens += entry.cacheReadTokens;
+    byModel.set(entry.model, row);
+    grouped.set(entry.date, byModel);
+  }
+  return new Map(
+    [...grouped].map(([date, byModel]) => [
+      date,
+      [...byModel.values()].sort((a, b) => a.model.localeCompare(b.model)),
+    ]),
+  );
+}
+
+function codexRowsEqual(
+  left: CodexReplayPriorRow[] | undefined,
+  right: CodexReplayPriorRow[] | undefined,
+): boolean {
+  return JSON.stringify(left ?? []) === JSON.stringify(right ?? []);
+}
+
+/**
+ * Build the narrowly-scoped metadata needed to repair legacy native Codex
+ * overcounts. No successful replay-aware read, a native timeout, or a missing
+ * legacy snapshot means no destructive authority leaves the machine.
+ */
+export function codexReplayCorrectionMetadata(
+  native: Pick<
+    import("./native/codex.js").NativeCollectResult,
+    "timedOut" | "replayCandidateDates" | "legacyEntries"
+  >,
+  correctedEntries: DailyUsageEntry[],
+  replayReadSucceeded: boolean,
+): CodexReplayCorrectionMetadata {
+  if (!replayReadSucceeded || native.timedOut || !native.legacyEntries) {
+    return { tombstoneDates: [], priorScopes: [] };
+  }
+
+  const tombstoneDates = codexReplayTombstoneDates(
+    native,
+    correctedEntries,
+    replayReadSucceeded,
+  );
+  const legacyByDate = codexRowsByDate(native.legacyEntries);
+  const correctedByDate = codexRowsByDate(correctedEntries);
+  const changedDates = new Set(tombstoneDates);
+  for (const [date, rows] of legacyByDate) {
+    if (!codexRowsEqual(rows, correctedByDate.get(date))) changedDates.add(date);
+  }
+
+  const priorScopes = [...changedDates]
+    .sort()
+    .flatMap((date) => {
+      const rows = legacyByDate.get(date);
+      // Keep the emitted object valid under CodexReplayPriorScope's 100-row
+      // bound. An exotic >100-model day simply receives no destructive
+      // authority; the normal usage payload remains valid and non-destructive.
+      return rows && rows.length > 0 && rows.length <= 100
+        ? [{ date, rows }]
+        : [];
+    })
+    .slice(0, 5000);
+  const provedDates = new Set(priorScopes.map((scope) => scope.date));
+  return {
+    tombstoneDates: tombstoneDates.filter((date) => provedDates.has(date)),
+    priorScopes,
+  };
 }
 
 /**
@@ -374,10 +517,14 @@ export function dedupeBlocks(blocks: BlockEntry[]): BlockEntry[] {
 }
 
 /**
- * Choose the authoritative entries for a source: prefer our own native reader
- * (correct dedup + the anti-fraud request-id fingerprint) for claude/codex, and
- * fall back to the ccusage-mapped entries only when the native reader found no
- * transcripts on disk. ccusage stays the reader for every other source.
+ * Choose the authoritative entries for a source. Claude keeps the native reader
+ * (correct dedup + the anti-fraud request-id fingerprint). Codex prefers
+ * ccusage's replay-aware reader because forked/subagent rollouts repeat their
+ * parent's history; the file-local native reader cannot safely remove that
+ * cross-file prefix. If ccusage fails, Codex returns no rows: publishing the
+ * intentionally incomplete native result could be mistaken by the API for a
+ * valid downward historical correction. ccusage stays the reader for every
+ * other source.
  */
 export function selectSourceEntries(
   source: string,
@@ -386,8 +533,7 @@ export function selectSourceEntries(
 ): DailyUsageEntry[] {
   if (source === "claude" && nativeReaderWon(native.claude))
     return native.claude.entries;
-  if (source === "codex" && nativeReaderWon(native.codex))
-    return native.codex.entries;
+  if (source === "codex") return ccusageEntries;
   return ccusageEntries;
 }
 
@@ -401,20 +547,18 @@ export function nativeReaderWon(result: NativeCollectResult): boolean {
 }
 
 /**
- * The natively-covered sources that still need a ccusage fallback this run —
- * i.e. the ones whose native reader came back without usable entries (empty
- * disk, a timeout, or a throw). Returned in SOURCES order so the fallback pass
- * is deterministic. Everything else is either already covered natively or was
- * probed in the parallel phase.
+ * The natively-scanned sources that need a deferred ccusage probe this run.
+ * Claude needs one only when its native reader produced no usable entries.
+ * Codex always needs one: its native reader is diagnostics-only because it
+ * cannot safely remove replayed parent prefixes across forked rollout files.
+ * Returned in SOURCES order so the deferred pass is deterministic.
  */
 export function ccusageFallbackSources(native: {
   claude: NativeCollectResult;
   codex: NativeCollectResult;
 }): string[] {
   return SOURCES.filter(
-    (s) =>
-      NATIVE_COVERED_SOURCES.has(s) &&
-      !nativeReaderWon(s === "claude" ? native.claude : native.codex),
+    (s) => s === "codex" || (s === "claude" && !nativeReaderWon(native.claude)),
   );
 }
 
@@ -465,7 +609,7 @@ async function runCcusageOnce(
   try {
     const { stdout } = await execFileAsync(cmd, args, {
       encoding: "utf8",
-      maxBuffer: 64 * 1024 * 1024,
+      maxBuffer: CCUSAGE_MAX_BUFFER_BYTES,
       // A single source shouldn't be able to hang the whole run: a hung source
       // gets killed and (if transient) retried once below rather than stalling
       // everything for minutes. The claude/codex fallback passes a longer cap —
@@ -555,15 +699,14 @@ export async function collectAll(
   // stages complete out of order — the bar tracks the count, not the sequence.
   const tick = () => onProgress?.(++done, COLLECT_STAGES, "");
 
-  // Everything below is independent, so fire it all off concurrently instead of
-  // one source after another. The old sequential pass walked 15 `ccusage` spawns
-  // (plus session/blocks/cursor/transcripts) back-to-back and dominated the wall
-  // time; in parallel the run finishes in roughly the slowest single probe.
-  // Our own correct readers for the two primary agents (Claude Code, Codex).
-  // These run alongside ccusage and WIN when they find transcripts — they fix
-  // ccusage's over/under-count and add the request-id fingerprint the server
-  // uses for anti-fraud. ccusage remains the fallback (and the only reader for
-  // every other source).
+  // Independent work overlaps, but per-source ccusage children use a small
+  // worker pool. The old all-at-once pass could reserve hundreds of MiB of output
+  // buffers and saturate disk on a large corpus; the cap keeps latency low without
+  // destabilizing the host.
+  // Native readers for the two primary agents (Claude Code, Codex). Claude's
+  // reader wins when it finds transcripts. Codex's file-local reader is used
+  // only for scan-completeness diagnostics; its rows are never published because
+  // only the ccusage source task is replay-aware across parent/child rollouts.
   // A THROW here is a bailed scan, not "no data" — the reader may have crashed
   // mid-parse on a day ccusage can still read, so its fingerprint is missing for
   // days that DO get submitted. Mark it like a timeout (`timedOut: true`) so the
@@ -578,30 +721,31 @@ export async function collectAll(
       ({ entries: [], found: false, filesScanned: 0, timedOut: true }) as NativeCollectResult,
   );
 
-  const sourceTasks = SOURCES.map(async (source) => {
-    // claude/codex are read by the native readers above; ccusage is only their
-    // FALLBACK, so it is not probed here. Racing it against the reader it backs
-    // up meant two concurrent full passes over the same multi-GB corpus (plus
-    // the attribution scan over a third) — on a heavy machine that contention
-    // pushed the reader past its budget AND killed the 25s fallback, and the
-    // source silently vanished from the payload. The fallback now runs after
-    // this phase, only if it is actually needed. This stage's tick tracks the
-    // native reader instead, so the bar reflects the work really in flight.
-    if (NATIVE_COVERED_SOURCES.has(source)) {
-      await (source === "claude" ? nativeClaudeTask : nativeCodexTask);
+  const sourceTasks = mapConcurrent(
+    SOURCES,
+    CCUSAGE_MAX_CONCURRENCY,
+    async (source) => {
+      // claude/codex are scanned by the native readers above, so ccusage is not
+      // probed concurrently here. Racing both readers over a multi-GB corpus
+      // caused timeouts. The deferred phase conditionally backs up Claude and
+      // always performs Codex's authoritative replay-aware read after contention
+      // has ended. This stage's tick tracks the native scan in flight.
+      if (NATIVE_COVERED_SOURCES.has(source)) {
+        await (source === "claude" ? nativeClaudeTask : nativeCodexTask);
+        tick();
+        return { source, mapped: [] as DailyUsageEntry[] };
+      }
+      const json = await runCcusage(cmd, [
+        ...prefixArgs,
+        source,
+        "daily",
+        "--json",
+        "--offline",
+      ]);
       tick();
-      return { source, mapped: [] as DailyUsageEntry[] };
-    }
-    const json = await runCcusage(cmd, [
-      ...prefixArgs,
-      source,
-      "daily",
-      "--json",
-      "--offline",
-    ]);
-    tick();
-    return { source, mapped: json ? mapCcusageDaily(source, json) : [] };
-  });
+      return { source, mapped: json ? mapCcusageDaily(source, json) : [] };
+    },
+  );
 
   // Richer rollups, gathered once across all agents (ccusage aggregates them):
   // sessions power "most expensive conversations", blocks power "peak hours".
@@ -663,7 +807,7 @@ export async function collectAll(
     vscodeResults,
     continueResult,
   ] = await Promise.all([
-    Promise.all(sourceTasks),
+    sourceTasks,
     sessionTask,
     blockTask,
     cursorTask,
@@ -676,13 +820,12 @@ export async function collectAll(
 
   const native = { claude: nativeClaude, codex: nativeCodex };
 
-  // Deferred ccusage fallback for the natively-covered sources: only for the
-  // ones whose native reader produced nothing usable, and only now that the
-  // parallel phase is done, so the fallback gets the machine to itself. It also
-  // runs on the native reader's budget (CCUSAGE_FALLBACK_TIMEOUT_MS) rather than
-  // the short probe cap. Both together are what keep a heavy Claude Code user's
-  // usage in the payload instead of silently dropping it.
+  // Deferred ccusage pass for natively-scanned sources, only after the parallel
+  // phase so it gets the machine to itself. It conditionally rescues Claude and
+  // always supplies Codex's authoritative replay-aware rows. The longer native
+  // budget keeps a heavy corpus from silently disappearing from the payload.
   const fallbacks = new Map<string, DailyUsageEntry[]>();
+  let codexReplayReadSucceeded = false;
   for (const source of ccusageFallbackSources(native)) {
     const json = await runCcusage(
       cmd,
@@ -691,14 +834,21 @@ export async function collectAll(
       source === "claude" ? ccusageClaudeEnv() : undefined,
       CCUSAGE_FALLBACK_TIMEOUT_MS,
     );
+    if (source === "codex") codexReplayReadSucceeded = json !== null;
     fallbacks.set(source, json ? mapCcusageDaily(source, json) : []);
   }
+  const codexReplayEntries = fallbacks.get("codex") ?? [];
+  const replayCorrection = codexReplayCorrectionMetadata(
+    nativeCodex,
+    codexReplayEntries,
+    codexReplayReadSucceeded,
+  );
 
   const entries: DailyUsageEntry[] = [];
   const toolsFound: string[] = [];
   // Re-assemble in SOURCES order so the "from claude, codex, …" line stays stable.
-  // For claude/codex the native reader's entries win over ccusage's (see
-  // selectSourceEntries); every other source keeps ccusage's mapped entries.
+  // Claude prefers native, Codex prefers replay-aware ccusage, and every other
+  // source keeps ccusage's mapped entries (see selectSourceEntries).
   for (const { source, mapped } of sourceResults) {
     const chosen = selectSourceEntries(source, fallbacks.get(source) ?? mapped, native);
     if (chosen.length > 0) {
@@ -727,13 +877,21 @@ export async function collectAll(
   const { tools, skills, agent, sessionMessages, complete } = attribution;
   onProgress?.(COLLECT_STAGES, COLLECT_STAGES, "");
 
-  const dedupedSessions = dedupeSessions(sessions).map((s) => {
+  const localSessions = dedupeSessions(sessions).map((s) => {
     const messageCount = sessionMessages.get(s.sessionId);
     return {
       ...s,
       ...(messageCount ? { messageCount } : {}),
     };
   });
+  const dedupedSessions = sanitizeSessions(localSessions);
+
+  // Every provider/log format is local-untrusted. Quarantine malformed numeric
+  // rows individually and pseudonymize content-shaped labels BEFORE any
+  // cross-source arithmetic, so one corrupt transcript cannot poison a valid
+  // all-agent sync or leak transcript text as a model/tool dimension.
+  const boundaryEntries = sanitizeDailyEntries(entries);
+  const boundaryAgent = sanitizeAgentStat(agent);
 
   // Re-attach last-good provenance so a partial/timed-out run never regresses a
   // day's requestCount fingerprint (or the agent rollup) below a value a prior
@@ -749,12 +907,28 @@ export async function collectAll(
   );
   const storePath = provenanceStorePath();
   const reconciled = reconcileProvenance(
-    dedupeDaily(entries),
-    agent,
+    dedupeDaily(boundaryEntries),
+    boundaryAgent,
     scanComplete,
     loadProvenanceStore(storePath),
   );
+  const reconciledEntries = sanitizeDailyEntries(reconciled.entries);
   saveProvenanceStore(storePath, reconciled.store);
+
+  const cappedEntries = capByTokens(reconciledEntries, 20000, entryTokens);
+  // A capped payload is not a full Codex scope. Never pair it with destructive
+  // correction authority: the API could otherwise mistake locally omitted
+  // low-token model rows for stale legacy rows and delete them.
+  const payloadReplayCorrection =
+    boundaryEntries.length === entries.length &&
+    reconciledEntries.length === reconciled.entries.length &&
+    cappedEntries.length === reconciledEntries.length
+      ? replayCorrection
+      : { tombstoneDates: [], priorScopes: [] };
+  const safeReplayScopes = sanitizeCodexReplayScopes(
+    payloadReplayCorrection.priorScopes,
+  );
+  const safeReplayDates = new Set(safeReplayScopes.map((scope) => scope.date));
 
   return {
     // Cap each array to the server's accepted maximum (the shared SubmitPayload
@@ -762,13 +936,21 @@ export async function collectAll(
     // highest-token rows. Without this, a power user with >10000 distinct sessions
     // would have their ENTIRE submit rejected with a 400 instead of a capped one.
     // tools/skills are already bounded upstream (attribution caps).
-    entries: capByTokens(reconciled.entries, 20000, entryTokens),
+    entries: cappedEntries,
+    codexReplayTombstoneDates: payloadReplayCorrection.tombstoneDates.filter(
+      (date) => safeReplayDates.has(date),
+    ),
+    codexReplayPriorScopes: safeReplayScopes,
     sessions: capByTokens(dedupedSessions, 10000, entryTokens),
-    blocks: capByTokens(dedupeBlocks(blocks), 10000, (b) => b.totalTokens),
+    blocks: capByTokens(
+      dedupeBlocks(sanitizeBlocks(blocks)),
+      10000,
+      (b) => b.totalTokens,
+    ),
     toolsFound,
-    tools,
-    skills,
-    agent: reconciled.agent,
+    tools: sanitizeToolStats(tools),
+    skills: sanitizeSkillStats(skills),
+    agent: sanitizeAgentStat(reconciled.agent),
     attributionComplete: complete,
   };
 }

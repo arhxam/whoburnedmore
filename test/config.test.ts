@@ -1,12 +1,14 @@
-import { mkdtempSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { platform, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   clearAuth,
   defaultConfigDir,
+  deviceKeyHash,
   ensureAnonKey,
   loadConfig,
+  needsDeviceBind,
   recordDeviceBound,
   recordSync,
   recordLaunchNotificationDelivered,
@@ -15,6 +17,17 @@ import {
 } from "../src/config.js";
 
 describe("config", () => {
+  it("re-binds an upgraded install that has an old identity stamp but no refresh credential", () => {
+    expect(needsDeviceBind({ deviceBoundAt: 123, anonKey: "legacy" })).toBe(true);
+    expect(needsDeviceBind({ deviceBoundAt: 123, refreshToken: "secret" })).toBe(false);
+    expect(needsDeviceBind({ refreshToken: "secret" })).toBe(true);
+  });
+  it("derives the stable server-side identity for a bound machine key", () => {
+    expect(deviceKeyHash("abc")).toBe(
+      "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+    );
+  });
+
   it("allows a disposable config directory override for local testing", () => {
     const dir = mkdtempSync(join(tmpdir(), "wbm-test-"));
     const prev = process.env.WHOBURNEDMORE_CONFIG_DIR;
@@ -44,6 +57,20 @@ describe("config", () => {
     expect(loadConfig(dir)).toBeNull();
   });
 
+  it("refuses oversized configuration files", () => {
+    const dir = mkdtempSync(join(tmpdir(), "wbm-test-"));
+    writeFileSync(join(dir, "config.json"), "x".repeat(1024 * 1024 + 1));
+    expect(loadConfig(dir)).toBeNull();
+  });
+
+  it.skipIf(platform() === "win32")("refuses a symlinked credential file", () => {
+    const dir = mkdtempSync(join(tmpdir(), "wbm-test-"));
+    const target = join(dir, "elsewhere.json");
+    writeFileSync(target, JSON.stringify({ cliToken: "stolen" }));
+    symlinkSync(target, join(dir, "config.json"));
+    expect(loadConfig(dir)).toBeNull();
+  });
+
   it.skipIf(platform() === "win32")(
     "re-tightens an existing loose-permission config to 0600 (anonKey is secret)",
     () => {
@@ -57,6 +84,7 @@ describe("config", () => {
       // Saving over it must restore owner-only perms, not inherit the loose ones.
       saveConfig(dir, { anonKey: "b".repeat(64) });
       expect(statSync(file).mode & 0o777).toBe(0o600);
+      expect(statSync(dir).mode & 0o777).toBe(0o700);
     },
   );
 
@@ -123,25 +151,31 @@ describe("config", () => {
   it("saveAuth persists the CLI token + handle, preserving other fields", () => {
     const dir = mkdtempSync(join(tmpdir(), "wbm-test-"));
     saveConfig(dir, { anonKey: "k".repeat(64), lastSyncAt: 99 });
-    saveAuth(dir, { cliToken: "tok-123", handle: "bob" });
+    saveAuth(dir, { cliToken: "tok-123", handle: "bob", refreshToken: "refresh-123" });
     expect(loadConfig(dir)).toEqual({
       anonKey: "k".repeat(64),
       lastSyncAt: 99,
       cliToken: "tok-123",
       handle: "bob",
+      refreshToken: "refresh-123",
     });
   });
 
-  it("clearAuth drops the token + handle, preserving everything else", () => {
+  it("clearAuth drops the access token + handle but preserves the refresh credential", () => {
     const dir = mkdtempSync(join(tmpdir(), "wbm-test-"));
     saveConfig(dir, {
       anonKey: "k".repeat(64),
       cliToken: "tok-123",
       handle: "bob",
+      refreshToken: "refresh-123",
       lastSyncAt: 99,
     });
     clearAuth(dir);
-    expect(loadConfig(dir)).toEqual({ anonKey: "k".repeat(64), lastSyncAt: 99 });
+    expect(loadConfig(dir)).toEqual({
+      anonKey: "k".repeat(64),
+      refreshToken: "refresh-123",
+      lastSyncAt: 99,
+    });
   });
 
   it("recordDeviceBound stamps deviceBoundAt, preserved across clearAuth (a dead token must not lose the binding)", () => {

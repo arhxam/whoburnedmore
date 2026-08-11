@@ -1,9 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { mkdtemp, mkdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdtemp,
+  mkdir,
+  readFile,
+  rm,
+  stat,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { collectClaudeNative } from "../src/native/claude.js";
-import { collectCodexNative } from "../src/native/codex.js";
+import { CODEX_CACHE_VERSION, collectCodexNative } from "../src/native/codex.js";
 import { nativeCachePath, readFilesWithCache } from "../src/native/file-cache.js";
 
 /** Build one Claude Code transcript JSONL line with real provider ids. */
@@ -190,6 +199,53 @@ describe("readFilesWithCache — generic cache mechanics", () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  it("refuses a transcript larger than the configured per-file ceiling", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "wbm-fcache-"));
+    try {
+      const oversized = join(dir, "oversized.jsonl");
+      await writeFile(oversized, "x".repeat(17));
+      let parsed = false;
+      const result = await readFilesWithCache({
+        files: [oversized],
+        cachePath: join(dir, "cache.json"),
+        version: 1,
+        parseFile: () => {
+          parsed = true;
+          return [];
+        },
+        deadline: Date.now() + 5_000,
+        maxFileBytes: 16,
+      });
+      expect(parsed).toBe(false);
+      expect(result.itemsByFile).toEqual([]);
+      expect(result.filesRead).toBe(0);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("writes cache files and their directory owner-only even under a permissive umask", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "wbm-fcache-mode-"));
+    try {
+      await chmod(dir, 0o755);
+      const input = join(dir, "input.txt");
+      const cacheDir = join(dir, "config");
+      const cachePath = join(cacheDir, "cache.json");
+      await writeFile(input, "safe");
+      await readFilesWithCache({
+        files: [input],
+        cachePath,
+        version: 1,
+        parseFile: (value) => [value],
+        deadline: Date.now() + 5_000,
+      });
+      expect((await stat(cacheDir)).mode & 0o777).toBe(0o700);
+      expect((await stat(cachePath)).mode & 0o777).toBe(0o600);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("claude native reader through the cache", () => {
@@ -301,7 +357,7 @@ describe("codex native reader through the cache", () => {
       // Cache file landed in the config dir under the expected name.
       const cachePath = nativeCachePath("codex", env);
       const persisted = JSON.parse(await readFile(cachePath, "utf8")) as { v: number };
-      expect(persisted.v).toBe(2);
+      expect(persisted.v).toBe(7);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

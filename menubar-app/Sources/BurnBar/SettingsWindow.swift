@@ -119,7 +119,7 @@ struct SettingsRootView: View {
                     .buttonStyle(.plain)
                 }
                 Spacer()
-                Text("BurnBar 0.7.2").font(.caption2).foregroundStyle(.tertiary).padding(.leading, 8)
+                Text("BurnBar 0.7.3").font(.caption2).foregroundStyle(.tertiary).padding(.leading, 8)
             }
             .padding(10)
             .frame(width: 170)
@@ -215,7 +215,7 @@ struct GeneralPane: View {
                 get: { settings.syncEnabled },
                 set: { model.setLeaderboardSyncEnabled($0) }
             ))
-            Text("Updates while agents run (at most twice a minute) using your existing sign-in. Off = BurnBar never sends anything anywhere; everything stays on this Mac.")
+            Text("Updates while agents run (at most twice a minute) using your existing sign-in. Off = no usage is sent and no leaderboard data is fetched; local provider-limit checks keep their own settings.")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }

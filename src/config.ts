@@ -1,15 +1,12 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
-  chmodSync,
   existsSync,
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { readTextFileSyncCapped, writePrivateFileAtomic } from "./safe-local-file.js";
+
+const MAX_CONFIG_BYTES = 1024 * 1024;
 
 export interface CliConfig {
   /** Secret that owns this machine's LEGACY anonymous dashboard / server-install
@@ -21,6 +18,10 @@ export interface CliConfig {
    *  (`/v1/submit`) presents — this is what makes a run a SIGNED-IN run, so a
    *  fabricated POST can no longer land usage on an account. Owner-only on disk. */
   cliToken?: string;
+  /** Random server-issued credential used only to replace an expired CLI bearer.
+   * Unlike anonKey, this is authentication material and never leaves this file
+   * except for `/v1/auth/cli/refresh`. */
+  refreshToken?: string;
   /** The signed-in handle `cliToken` belongs to, for friendly terminal messaging. */
   handle?: string;
   /** Epoch ms of the last successful submit. Powers `status` freshness/staleness
@@ -36,6 +37,17 @@ export interface CliConfig {
   deviceBoundAt?: number;
 }
 
+/** Stable, non-secret identity the API compares with its bound-device hashes. */
+export function deviceKeyHash(anonKey: string): string {
+  return createHash("sha256").update(anonKey).digest("hex");
+}
+
+/** New installs bind once; upgraded installs with only the legacy bind stamp
+ * bind once more to receive a real refresh credential. */
+export function needsDeviceBind(config: Pick<CliConfig, "deviceBoundAt" | "refreshToken">): boolean {
+  return !config.deviceBoundAt || !config.refreshToken;
+}
+
 export function defaultConfigDir(): string {
   const override = process.env.WHOBURNEDMORE_CONFIG_DIR?.trim();
   if (override) return override;
@@ -46,13 +58,16 @@ export function loadConfig(dir: string = defaultConfigDir()): CliConfig | null {
   const file = join(dir, "config.json");
   if (!existsSync(file)) return null;
   try {
-    const parsed = JSON.parse(readFileSync(file, "utf8")) as Record<
+    const content = readTextFileSyncCapped(file, MAX_CONFIG_BYTES);
+    if (content === null) return null;
+    const parsed = JSON.parse(content) as Record<
       string,
       unknown
     >;
     const config: CliConfig = {};
     if (typeof parsed.anonKey === "string") config.anonKey = parsed.anonKey;
     if (typeof parsed.cliToken === "string") config.cliToken = parsed.cliToken;
+    if (typeof parsed.refreshToken === "string") config.refreshToken = parsed.refreshToken;
     if (typeof parsed.handle === "string") config.handle = parsed.handle;
     if (typeof parsed.lastSyncAt === "number" && Number.isFinite(parsed.lastSyncAt))
       config.lastSyncAt = parsed.lastSyncAt;
@@ -78,7 +93,6 @@ export function saveConfig(
   dir: string = defaultConfigDir(),
   config: CliConfig = {},
 ): void {
-  mkdirSync(dir, { recursive: true });
   const file = join(dir, "config.json");
   // Write owner-only to a fresh temp file, then atomically rename it over the
   // target. This file holds the anonKey secret, so writing in place would (a) leave
@@ -87,22 +101,8 @@ export function saveConfig(
   // a symlink an attacker may have planted at config.json. The fresh-inode + rename
   // avoids both: the secret only ever exists at 0600, and the rename can't traverse a
   // symlink at the destination.
-  const tmp = join(dir, `config.json.${process.pid}.tmp`);
-  try {
-    writeFileSync(tmp, JSON.stringify(config, null, 2), { mode: 0o600 });
-    try {
-      chmodSync(tmp, 0o600);
-    } catch {
-      /* best-effort: some filesystems (e.g. Windows) don't support POSIX modes */
-    }
-    renameSync(tmp, file);
-  } catch (err) {
-    try {
-      rmSync(tmp, { force: true });
-    } catch {
-      /* ignore cleanup failure */
-    }
-    throw err;
+  if (!writePrivateFileAtomic(file, JSON.stringify(config, null, 2), MAX_CONFIG_BYTES)) {
+    throw new Error("could not save private CLI configuration");
   }
 }
 
@@ -155,10 +155,15 @@ export function recordLaunchNotificationDelivered(
  */
 export function saveAuth(
   dir: string = defaultConfigDir(),
-  auth: { cliToken: string; handle?: string } = { cliToken: "" },
+  auth: { cliToken: string; handle?: string; refreshToken?: string } = { cliToken: "" },
 ): void {
   const config = loadConfig(dir) ?? {};
-  saveConfig(dir, { ...config, cliToken: auth.cliToken, handle: auth.handle });
+  saveConfig(dir, {
+    ...config,
+    cliToken: auth.cliToken,
+    handle: auth.handle,
+    ...(auth.refreshToken ? { refreshToken: auth.refreshToken } : {}),
+  });
 }
 
 /**

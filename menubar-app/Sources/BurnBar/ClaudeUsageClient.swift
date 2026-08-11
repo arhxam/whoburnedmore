@@ -45,8 +45,7 @@ final class ClaudeUsageClient {
         req.setValue("claude-code/2.1.0", forHTTPHeaderField: "User-Agent")
 
         do {
-            let (data, resp) = try await URLSession.shared.data(for: req)
-            guard let http = resp as? HTTPURLResponse else { return .stale(reason: "bad response") }
+            let (data, http) = try await BoundedHTTP.data(for: req, maxBytes: 512 * 1024)
             switch http.statusCode {
             case 200:
                 guard let usage = ClaudeUsage.decode(from: data) else {

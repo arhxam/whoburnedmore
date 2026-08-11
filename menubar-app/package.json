@@ -9,10 +9,12 @@
     "test": "vitest run --root sidecar"
   },
   "dependencies": {
-    "ccusage": "20.0.9",
+    "ccusage": "20.0.19",
     "picocolors": "^1.1.1"
   },
   "devDependencies": {
+    "@ccusage/ccusage-darwin-arm64": "20.0.19",
+    "@ccusage/ccusage-darwin-x64": "20.0.19",
     "@types/node": "^22.10.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"

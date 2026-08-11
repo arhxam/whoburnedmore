@@ -12,7 +12,7 @@
 import { closeSync, openSync, readSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
-import { resolveCodexSessionsDir } from "../../../src/native/codex.js";
+import { resolveCodexSessionsDirs } from "../../../src/native/codex.js";
 import type { CodexLimits, WindowLimit } from "./protocol.js";
 
 const EMPTY: CodexLimits = {
@@ -181,6 +181,29 @@ function clearExpiredWindow(window: WindowLimit | null, now: number): WindowLimi
   return { ...window, usedPercent: 0, resetsAt: null, forecastHitAt: null };
 }
 
+/**
+ * Reconcile one poll with the last valid provider sample. A missing/unreadable
+ * rollout is an observation failure, not evidence that usage became zero. Keep
+ * the last-known-good value, but still advance its explicit reset boundaries so
+ * an exhausted window reaches 0 on time even while Codex is rotating files.
+ */
+export function reconcileCodexLimits(
+  previous: CodexLimits | null,
+  observed: CodexLimits,
+  now: number = Date.now(),
+): CodexLimits {
+  const source = observed.present
+    ? observed
+    : previous?.present
+      ? previous
+      : observed;
+  return {
+    ...source,
+    primary: clearExpiredWindow(source.primary, now),
+    secondary: clearExpiredWindow(source.secondary, now),
+  };
+}
+
 /** Newest-first .jsonl files under the codex sessions tree (bounded walk). */
 export function newestSessionFiles(root: string, max = 5): string[] {
   const files: { path: string; mtime: number }[] = [];
@@ -210,16 +233,23 @@ export function newestSessionFiles(root: string, max = 5): string[] {
     .map((f) => f.path);
 }
 
-/** Read current codex limits from the local sessions dir (never throws). */
+/**
+ * Read current Codex limits from active and archived rollouts (never throws).
+ * Codex moves a completed rollout into `archived_sessions`; scanning both roots
+ * lets a freshly launched BurnBar restore the last provider sample immediately
+ * instead of briefly showing no usage until Codex emits another message.
+ */
 export function readCodexLimits(
   env: NodeJS.ProcessEnv = process.env,
   now: number = Date.now(),
 ): CodexLimits {
   try {
-    const root = resolveCodexSessionsDir(env);
     let latest: CodexLimits | null = null;
     let latestCapturedAt = Number.NEGATIVE_INFINITY;
-    for (const file of newestSessionFiles(root, 20)) {
+    const files = resolveCodexSessionsDirs(env).flatMap((root) =>
+      newestSessionFiles(root, 20),
+    );
+    for (const file of files) {
       const limits = readLatestLimitFromFile(file);
       if (!limits.present) continue;
       const capturedAt = limits.capturedAt === null ? Number.NEGATIVE_INFINITY : Date.parse(limits.capturedAt);
@@ -229,11 +259,7 @@ export function readCodexLimits(
       }
     }
     if (latest) {
-      return {
-        ...latest,
-        primary: clearExpiredWindow(latest.primary, now),
-        secondary: clearExpiredWindow(latest.secondary, now),
-      };
+      return reconcileCodexLimits(null, latest, now);
     }
   } catch {
     /* missing dir / unreadable — fall through */

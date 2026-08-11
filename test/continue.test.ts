@@ -166,4 +166,26 @@ describe("collectContinue — reads dev_data on disk", () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  it("aborts rather than submitting a partial corpus when discovery exceeds its file cap", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "wbm-continue-cap-"));
+    try {
+      for (let i = 0; i < 3; i += 1) {
+        const schema = join(dir, "dev_data", String(i));
+        await mkdir(schema, { recursive: true });
+        await writeFile(
+          join(schema, "tokensGenerated.jsonl"),
+          JSON.stringify({ model: "gpt-5", promptTokens: 1, generatedTokens: 1, timestamp: ISO }),
+        );
+      }
+      const result = await collectContinue({
+        continueDir: dir,
+        cachePath: join(dir, "cache.json"),
+        maxFiles: 2,
+      });
+      expect(result).toMatchObject({ entries: [], found: false, timedOut: true });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });

@@ -11,8 +11,10 @@ enum WbmState: Equatable {
 
 @MainActor
 final class WbmClient {
-    static func apiBase() -> String {
-        ProcessInfo.processInfo.environment["BURNBAR_API_BASE"] ?? "https://api.whoburnedmore.com"
+    static func apiBase() -> String? {
+        let raw = ProcessInfo.processInfo.environment["BURNBAR_API_BASE"]
+            ?? "https://api.whoburnedmore.com"
+        return TrustedWebURL.serviceOrigin(raw)?.absoluteString
     }
 
     static func configuredHandle() -> String? {
@@ -34,8 +36,9 @@ final class WbmClient {
 
     func fetch() async -> WbmState {
         guard let handle = Self.configuredHandle() else { return .noAccount }
-        guard let profileURL = URL(string: "\(Self.apiBase())/v1/users/\(handle)"),
-              let leaderboardURL = URL(string: "\(Self.apiBase())/v1/leaderboard?period=today&by=tokens") else {
+        guard let api = Self.apiBase(),
+              let profileURL = URL(string: "\(api)/v1/users/\(handle)"),
+              let leaderboardURL = URL(string: "\(api)/v1/leaderboard?period=today&by=tokens") else {
             return .offline(handle: handle)
         }
 
@@ -63,10 +66,10 @@ final class WbmClient {
     private func fetchData(from url: URL) async -> Data? {
         var req = URLRequest(url: url)
         req.timeoutInterval = 10
-        req.setValue("burnbar/0.7.2", forHTTPHeaderField: "User-Agent")
+        req.setValue("burnbar/0.7.3", forHTTPHeaderField: "User-Agent")
         do {
-            let (data, resp) = try await URLSession.shared.data(for: req)
-            guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else { return nil }
+            let (data, http) = try await BoundedHTTP.data(for: req, maxBytes: 2 * 1024 * 1024)
+            guard http.statusCode == 200 else { return nil }
             return data
         } catch {
             return nil

@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { DailyUsageEntry } from "../src/shared.js";
-import { renderDashboardHtml } from "../src/local-dashboard.js";
+import { mkdtempSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { renderDashboardHtml, writeLocalDashboard } from "../src/local-dashboard.js";
 
 function entry(overrides: Partial<DailyUsageEntry> = {}): DailyUsageEntry {
   return {
@@ -17,6 +20,12 @@ function entry(overrides: Partial<DailyUsageEntry> = {}): DailyUsageEntry {
 }
 
 describe("renderDashboardHtml", () => {
+  it("writes the offline dashboard and its directory owner-only", () => {
+    const root = mkdtempSync(join(tmpdir(), "wbm-dashboard-"));
+    const file = writeLocalDashboard(join(root, "private"), "<html>safe</html>");
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+    expect(statSync(join(root, "private")).mode & 0o777).toBe(0o700);
+  });
   it("produces a self-contained HTML page with the totals and tools", () => {
     const html = renderDashboardHtml([
       entry(),

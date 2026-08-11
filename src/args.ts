@@ -24,6 +24,11 @@ export function parseInstallToken(args: string[]): string | undefined {
   return parseValueFlag(args, "--token");
 }
 
+/** Secrets in argv are visible to process listings and persist in shell history. */
+export function hasUnsafeInstallTokenArg(args: string[]): boolean {
+  return args.some((arg) => arg === "--token" || arg.startsWith("--token="));
+}
+
 /** The optional board/org scope a run can submit into. */
 export interface ScopeFlags {
   board?: string;

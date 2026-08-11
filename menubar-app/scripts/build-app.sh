@@ -13,7 +13,10 @@ echo "==> app icon"
 [[ -f Resources/AppIcon.icns ]] || bash scripts/gen-app-icon.sh
 
 echo "==> sidecar"
-(cd sidecar && bun build --compile --outfile dist/burnbar-sidecar ./src/main.ts >/dev/null)
+(cd sidecar && \
+  bun build --compile --target=bun-darwin-arm64 --outfile dist/burnbar-sidecar-arm64 ./src/main.ts >/dev/null && \
+  bun build --compile --target=bun-darwin-x64 --outfile dist/burnbar-sidecar-x64 ./src/main.ts >/dev/null && \
+  lipo -create dist/burnbar-sidecar-arm64 dist/burnbar-sidecar-x64 -output dist/burnbar-sidecar)
 
 echo "==> xcodebuild"
 xcodegen generate >/dev/null
@@ -28,13 +31,18 @@ RES="dist/BurnBar.app/Contents/Resources"
 mkdir -p "$RES"
 cp Resources/AppIcon.icns "$RES/AppIcon.icns"
 cp sidecar/dist/burnbar-sidecar "$RES/burnbar-sidecar"
-CCU=$(ls ../../node_modules/.pnpm/@ccusage+ccusage-darwin-arm64*/node_modules/@ccusage/ccusage-darwin-arm64/bin/ccusage 2>/dev/null | head -1 || true)
-if [[ -n "$CCU" ]]; then
-  cp "$CCU" "$RES/ccusage"
-  chmod +x "$RES/ccusage"
-else
-  echo "WARN: standalone ccusage not found — long-tail sources disabled" >&2
-fi
+CCU_VERSION=$(node -p "require('./node_modules/ccusage/package.json').version")
+CCU_ARM="../../node_modules/.pnpm/@ccusage+ccusage-darwin-arm64@${CCU_VERSION}/node_modules/@ccusage/ccusage-darwin-arm64/bin/ccusage"
+CCU_X64="../../node_modules/.pnpm/@ccusage+ccusage-darwin-x64@${CCU_VERSION}/node_modules/@ccusage/ccusage-darwin-x64/bin/ccusage"
+[[ -f "$CCU_ARM" ]] || { echo "ERROR: missing arm64 ccusage ${CCU_VERSION}" >&2; exit 1; }
+[[ -f "$CCU_X64" ]] || { echo "ERROR: missing x64 ccusage ${CCU_VERSION}" >&2; exit 1; }
+lipo -create "$CCU_ARM" "$CCU_X64" -output "$RES/ccusage"
+chmod +x "$RES/ccusage"
+
+echo "==> architecture gate"
+for BIN in dist/BurnBar.app/Contents/MacOS/BurnBar "$RES/burnbar-sidecar" "$RES/ccusage"; do
+  lipo "$BIN" -verify_arch arm64 x86_64
+done
 
 echo "==> codesign"
 # Inside-out: nested executables/frameworks first, then the bundle.
@@ -43,7 +51,7 @@ echo "==> codesign"
 SIDECAR_ENT="sidecar.entitlements"
 APP_ENT="BurnBar.entitlements"
 codesign --force --options runtime --timestamp --entitlements "$SIDECAR_ENT" --sign "$IDENTITY" "$RES/burnbar-sidecar"
-[[ -f "$RES/ccusage" ]] && codesign --force --options runtime --timestamp --entitlements "$SIDECAR_ENT" --sign "$IDENTITY" "$RES/ccusage"
+codesign --force --options runtime --timestamp --entitlements "$SIDECAR_ENT" --sign "$IDENTITY" "$RES/ccusage"
 codesign --force --options runtime --timestamp --sign "$IDENTITY" \
   dist/BurnBar.app/Contents/Frameworks/BurnBarCore.framework
 codesign --force --options runtime --timestamp --entitlements "$APP_ENT" --sign "$IDENTITY" dist/BurnBar.app

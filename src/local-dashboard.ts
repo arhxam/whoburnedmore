@@ -1,5 +1,17 @@
 import { entryTotalTokens, type DailyUsageEntry } from "./shared.js";
+import { join } from "node:path";
 import { formatTokens, formatUSD } from "./output.js";
+import { writePrivateFileAtomic } from "./safe-local-file.js";
+
+const MAX_LOCAL_DASHBOARD_BYTES = 16 * 1024 * 1024;
+
+export function writeLocalDashboard(dir: string, html: string): string {
+  const file = join(dir, "dashboard.html");
+  if (!writePrivateFileAtomic(file, html, MAX_LOCAL_DASHBOARD_BYTES)) {
+    throw new Error("could not write the private local dashboard");
+  }
+  return file;
+}
 
 /**
  * The "get on the leaderboard" CTA baked into the local page. The old version

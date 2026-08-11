@@ -1,6 +1,5 @@
 import { z } from "zod";
 
-export const DEFAULT_ACCESS_CODE = "n34t";
 export const LAUNCH_INVITE_COOKIE = "wbm_launch_invite";
 
 export const LaunchAccessMode = z.enum(["full", "invited", "waitlisted"]);
@@ -30,4 +29,3 @@ export type LaunchRedeemResponse = z.infer<typeof LaunchRedeemResponse>;
 export function remainingSecondsUntil(launchAt: Date, now = new Date()): number {
   return Math.max(0, Math.ceil((launchAt.getTime() - now.getTime()) / 1000));
 }
-

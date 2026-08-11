@@ -374,8 +374,7 @@ final class AppModel: ObservableObject {
             return
         }
         if let state = await claude.fetch() {
-            claudeState = state
-            if case .ready(let usage) = state { feedClaudeAlerts(usage) }
+            acceptClaudeSample(state)
         }
     }
 
@@ -389,6 +388,8 @@ final class AppModel: ObservableObject {
         leaderboardSyncState = enabled ? .waiting : .off
         if enabled {
             Task { await syncLeaderboardNow() }
+        } else {
+            wbmState = .noAccount
         }
     }
 
@@ -403,16 +404,40 @@ final class AppModel: ObservableObject {
         // Keychain read can never block the leaderboard context from rendering.
         await refreshLeaderboard()
         if let state = await claudeResult {
-            claudeState = state
-            if case .ready(let usage) = state {
-                feedClaudeAlerts(usage)
-            }
+            acceptClaudeSample(state)
         }
         lastUpdatedAt = Date()
     }
 
+    private func acceptClaudeSample(_ incoming: ClaudeUsageState) {
+        let previousHasData: Bool
+        if case .ready = claudeState { previousHasData = true }
+        else { previousHasData = false }
+        let incomingHasData: Bool
+        if case .ready = incoming { incomingHasData = true }
+        else { incomingHasData = false }
+        guard ProviderSamplePolicy.shouldAccept(
+            previousHasData: previousHasData,
+            incomingHasData: incomingHasData
+        ) else { return }
+        claudeState = incoming
+        if case .ready(let usage) = incoming { feedClaudeAlerts(usage) }
+    }
+
     private func refreshLeaderboard() async {
+        guard OutboundPrivacyPolicy.allowsLeaderboardNetwork(
+            syncEnabled: settings.syncEnabled
+        ) else {
+            wbmState = .noAccount
+            return
+        }
         let newWbm = await wbm.fetch()
+        // A user can switch sync off while the request is in flight. Do not
+        // publish that response back into the UI after consent was withdrawn.
+        guard settings.syncEnabled else {
+            wbmState = .noAccount
+            return
+        }
         detectOvertaken(old: wbmState, new: newWbm)
         wbmState = newWbm
         if case .ready = newWbm { recomputeStreak() }
@@ -472,8 +497,8 @@ final class AppModel: ObservableObject {
         guard let u = URL(string: url) else { return nil }
         var req = URLRequest(url: u)
         req.timeoutInterval = 10
-        guard let (data, resp) = try? await URLSession.shared.data(for: req),
-              (resp as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+        guard let (data, resp) = try? await BoundedHTTP.data(for: req, maxBytes: 256 * 1024),
+              resp.statusCode == 200 else { return nil }
         return StatusPageState.decode(from: data)
     }
 
@@ -599,8 +624,19 @@ final class AppModel: ObservableObject {
                 Task { [weak self] in await self?.maybeSync() }
             }
         case .limits(let l):
-            codexLimits = l.codex
-            cursorLimits = l.cursor
+            if ProviderSamplePolicy.shouldAccept(
+                previousHasData: codexLimits?.present == true,
+                incomingHasData: l.codex.present
+            ) {
+                codexLimits = l.codex
+            }
+            if let incoming = l.cursor,
+               ProviderSamplePolicy.shouldAccept(
+                   previousHasData: cursorLimits?.present == true,
+                   incomingHasData: incoming.present
+               ) {
+                cursorLimits = incoming
+            }
         case .alert(let kind, let provider, let level, let percent):
             let isReset = kind == "reset"
             if settings.notificationsEnabled && ((isReset && settings.notifyReset) || (!isReset && settings.notifyThresholds)) {

@@ -6,6 +6,10 @@ import type {
   VerifyPayload,
   VerifyResponse,
 } from "./shared.js";
+import { readTextResponseCapped } from "./http-bounds.js";
+
+const DEFAULT_API_BASE = "https://api.whoburnedmore.com";
+const MAX_SERVER_RESPONSE_BYTES = 2 * 1024 * 1024;
 
 export interface ServerInstallRedeemResponse {
   ok: true;
@@ -15,10 +19,30 @@ export interface ServerInstallRedeemResponse {
   alreadyLinked: boolean;
   /** Authenticated CLI token so a headless install submits via /v1/submit. */
   cliToken?: string;
+  /** Long-lived server-issued credential for unattended access-token recovery. */
+  refreshToken?: string;
 }
 
 export function apiBase(): string {
-  return process.env.WHOBURNEDMORE_API ?? "https://api.whoburnedmore.com";
+  const raw = process.env.WHOBURNEDMORE_API?.trim() || DEFAULT_API_BASE;
+  try {
+    const url = new URL(raw);
+    const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+    const trustedTransport = url.protocol === "https:" || (url.protocol === "http:" && loopback);
+    if (
+      !trustedTransport ||
+      url.username ||
+      url.password ||
+      (url.pathname !== "" && url.pathname !== "/") ||
+      url.search ||
+      url.hash
+    ) {
+      throw new Error("untrusted");
+    }
+    return url.origin;
+  } catch {
+    throw new Error("WHOBURNEDMORE_API must be a trusted HTTPS or loopback HTTP origin");
+  }
 }
 
 /**
@@ -65,7 +89,7 @@ export function isOpenableUrl(url: string): boolean {
 
 /** Parse a response body as JSON, tolerating empty or non-JSON responses. */
 async function readJson<T>(res: Response): Promise<T> {
-  const text = await res.text();
+  const text = await readTextResponseCapped(res, MAX_SERVER_RESPONSE_BYTES);
   if (!text) return {} as T;
   try {
     return JSON.parse(text) as T;
@@ -102,6 +126,7 @@ async function send<T>(
       // Bound the request so a slow/black-holing/hostile server can't hang the CLI
       // — or the unattended 15-minute background sync — indefinitely.
       signal: AbortSignal.timeout(30_000),
+      redirect: "error",
     });
   } catch {
     throw new Error(
@@ -184,22 +209,18 @@ export async function devicePoll(
 }
 
 /**
- * Silently mint a fresh CLI bearer token from this machine's device key. The
- * server only honours a key whose hash is BOUND to an account (the claim /
- * server-install binding), so this recovers an unattended machine whose stored
- * token died — e.g. after a server-side JWT secret rotation — without a browser
- * or a human. Returns null when the machine can't self-heal (key unknown/unbound,
- * account blocked, network trouble); callers fall back to interactive sign-in.
+ * Silently mint a fresh CLI bearer token from a random server-issued refresh
+ * credential. Machine identity (`anonKey`) is intentionally never accepted here.
  */
 export async function refreshCliToken(
-  anonKey: string,
+  refreshToken: string,
 ): Promise<{ token: string; handle: string } | null> {
   try {
     const { status, body } = await post<{
       ok?: boolean;
       token?: string;
       handle?: string;
-    }>("/v1/auth/cli/refresh", { anonKey });
+    }>("/v1/auth/cli/refresh", { refreshToken });
     if (status === 200 && typeof body.token === "string" && body.token) {
       return { token: body.token, handle: body.handle ?? "" };
     }
@@ -210,26 +231,32 @@ export async function refreshCliToken(
 }
 
 /**
- * Bind this machine's device key to the signed-in account (idempotent). This is
- * what makes the machine recoverable via `refreshCliToken` after its bearer
- * token dies — a device-sign-in-only machine otherwise holds nothing the server
- * can verify. Returns true when the server gave a definitive answer (bound,
- * already bound, or refused), false on network trouble (worth retrying later).
+ * Bind this machine's accounting identity to the signed-in account. A successful
+ * bind also returns a distinct server-issued refresh credential. A 409 is a
+ * definitive identity conflict but intentionally carries no credential.
  */
 export async function bindDeviceKey(
   token: string,
   anonKey: string,
-): Promise<boolean> {
+): Promise<{ definitive: boolean; refreshToken?: string }> {
   try {
-    const { status } = await post<{ ok?: boolean }>(
+    const { status, body } = await post<{ ok?: boolean; refreshToken?: string }>(
       "/v1/me/devices/bind",
       { anonKey },
       token,
     );
     // 200 bound/already-linked; 409 owned by another account — both definitive.
-    return status === 200 || status === 409;
+    if (status === 200) {
+      return {
+        definitive: true,
+        ...(typeof body.refreshToken === "string" && body.refreshToken
+          ? { refreshToken: body.refreshToken }
+          : {}),
+      };
+    }
+    return { definitive: status === 409 };
   } catch {
-    return false;
+    return { definitive: false };
   }
 }
 

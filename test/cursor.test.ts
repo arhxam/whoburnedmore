@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cursorCookie, fetchCursorEvents, mapCursorEvents } from "../src/cursor.js";
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { cursorCookie, fetchCursorEvents, mapCursorEvents, readCursorToken } from "../src/cursor.js";
 
 // Shape captured from POST cursor.com/api/dashboard/get-filtered-usage-events.
 describe("mapCursorEvents", () => {
@@ -76,13 +79,33 @@ describe("cursorCookie", () => {
   });
 });
 
+describe("Cursor SQLite fallback", () => {
+  it("never executes a PATH-shadowed sqlite3 binary", () => {
+    const root = mkdtempSync(join(tmpdir(), "wbm-sqlite-path-"));
+    const marker = join(root, "executed");
+    const fake = join(root, "sqlite3");
+    const db = join(root, "invalid.db");
+    writeFileSync(fake, `#!/bin/sh\ntouch '${marker}'\nexit 0\n`);
+    writeFileSync(db, "not sqlite");
+    chmodSync(fake, 0o755);
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${root}:${originalPath ?? ""}`;
+    try {
+      expect(readCursorToken(db)).toBeNull();
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("fetchCursorEvents pagination", () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  const okPage = (events: unknown[]) => ({
-    ok: true,
-    json: async () => ({ usageEventsDisplay: events }),
-  });
+  const okPage = (events: unknown[]) =>
+    new Response(JSON.stringify({ usageEventsDisplay: events }), { status: 200 });
 
   it("stops cleanly on a short (final) page and returns all events", async () => {
     const full = Array.from({ length: 2 }, (_, i) => ({ timestamp: String(i) }));
@@ -104,7 +127,7 @@ describe("fetchCursorEvents pagination", () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(okPage(full))
-      .mockResolvedValueOnce({ ok: false, status: 500, json: async () => ({}) });
+      .mockResolvedValueOnce(new Response("{}", { status: 500 }));
     vi.stubGlobal("fetch", fetchMock);
     await expect(fetchCursorEvents("cookie", 30, 2)).rejects.toThrow(/HTTP 500/);
   });

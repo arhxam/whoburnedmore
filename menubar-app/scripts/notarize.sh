@@ -7,9 +7,9 @@
 #   2. App Store Connect API key:
 #        BURNBAR_NOTARY_KEY=~/.appstoreconnect/private_keys/AuthKey_XXXX.p8
 #        BURNBAR_NOTARY_KEY_ID=XXXX   BURNBAR_NOTARY_ISSUER=<issuer-uuid>
-#   3. Apple ID app-specific password:
-#        BURNBAR_APPLE_ID=you@example.com  BURNBAR_APP_PW=xxxx-xxxx-xxxx-xxxx
-#        BURNBAR_TEAM_ID=84MFPMUB97
+#
+# Apple-ID password flags are deliberately unsupported: they expose the secret
+# in the process argument list. Store credentials in Keychain instead.
 #
 # Usage: bash scripts/notarize.sh dist/BurnBar.dmg
 set -euo pipefail
@@ -23,8 +23,6 @@ if [[ -n "${BURNBAR_NOTARY_PROFILE:-}" ]]; then
   CREDS=(--keychain-profile "$BURNBAR_NOTARY_PROFILE")
 elif [[ -n "${BURNBAR_NOTARY_KEY:-}" && -n "${BURNBAR_NOTARY_KEY_ID:-}" && -n "${BURNBAR_NOTARY_ISSUER:-}" ]]; then
   CREDS=(--key "$BURNBAR_NOTARY_KEY" --key-id "$BURNBAR_NOTARY_KEY_ID" --issuer "$BURNBAR_NOTARY_ISSUER")
-elif [[ -n "${BURNBAR_APPLE_ID:-}" && -n "${BURNBAR_APP_PW:-}" && -n "${BURNBAR_TEAM_ID:-}" ]]; then
-  CREDS=(--apple-id "$BURNBAR_APPLE_ID" --password "$BURNBAR_APP_PW" --team-id "$BURNBAR_TEAM_ID")
 else
   cat >&2 <<'EOF'
 ERROR: no notarization credentials found.
@@ -32,7 +30,10 @@ ERROR: no notarization credentials found.
 Set ONE of:
   • BURNBAR_NOTARY_PROFILE (a keychain profile from `notarytool store-credentials`)
   • BURNBAR_NOTARY_KEY + BURNBAR_NOTARY_KEY_ID + BURNBAR_NOTARY_ISSUER (API key)
-  • BURNBAR_APPLE_ID + BURNBAR_APP_PW + BURNBAR_TEAM_ID (app-specific password)
+
+Apple-ID app-specific passwords are intentionally rejected because passing a
+password to notarytool exposes it in the process argument list. Store those
+credentials in a Keychain profile first.
 
 The App Store Connect API keys already on this Mac live in
   ~/.appstoreconnect/private_keys/AuthKey_<KEYID>.p8

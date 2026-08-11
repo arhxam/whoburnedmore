@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentStat, DailyUsageEntry } from "../src/shared.js";
@@ -150,12 +150,19 @@ describe("provenance store — disk round-trip", () => {
       };
       saveProvenanceStore(path, store);
       expect(loadProvenanceStore(path)).toEqual(store);
+      if (process.platform !== "win32") {
+        expect((await stat(path)).mode & 0o777).toBe(0o600);
+        expect((await stat(dir)).mode & 0o777).toBe(0o700);
+      }
 
       await writeFile(path, "{ not valid json");
       expect(loadProvenanceStore(path)).toBeNull();
 
       // A version mismatch is treated as absent (rebuilt on next full run).
       await writeFile(path, JSON.stringify({ v: PROVENANCE_STORE_VERSION + 99, req: { [KEY]: 5 } }));
+      expect(loadProvenanceStore(path)).toBeNull();
+
+      await writeFile(path, "x".repeat(4 * 1024 * 1024 + 1));
       expect(loadProvenanceStore(path)).toBeNull();
     } finally {
       await rm(dir, { recursive: true, force: true });

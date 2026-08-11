@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { mapCursorUsageResponse } from "../src/cursor-limits.js";
+import { EMPTY_CURSOR_LIMITS, mapCursorUsageResponse, reconcileCursorLimits } from "../src/cursor-limits.js";
 
 const POPULATED = {
   startOfMonth: "2026-08-01T00:00:00.000Z",
@@ -46,5 +46,30 @@ describe("cursor-limits mapping", () => {
     });
     expect(l.present).toBe(true);
     expect(l.renewsAt).toBeNull();
+  });
+
+  it("cursor-limits: retains a valid sample through a transient fetch failure", () => {
+    const previous = mapCursorUsageResponse(POPULATED);
+    const reconciled = reconcileCursorLimits(
+      previous,
+      EMPTY_CURSOR_LIMITS,
+      new Date("2026-08-15T00:00:00.000Z").getTime(),
+    );
+    expect(reconciled.present).toBe(true);
+    expect(reconciled.planPercent).toBe(55);
+    expect(reconciled.used).toBe(330);
+  });
+
+  it("cursor-limits: clears retained usage at the known renewal boundary", () => {
+    const previous = mapCursorUsageResponse(POPULATED);
+    const reconciled = reconcileCursorLimits(
+      previous,
+      EMPTY_CURSOR_LIMITS,
+      new Date("2026-09-01T00:00:01.000Z").getTime(),
+    );
+    expect(reconciled.present).toBe(true);
+    expect(reconciled.planPercent).toBe(0);
+    expect(reconciled.used).toBe(0);
+    expect(reconciled.renewsAt).toBeNull();
   });
 });

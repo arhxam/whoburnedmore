@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
 import {
   existsSync,
   mkdirSync,
@@ -47,7 +48,13 @@ const STABLE_NPM_CANDIDATES = [
   "/usr/bin/npm",
 ];
 
-const LATEST_PACKAGE_SPEC = "whoburnedmore@latest";
+const require = createRequire(import.meta.url);
+const CLI_VERSION = (require("../package.json") as { version: string }).version;
+// A background scheduler is an unattended code-execution boundary. Pin it to
+// the exact reviewed CLI that installed the job; foreground upgrades reconcile
+// the job and deliberately advance this pin. Never execute the mutable `latest`
+// dist-tag on a timer.
+const SCHEDULED_PACKAGE_SPEC = `whoburnedmore@${CLI_VERSION}`;
 
 /**
  * Standard executable directories to fold into the background-sync PATH. OS
@@ -267,7 +274,7 @@ export function syncCommandArgs(npmPath: string = resolveNpmPath()): string[] {
     "--yes",
     "--ignore-scripts",
     "--package",
-    LATEST_PACKAGE_SPEC,
+    SCHEDULED_PACKAGE_SPEC,
     "--",
     "whoburnedmore",
     "sync",

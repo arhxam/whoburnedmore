@@ -6,6 +6,8 @@ import {
   CCUSAGE_AGGREGATE_TIMEOUT_MS,
   CCUSAGE_FALLBACK_TIMEOUT_MS,
   CCUSAGE_TIMEOUT_MS,
+  codexReplayCorrectionMetadata,
+  codexReplayTombstoneDates,
   dedupeBlocks,
   dedupeDaily,
   dedupeSessions,
@@ -14,6 +16,7 @@ import {
   mapCcusageBlocks,
   mapCcusageDaily,
   mapCcusageSessions,
+  mapConcurrent,
   NATIVE_COVERED_SOURCES,
   selectSourceEntries,
 } from "../src/collect.js";
@@ -54,6 +57,22 @@ const found = (entries: DailyUsageEntry[]): NativeCollectResult => ({
   filesScanned: entries.length,
 });
 const notFound: NativeCollectResult = { entries: [], found: false, filesScanned: 0 };
+
+describe("mapConcurrent", () => {
+  it("preserves input order while bounding active workers", async () => {
+    let active = 0;
+    let peak = 0;
+    const result = await mapConcurrent([5, 4, 3, 2, 1], 2, async (value) => {
+      active++;
+      peak = Math.max(peak, active);
+      await new Promise((resolve) => setTimeout(resolve, value));
+      active--;
+      return value * 2;
+    });
+    expect(result).toEqual([10, 8, 6, 4, 2]);
+    expect(peak).toBe(2);
+  });
+});
 
 describe("isAuthoritativeScan (anti-regression guard gating)", () => {
   const ok = { timedOut: false };
@@ -97,14 +116,25 @@ describe("isAuthoritativeScan (anti-regression guard gating)", () => {
 });
 
 describe("selectSourceEntries", () => {
-  it("prefers the native reader for claude/codex when it found transcripts", () => {
+  it("prefers the native reader for Claude when it found transcripts", () => {
     const native = { claude: found([nativeEntry("claude", 42)]), codex: found([nativeEntry("codex", 7)]) };
     const claude = selectSourceEntries("claude", [ccEntry("claude")], native);
     expect(claude).toHaveLength(1);
     expect(claude[0].requestCount).toBe(42);
     expect(claude[0].model).toBe("claude-opus-4-8"); // native, not the ccusage fallback
+  });
+
+  it("prefers replay-aware ccusage for Codex even when native rollouts exist", () => {
+    const native = { claude: notFound, codex: found([nativeEntry("codex", 7)]) };
     const codex = selectSourceEntries("codex", [ccEntry("codex")], native);
-    expect(codex[0].requestCount).toBe(7);
+    expect(codex[0].model).toBe("fallback-model");
+    expect(codex[0].requestCount).toBeUndefined();
+  });
+
+  it("never publishes incomplete native Codex rows when replay-aware parsing fails", () => {
+    const native = { claude: notFound, codex: found([nativeEntry("codex", 7)]) };
+    const codex = selectSourceEntries("codex", [], native);
+    expect(codex).toEqual([]);
   });
 
   it("falls back to ccusage when the native reader found nothing on disk", () => {
@@ -135,17 +165,17 @@ describe("ccusageFallbackSources (deferred fallback probing)", () => {
   // source vanished from the payload entirely (issue #2).
   const winner = { claude: found([nativeEntry("claude", 5)]), codex: found([nativeEntry("codex", 5)]) };
 
-  it("probes nothing when both native readers produced entries", () => {
-    expect(ccusageFallbackSources(winner)).toEqual([]);
+  it("always probes Codex even when its diagnostic native reader produced entries", () => {
+    expect(ccusageFallbackSources(winner)).toEqual(["codex"]);
   });
 
-  it("probes only the source whose native reader came back empty", () => {
-    expect(ccusageFallbackSources({ ...winner, claude: notFound })).toEqual(["claude"]);
+  it("additionally probes Claude when its native reader came back empty", () => {
+    expect(ccusageFallbackSources({ ...winner, claude: notFound })).toEqual(["claude", "codex"]);
     expect(ccusageFallbackSources({ ...winner, codex: notFound })).toEqual(["codex"]);
   });
 
   it("probes a source that found files but no usable entries", () => {
-    expect(ccusageFallbackSources({ ...winner, claude: found([]) })).toEqual(["claude"]);
+    expect(ccusageFallbackSources({ ...winner, claude: found([]) })).toEqual(["claude", "codex"]);
   });
 
   it("probes a source whose native reader timed out or threw", () => {
@@ -157,6 +187,90 @@ describe("ccusageFallbackSources (deferred fallback probing)", () => {
     const all = ccusageFallbackSources({ claude: notFound, codex: notFound });
     expect(all.every((s) => NATIVE_COVERED_SOURCES.has(s))).toBe(true);
     expect(all).not.toContain("gemini");
+  });
+});
+
+describe("codexReplayTombstoneDates", () => {
+  it("emits only replay-candidate dates absent from a successful corrected read", () => {
+    const corrected = [{ ...ccEntry("codex"), date: "2026-06-10" }];
+    expect(
+      codexReplayTombstoneDates(
+        { replayCandidateDates: ["2026-06-10", "2026-06-11", "2026-06-11"] },
+        corrected,
+        true,
+      ),
+    ).toEqual(["2026-06-11"]);
+  });
+
+  it("fails closed on replay-parser failure or native timeout", () => {
+    const native = { replayCandidateDates: ["2026-06-11"] };
+    expect(codexReplayTombstoneDates(native, [], false)).toEqual([]);
+    expect(codexReplayTombstoneDates({ ...native, timedOut: true }, [], true)).toEqual([]);
+  });
+});
+
+describe("codexReplayCorrectionMetadata", () => {
+  it("proves changed and replay-only dates using the exact legacy scope", () => {
+    const legacy = [
+      { ...nativeEntry("codex", 2), date: "2026-06-10", model: "legacy-a" },
+      { ...nativeEntry("codex", 3), date: "2026-06-11", model: "legacy-b" },
+    ];
+    const corrected = [
+      { ...ccEntry("codex"), date: "2026-06-10", model: "corrected-a" },
+    ];
+    const metadata = codexReplayCorrectionMetadata(
+      {
+        legacyEntries: legacy,
+        replayCandidateDates: ["2026-06-11"],
+      },
+      corrected,
+      true,
+    );
+    expect(metadata.tombstoneDates).toEqual(["2026-06-11"]);
+    expect(metadata.priorScopes.map((scope) => scope.date)).toEqual([
+      "2026-06-10",
+      "2026-06-11",
+    ]);
+    expect(metadata.priorScopes[0].rows).toEqual([
+      {
+        model: "legacy-a",
+        inputTokens: 100,
+        outputTokens: 50,
+        cacheCreationTokens: 0,
+        cacheReadTokens: 0,
+      },
+    ]);
+  });
+
+  it("emits no correction authority when either reader is incomplete", () => {
+    const native = {
+      legacyEntries: [nativeEntry("codex", 1)],
+      replayCandidateDates: ["2026-06-10"],
+    };
+    expect(codexReplayCorrectionMetadata(native, [], false)).toEqual({
+      tombstoneDates: [],
+      priorScopes: [],
+    });
+    expect(
+      codexReplayCorrectionMetadata({ ...native, timedOut: true }, [], true),
+    ).toEqual({ tombstoneDates: [], priorScopes: [] });
+  });
+
+  it("fails closed instead of producing an invalid proof for a >100-model date", () => {
+    const legacyEntries = Array.from({ length: 101 }, (_, index) => ({
+      ...nativeEntry("codex", 1),
+      model: `model-${index}`,
+    }));
+    expect(
+      codexReplayCorrectionMetadata(
+        {
+          legacyEntries,
+          replayCandidateDates: ["2026-06-10"],
+        },
+        [],
+        true,
+      ),
+    ).toEqual({ tombstoneDates: [], priorScopes: [] });
   });
 });
 

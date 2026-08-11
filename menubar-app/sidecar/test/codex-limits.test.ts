@@ -3,7 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { newestSessionFiles, parseCodexLimitLines, readCodexLimits } from "../src/codex-limits.js";
+import {
+  newestSessionFiles,
+  parseCodexLimitLines,
+  readCodexLimits,
+  reconcileCodexLimits,
+} from "../src/codex-limits.js";
 
 const POPULATED = JSON.stringify({
   timestamp: "2026-08-02T10:00:00.000Z",
@@ -139,6 +144,27 @@ describe("codex-limits parsing", () => {
     expect(newestSessionFiles(join(root, "sessions"))[0]).toBe(newFile);
   });
 
+  it("codex-limits: restores the latest limit from an archived rollout after restart", () => {
+    const root = mkdtempSync(join(tmpdir(), "bb-codex-archived-"));
+    const activeDir = join(root, "sessions", "2026", "08", "09");
+    const archivedDir = join(root, "archived_sessions");
+    mkdirSync(activeDir, { recursive: true });
+    mkdirSync(archivedDir, { recursive: true });
+    writeFileSync(join(activeDir, "rollout-active.jsonl"), POPULATED + "\n");
+    writeFileSync(
+      join(archivedDir, "rollout-archived.jsonl"),
+      POPULATED.replace("2026-08-02T10:00:00.000Z", "2026-08-09T15:00:00.000Z")
+        .replace('"used_percent":62.5', '"used_percent":100') + "\n",
+    );
+
+    const l = readCodexLimits(
+      { CODEX_HOME: root } as NodeJS.ProcessEnv,
+      new Date("2026-08-09T15:01:00.000Z").getTime(),
+    );
+    expect(l.capturedAt).toBe("2026-08-09T15:00:00.000Z");
+    expect(l.primary?.usedPercent).toBe(100);
+  });
+
   it("codex-limits: newest rate-limit event wins across concurrent session files", () => {
     const root = mkdtempSync(join(tmpdir(), "bb-codex-concurrent-"));
     const dayDir = join(root, "sessions", "2026", "08", "09");
@@ -192,5 +218,30 @@ describe("codex-limits parsing", () => {
     );
     expect(l.secondary?.usedPercent).toBe(0);
     expect(l.secondary?.resetsAt).toBeNull();
+  });
+
+  it("codex-limits: retains last-known-good usage across a transient absent poll", () => {
+    const previous = parseCodexLimitLines([POPULATED]);
+    const absent = parseCodexLimitLines([]);
+    const reconciled = reconcileCodexLimits(
+      previous,
+      absent,
+      new Date("2026-08-02T10:30:00.000Z").getTime(),
+    );
+    expect(reconciled.present).toBe(true);
+    expect(reconciled.primary?.usedPercent).toBe(62.5);
+    expect(reconciled.secondary?.usedPercent).toBe(21);
+  });
+
+  it("codex-limits: advances an explicit reset while retaining a missing sample", () => {
+    const previous = parseCodexLimitLines([POPULATED]);
+    const reconciled = reconcileCodexLimits(
+      previous,
+      parseCodexLimitLines([]),
+      new Date("2026-08-08T00:00:01.000Z").getTime(),
+    );
+    expect(reconciled.present).toBe(true);
+    expect(reconciled.secondary?.usedPercent).toBe(0);
+    expect(reconciled.secondary?.resetsAt).toBeNull();
   });
 });

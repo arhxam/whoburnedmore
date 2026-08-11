@@ -16,7 +16,7 @@
  */
 import { readdir } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import type { DailyUsageEntry } from "../shared.js";
 import { estimateCostUSD } from "../pricing.js";
 import { nativeCachePath, readFilesWithCache } from "./file-cache.js";
@@ -72,8 +72,18 @@ export interface CodexSession {
  * previous active day's ending cumulative). Because the cumulative is monotonic,
  * those per-day deltas sum back to the session total with no double-counting.
  */
-export function parseCodexRollout(lines: Iterable<string>): CodexSession[] {
+export interface CodexRolloutInspection {
+  sessions: CodexSession[];
+  /** Legacy file-local totals from a fork/subagent file; never publish directly. */
+  replaySessions: CodexSession[];
+  /** Local dates present in a fork/subagent file that requires replay deduplication. */
+  replayCandidateDates: string[];
+}
+
+export function inspectCodexRollout(lines: Iterable<string>): CodexRolloutInspection {
   let model = "unknown";
+  let sawSessionMeta = false;
+  let replayedRollout = false;
   // Per local day: the LAST cumulative seen that day + turn count that day.
   // Insertion order follows the (chronological) event stream.
   const perDay = new Map<
@@ -97,6 +107,22 @@ export function parseCodexRollout(lines: Iterable<string>): CodexSession[] {
     // The line kind is on the OUTER `type` (session_meta / turn_context /
     // event_msg); only event_msg carries a payload.type sub-discriminator.
     const kind = obj.type;
+    if (kind === "session_meta" && !sawSessionMeta) {
+      sawSessionMeta = true;
+      const source = payload.source as Record<string, unknown> | undefined;
+      // A child rollout begins with its parent's cumulative history. Removing
+      // that prefix requires a cross-file replay plan, which this deliberately
+      // small fallback parser does not have. Fail closed instead of publishing
+      // a known overcount; the primary ccusage path counts the child's own
+      // advancement precisely.
+      if (
+        typeof payload.forked_from_id === "string" ||
+        typeof payload.parent_thread_id === "string" ||
+        (source && typeof source === "object" && source.subagent !== undefined)
+      ) {
+        replayedRollout = true;
+      }
+    }
     if (kind === "session_meta" || kind === "turn_context") {
       if (typeof payload.model === "string" && payload.model) model = payload.model;
     }
@@ -119,7 +145,8 @@ export function parseCodexRollout(lines: Iterable<string>): CodexSession[] {
     }
   }
 
-  if (perDay.size === 0) return [];
+  if (perDay.size === 0)
+    return { sessions: [], replaySessions: [], replayCandidateDates: [] };
 
   // Walk days oldest→newest and difference the cumulative to get each day's
   // own usage. Map Codex's cumulative fields onto our four-field schema:
@@ -137,8 +164,11 @@ export function parseCodexRollout(lines: Iterable<string>): CodexSession[] {
     const dCached = Math.max(0, cum.cached - prev.cached);
     const dOutput = Math.max(0, cum.output - prev.output);
     prev = cum;
-    const cacheReadTokens = dCached;
-    const inputTokens = Math.max(0, dInput - dCached);
+    // cached_input_tokens is a subset of input_tokens. A truncated/corrupt
+    // event can momentarily violate that invariant, so cap the cached delta at
+    // the inclusive input delta instead of manufacturing extra total tokens.
+    const cacheReadTokens = Math.min(dCached, dInput);
+    const inputTokens = dInput - cacheReadTokens;
     const outputTokens = dOutput;
     if (inputTokens + outputTokens + cacheReadTokens === 0) continue; // idle day
     out.push({
@@ -151,7 +181,15 @@ export function parseCodexRollout(lines: Iterable<string>): CodexSession[] {
       turnCount: turns,
     });
   }
-  return out;
+  return {
+    sessions: replayedRollout ? [] : out,
+    replaySessions: replayedRollout ? out : [],
+    replayCandidateDates: replayedRollout ? dates : [],
+  };
+}
+
+export function parseCodexRollout(lines: Iterable<string>): CodexSession[] {
+  return inspectCodexRollout(lines).sessions;
 }
 
 interface CodexBucket {
@@ -238,22 +276,25 @@ export function aggregateCodexSessions(
 
 /** Resolve the Codex home (honors CODEX_HOME, default ~/.codex). */
 function resolveCodexHome(env = process.env): string {
-  return env.CODEX_HOME && env.CODEX_HOME.trim() ? env.CODEX_HOME.trim() : join(homedir(), ".codex");
+  return env.CODEX_HOME && env.CODEX_HOME.trim()
+    ? env.CODEX_HOME.trim()
+    : join(homedir(), ".codex");
 }
 
-/** Resolve the Codex sessions root (honors CODEX_HOME, default ~/.codex). */
+/** Resolve the live Codex sessions root (compatibility helper for watchers). */
 export function resolveCodexSessionsDir(env = process.env): string {
   return resolve(resolveCodexHome(env), "sessions");
 }
 
 /**
  * Every root holding Codex rollouts. Codex moves finished sessions out of
- * `sessions/` into `archived_sessions/`, so reading only the live directory
- * silently drops most of the history — on a heavy user that was 26 of 41 days.
- * Both are scanned; a missing directory just yields no files.
+ * `sessions/` to `archived_sessions/`, so both roots are required for complete
+ * history. The live root is first and wins if a move temporarily leaves the
+ * same rollout in both places. Archives flatten the date directories, so the
+ * rollout filename (which contains the session UUID) is the stable identity.
  */
 export function resolveCodexSessionsDirs(env = process.env): string[] {
-  const home = resolveCodexHome(env);
+  const home = resolve(resolveCodexHome(env));
   return [join(home, "sessions"), join(home, "archived_sessions")];
 }
 
@@ -289,6 +330,9 @@ export interface NativeCollectResult {
   found: boolean;
   filesScanned: number;
   timedOut?: boolean;
+  replayCandidateDates?: string[];
+  /** Exact native/file-local scope a legacy CLI would have submitted. */
+  legacyEntries?: DailyUsageEntry[];
 }
 
 /** Wall-clock budget for the whole native Codex read (see claude.ts — with the
@@ -296,16 +340,29 @@ export interface NativeCollectResult {
 export const NATIVE_READ_BUDGET_MS = 45_000;
 
 /** Bump when parse semantics change — invalidates the per-file cache. */
-export const CODEX_CACHE_VERSION = 2;
+export const CODEX_CACHE_VERSION = 7;
 
 /**
  * Compact per-file cache row: [date, model, in, out, cacheCreate, cacheRead,
  * turnCount] — one per active day of the session that file holds.
  */
-type CachedSession = [string, string, number, number, number, number, number];
+type CachedSession = [
+  "usage" | "duplicate" | "replay" | "replay-duplicate",
+  string,
+  string,
+  number,
+  number,
+  number,
+  number,
+  number,
+];
 
-function toCachedSession(s: CodexSession): CachedSession {
+function toCachedSession(
+  s: CodexSession,
+  kind: CachedSession[0] = "usage",
+): CachedSession {
   return [
+    kind,
     s.date,
     s.model,
     s.inputTokens,
@@ -318,13 +375,13 @@ function toCachedSession(s: CodexSession): CachedSession {
 
 function fromCachedSession(t: CachedSession): CodexSession {
   return {
-    date: t[0],
-    model: t[1],
-    inputTokens: t[2],
-    outputTokens: t[3],
-    cacheCreationTokens: t[4],
-    cacheReadTokens: t[5],
-    turnCount: t[6],
+    date: t[1],
+    model: t[2],
+    inputTokens: t[3],
+    outputTokens: t[4],
+    cacheCreationTokens: t[5],
+    cacheReadTokens: t[6],
+    turnCount: t[7],
   };
 }
 
@@ -343,15 +400,46 @@ export async function collectCodexNative(
   opts: { budgetMs?: number; now?: () => number; cachePath?: string } = {},
 ): Promise<NativeCollectResult> {
   const dirs = resolveCodexSessionsDirs(env);
-  const files = (await Promise.all(dirs.map(listJsonl))).flat();
+  // Read every physical file so `legacyEntries` can reconstruct the exact old
+  // native scope, including a rollout duplicated between live and archive.
+  // Mark only the first path for each rollout basename as publishable so the
+  // diagnostic `entries` retain the new overlap-deduplicated semantics.
+  const files: string[] = [];
+  const primaryFiles = new Set<string>();
+  const seenIdentities = new Set<string>();
+  for (const dir of dirs) {
+    for (const file of await listJsonl(dir)) {
+      const key = basename(file);
+      files.push(file);
+      if (!seenIdentities.has(key)) {
+        seenIdentities.add(key);
+        primaryFiles.add(file);
+      }
+    }
+  }
   if (files.length === 0) return { entries: [], found: false, filesScanned: 0 };
   const now = opts.now ?? Date.now;
   const res = await readFilesWithCache<CachedSession>({
     files,
     cachePath: opts.cachePath ?? nativeCachePath("codex", env),
     version: CODEX_CACHE_VERSION,
-    parseFile: (content) =>
-      parseCodexRollout(splitLines(content)).map(toCachedSession),
+    parseFile: (content, path) => {
+      const inspected = inspectCodexRollout(splitLines(content));
+      const primary = primaryFiles.has(path);
+      return [
+        // Do not pass toCachedSession directly to map: Array.map's numeric
+        // index would be supplied as the optional `kind` argument.
+        ...inspected.sessions.map((session) =>
+          toCachedSession(session, primary ? "usage" : "duplicate"),
+        ),
+        ...inspected.replaySessions.map((session) =>
+          toCachedSession(
+            session,
+            primary ? "replay" : "replay-duplicate",
+          ),
+        ),
+      ];
+    },
     deadline: now() + (opts.budgetMs ?? NATIVE_READ_BUDGET_MS),
     now,
   });
@@ -364,12 +452,26 @@ export async function collectCodexNative(
     };
   }
   const acc: CodexAccumulator = new Map();
+  const legacyAcc: CodexAccumulator = new Map();
+  const replayCandidateDates = new Set<string>();
   for (const items of res.itemsByFile) {
-    foldCodexSessions(acc, items.map(fromCachedSession));
+    const usage = items.filter((item) => item[0] === "usage").map(fromCachedSession);
+    const legacy = items.map(fromCachedSession);
+    const replay = items
+      .filter(
+        (item) =>
+          item[0] === "replay" || item[0] === "replay-duplicate",
+      )
+      .map(fromCachedSession);
+    foldCodexSessions(acc, usage);
+    foldCodexSessions(legacyAcc, legacy);
+    for (const session of replay) replayCandidateDates.add(session.date);
   }
   return {
     entries: finalizeCodexEntries(acc),
     found: true,
     filesScanned: res.filesRead,
+    replayCandidateDates: [...replayCandidateDates].sort(),
+    legacyEntries: finalizeCodexEntries(legacyAcc),
   };
 }

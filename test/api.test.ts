@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  apiBase,
   bindDeviceKey,
   isOpenableUrl,
   isTrustedWebUrl,
@@ -10,6 +11,33 @@ import {
   submit,
   UnauthorizedError,
 } from "../src/api.js";
+
+describe("apiBase — credentials only reach a trusted transport", () => {
+  const original = process.env.WHOBURNEDMORE_API;
+  afterEach(() => {
+    if (original === undefined) delete process.env.WHOBURNEDMORE_API;
+    else process.env.WHOBURNEDMORE_API = original;
+  });
+
+  it("accepts HTTPS and explicit loopback HTTP development origins", () => {
+    process.env.WHOBURNEDMORE_API = "https://api.example.com";
+    expect(apiBase()).toBe("https://api.example.com");
+    process.env.WHOBURNEDMORE_API = "http://127.0.0.1:3001";
+    expect(apiBase()).toBe("http://127.0.0.1:3001");
+  });
+
+  it("rejects plaintext remote, credential-bearing, and path-bearing overrides", () => {
+    for (const value of [
+      "http://api.example.com",
+      "https://user:pass@api.example.com",
+      "https://api.example.com/prefix",
+      "file:///tmp/socket",
+    ]) {
+      process.env.WHOBURNEDMORE_API = value;
+      expect(() => apiBase(), value).toThrow(/trusted HTTPS or loopback/);
+    }
+  });
+});
 
 describe("isTrustedWebUrl — never auto-open a hostile server URL", () => {
   it("accepts only an https URL on our own web host", () => {
@@ -165,10 +193,10 @@ describe("signed-in usage removal (`remove`)", () => {
   });
 });
 
-describe("silent CLI token refresh (device-key self-heal)", () => {
+describe("silent CLI token refresh", () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it("POSTs the machine key and returns the fresh token + handle", async () => {
+  it("POSTs only the server-issued refresh credential and returns the fresh token + handle", async () => {
     const fetchMock = vi.fn(
       async () =>
         new Response(
@@ -177,11 +205,12 @@ describe("silent CLI token refresh (device-key self-heal)", () => {
         ),
     );
     vi.stubGlobal("fetch", fetchMock);
-    const result = await refreshCliToken("k".repeat(32));
+    const refreshToken = "a".repeat(64);
+    const result = await refreshCliToken(refreshToken);
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(String(url)).toMatch(/\/v1\/auth\/cli\/refresh$/);
     expect(init.method).toBe("POST");
-    expect(JSON.parse(init.body as string)).toEqual({ anonKey: "k".repeat(32) });
+    expect(JSON.parse(init.body as string)).toEqual({ refreshToken });
     expect(result).toEqual({ token: "fresh-jwt", handle: "alice" });
   });
 
@@ -214,18 +243,21 @@ describe("silent CLI token refresh (device-key self-heal)", () => {
   });
 });
 
-describe("device-key bind (rotation-proofing)", () => {
+describe("device identity bind", () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it("POSTs the key with the bearer token; 200 and 409 are definitive", async () => {
+  it("POSTs the identity with the bearer and returns a separate refresh secret", async () => {
     const fetchMock = vi.fn(
       async () =>
-        new Response(JSON.stringify({ ok: true, alreadyLinked: false }), {
+        new Response(JSON.stringify({ ok: true, alreadyLinked: false, refreshToken: "r".repeat(64) }), {
           status: 200,
         }),
     );
     vi.stubGlobal("fetch", fetchMock);
-    expect(await bindDeviceKey("jwt-token", "k".repeat(32))).toBe(true);
+    expect(await bindDeviceKey("jwt-token", "k".repeat(32))).toEqual({
+      definitive: true,
+      refreshToken: "r".repeat(64),
+    });
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(String(url)).toMatch(/\/v1\/me\/devices\/bind$/);
     expect((init.headers as Record<string, string>).Authorization).toBe(
@@ -242,7 +274,7 @@ describe("device-key bind (rotation-proofing)", () => {
           }),
       ),
     );
-    expect(await bindDeviceKey("jwt-token", "k".repeat(32))).toBe(true);
+    expect(await bindDeviceKey("jwt-token", "k".repeat(32))).toEqual({ definitive: true });
   });
 
   it("returns false on transient failures so a later submit retries", async () => {
@@ -250,14 +282,14 @@ describe("device-key bind (rotation-proofing)", () => {
       "fetch",
       vi.fn(async () => new Response("bad gateway", { status: 502 })),
     );
-    expect(await bindDeviceKey("jwt-token", "k".repeat(32))).toBe(false);
+    expect(await bindDeviceKey("jwt-token", "k".repeat(32))).toEqual({ definitive: false });
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => {
         throw new Error("network down");
       }),
     );
-    expect(await bindDeviceKey("jwt-token", "k".repeat(32))).toBe(false);
+    expect(await bindDeviceKey("jwt-token", "k".repeat(32))).toEqual({ definitive: false });
   });
 });
 
@@ -333,5 +365,19 @@ describe("network resilience", () => {
     await expect(submit("cli-jwt", payload)).rejects.toThrow(
       /couldn't reach the leaderboard server/,
     );
+  });
+
+  it("rejects an oversized server response before buffering it", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response("{}", {
+            status: 200,
+            headers: { "content-length": String(3 * 1024 * 1024) },
+          }),
+      ),
+    );
+    await expect(submit("cli-jwt", payload)).rejects.toThrow(/too large/);
   });
 });

@@ -22,14 +22,17 @@ import { summarize } from "./summarize.js";
 import { runSync } from "./sync.js";
 import { runWatch } from "./watch.js";
 
-const VERSION = "0.7.2";
+const VERSION = "0.7.3";
 
 async function snapshot(): Promise<void> {
   const [native, slow] = await Promise.all([
     collectNativeTier(),
     collectSlowTier().catch(() => null),
   ]);
-  const entries = mergeTiers(native, slow);
+  // Both tiers belong to this one-shot snapshot; the successful slow Codex read
+  // is newer than a potentially throttled fast-cache hit. Watch mode deliberately
+  // keeps the default because its native result is filesystem-event fresh.
+  const entries = mergeTiers(native, slow, { preferSlowCodex: true });
   const toolsFound = [...new Set([...native.toolsFound, ...(slow?.toolsFound ?? [])])];
   console.log(
     JSON.stringify(

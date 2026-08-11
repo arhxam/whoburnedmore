@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   applyScope,
+  hasUnsafeInstallTokenArg,
   parseBoard,
   parseInstallToken,
   parseOrg,
@@ -84,18 +85,11 @@ describe("payload scope carries the org password (applyScope)", () => {
   });
 });
 
-describe("parseInstallToken", () => {
-  it("reads --token=<value>", () => {
-    expect(parseInstallToken(["link", "--token=abc.def"])).toBe("abc.def");
-  });
-
-  it("reads --token <value> (space form)", () => {
-    expect(parseInstallToken(["link", "--token", "abc.def"])).toBe("abc.def");
-  });
-
-  it("ignores an empty value and a following flag", () => {
-    expect(parseInstallToken(["link", "--token="])).toBeUndefined();
-    expect(parseInstallToken(["link", "--token", "--dry-run"])).toBeUndefined();
+describe("server-link secret arguments", () => {
+  it("detects deprecated argv secrets so the CLI can reject them", () => {
+    expect(hasUnsafeInstallTokenArg(["link", "--token=abc.def"])).toBe(true);
+    expect(hasUnsafeInstallTokenArg(["link", "--token", "abc.def"])).toBe(true);
+    expect(hasUnsafeInstallTokenArg(["link"])).toBe(false);
   });
 });
 

@@ -14,9 +14,11 @@
  * `{ present: false, ... }` rather than throwing or fabricating a number.
  */
 import { cursorCookie, cursorDbPath, readCursorToken } from "../../../src/cursor.js";
+import { readJsonResponseCapped } from "../../../src/http-bounds.js";
 import type { CursorLimits } from "./protocol.js";
 
 const USAGE_URL = "https://www.cursor.com/api/usage";
+const MAX_CURSOR_USAGE_BYTES = 1024 * 1024;
 
 export const EMPTY_CURSOR_LIMITS: CursorLimits = {
   present: false,
@@ -25,6 +27,30 @@ export const EMPTY_CURSOR_LIMITS: CursorLimits = {
   limit: null,
   renewsAt: null,
 };
+
+/** Preserve the last successful dashboard sample across network/auth/read
+ * failures. When its known renewal boundary passes, advance to an explicit
+ * zero rather than displaying stale usage indefinitely. */
+export function reconcileCursorLimits(
+  previous: CursorLimits | null,
+  observed: CursorLimits,
+  now: number = Date.now(),
+): CursorLimits {
+  const source = observed.present
+    ? observed
+    : previous?.present
+      ? previous
+      : observed;
+  if (!source.present || source.renewsAt === null) return source;
+  const renewal = Date.parse(source.renewsAt);
+  if (!Number.isFinite(renewal) || renewal > now) return source;
+  return {
+    ...source,
+    planPercent: 0,
+    used: 0,
+    renewsAt: null,
+  };
+}
 
 function num(v: unknown): number | null {
   return typeof v === "number" && Number.isFinite(v) ? v : null;
@@ -103,9 +129,10 @@ export async function fetchCursorLimits(
     const res = await fetch(USAGE_URL, {
       headers: { Cookie: cookie },
       signal: AbortSignal.timeout(10_000),
+      redirect: "error",
     });
     if (!res.ok) return EMPTY_CURSOR_LIMITS;
-    const json = await res.json();
+    const json = await readJsonResponseCapped(res, MAX_CURSOR_USAGE_BYTES);
     return mapCursorUsageResponse(json);
   } catch {
     return EMPTY_CURSOR_LIMITS;

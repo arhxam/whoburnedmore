@@ -17,15 +17,38 @@
  * `collectAll()`'s orchestration for a one-shot manual command; entries +
  * sessions are the meaningful board-moving fields.
  */
-import type { SessionEntry, SubmitPayload, SubmitResponse } from "../../../src/shared.js";
+import type { SubmitPayload, SubmitResponse } from "../../../src/shared.js";
+import { join } from "node:path";
 
-import { capByTokens, dedupeSessions } from "../../../src/collect.js";
+import {
+  capByTokens,
+  codexReplayCorrectionMetadata,
+} from "../../../src/collect.js";
+import {
+  sanitizeCodexReplayScopes,
+  sanitizeDailyEntries,
+} from "../../../src/wire-sanitize.js";
 import { refreshCliToken, submit, UnauthorizedError } from "../../../src/api.js";
-import { loadConfig, recordSync, saveAuth } from "../../../src/config.js";
+import {
+  deviceKeyHash,
+  loadConfig,
+  recordSync,
+  saveAuth,
+} from "../../../src/config.js";
+import { collectCodexNative } from "../../../src/native/codex.js";
 
-import { collectNativeTier, collectSlowTier, mergeTiers } from "./collector.js";
+import {
+  burnbarCacheDir,
+  collectNativeTier,
+  collectSlowTier,
+  mergeTiers,
+} from "./collector.js";
 
-const SIDECAR_CLI_VERSION = "burnbar-0.7.2";
+const SIDECAR_CLI_VERSION = "burnbar-0.7.3";
+
+function syncConfig(env: NodeJS.ProcessEnv) {
+  return loadConfig(env.WHOBURNEDMORE_CONFIG_DIR);
+}
 
 function tokensOf(e: {
   inputTokens: number;
@@ -52,11 +75,31 @@ export async function buildSyncPayload(
       ? Promise.resolve(null)
       : collectSlowTier(env).catch(() => null),
   ]);
-  const entries = mergeTiers(native, slow);
+  // This slow result was collected in the same explicit-sync cycle, so it is
+  // newer than a throttled fast-cache hit. Watch mode does not set this option:
+  // there the latest filesystem-triggered native result must beat retained slow
+  // state from an earlier timer cycle.
+  const mergedEntries = mergeTiers(native, slow, { preferSlowCodex: true });
+  const entries = sanitizeDailyEntries(mergedEntries);
   const cappedEntries = capByTokens(entries, 20000, tokensOf);
 
-  const sessions: SessionEntry[] = dedupeSessions(slow?.sessions ?? []);
-  const cappedSessions = capByTokens(sessions, 10000, tokensOf);
+  // The published Codex rows are replay-aware. A separate cached native pass
+  // reconstructs exactly what the legacy parser would have submitted, allowing
+  // the API to compare-and-swap only matching overcounted scopes. This runs on
+  // explicit sync, not BurnBar's frequent watch snapshots.
+  const nativeCodexProof = await collectCodexNative(env, {
+    cachePath: join(burnbarCacheDir(env), "native-cache-codex-proof.json"),
+  }).catch(() => ({ entries: [], found: false, filesScanned: 0, timedOut: true }));
+  const replayCorrection =
+    entries.length === mergedEntries.length && cappedEntries.length === entries.length
+      ? codexReplayCorrectionMetadata(
+          nativeCodexProof,
+          cappedEntries,
+          native.codexReplayAware || Boolean(slow?.succeededSources.has("codex")),
+        )
+      : { tombstoneDates: [], priorScopes: [] };
+  const safeReplayScopes = sanitizeCodexReplayScopes(replayCorrection.priorScopes);
+  const safeReplayDates = new Set(safeReplayScopes.map((scope) => scope.date));
 
   const payload: SubmitPayload = {
     cliVersion: SIDECAR_CLI_VERSION,
@@ -66,7 +109,17 @@ export async function buildSyncPayload(
     // local day rather than a UTC one.
     tzOffsetMinutes: -new Date().getTimezoneOffset(),
   };
-  if (cappedSessions.length > 0) payload.sessions = cappedSessions;
+  const safeTombstones = replayCorrection.tombstoneDates.filter((date) =>
+    safeReplayDates.has(date),
+  );
+  if (safeTombstones.length > 0)
+    payload.codexReplayTombstoneDates = safeTombstones;
+  if (safeReplayScopes.length > 0)
+    payload.codexReplayPriorScopes = safeReplayScopes;
+  const machineKey = syncConfig(env)?.anonKey;
+  if (machineKey) payload.deviceKeyHash = deviceKeyHash(machineKey);
+  // Keep ccusage session identifiers on-device. They can drive BurnBar's local
+  // UI, but hosted sync intentionally sends no per-conversation records.
   return payload;
 }
 
@@ -78,23 +131,24 @@ export interface SyncOptions {
 
 /**
  * Submit as a signed-in user via `/v1/submit`, mirroring `index.ts`'s
- * `submitSignedIn`: on a 401 (expired/invalid token) try the silent device-key
+ * `submitSignedIn`: on a 401 (expired/invalid token) try the server-issued
  * refresh once; if that fails there is no interactive fallback here (`sync`
  * is a one-shot, non-interactive command) so it reports the error instead of
  * launching a browser sign-in.
  */
 async function submitWithRefresh(
   token: string,
-  anonKey: string | undefined,
+  refreshToken: string | undefined,
   payload: SubmitPayload,
+  configDir: string | undefined,
 ): Promise<SubmitResponse> {
   try {
     return await submit(token, payload);
   } catch (err) {
-    if (err instanceof UnauthorizedError && anonKey) {
-      const healed = await refreshCliToken(anonKey);
+    if (err instanceof UnauthorizedError && refreshToken) {
+      const healed = await refreshCliToken(refreshToken);
       if (healed) {
-        saveAuth(undefined, { cliToken: healed.token, handle: healed.handle });
+        saveAuth(configDir, { cliToken: healed.token, handle: healed.handle });
         return submit(healed.token, payload);
       }
     }
@@ -109,7 +163,7 @@ async function submitWithRefresh(
  */
 export async function runSync(options: SyncOptions = {}): Promise<void> {
   const env = options.env ?? process.env;
-  const cfg = loadConfig();
+  const cfg = syncConfig(env);
 
   if (options.dryRun) {
     const payload = await buildSyncPayload(env, { nativeOnly: options.nativeOnly });
@@ -119,7 +173,7 @@ export async function runSync(options: SyncOptions = {}): Promise<void> {
           dryRun: true,
           connected: Boolean(cfg?.cliToken),
           entries: payload.entries.length,
-          sessions: payload.sessions?.length ?? 0,
+          sessions: 0,
         },
         null,
         2,
@@ -143,7 +197,12 @@ export async function runSync(options: SyncOptions = {}): Promise<void> {
 
   let result: SubmitResponse;
   try {
-    result = await submitWithRefresh(cfg.cliToken, cfg.anonKey, payload);
+    result = await submitWithRefresh(
+      cfg.cliToken,
+      cfg.refreshToken,
+      payload,
+      env.WHOBURNEDMORE_CONFIG_DIR,
+    );
   } catch (err) {
     if (err instanceof UnauthorizedError) {
       console.log(JSON.stringify({ error: "unauthorized" }));
@@ -156,7 +215,7 @@ export async function runSync(options: SyncOptions = {}): Promise<void> {
   }
 
   try {
-    recordSync();
+    recordSync(env.WHOBURNEDMORE_CONFIG_DIR);
   } catch {
     /* best-effort — never fail an already-good submit over a freshness stamp */
   }

@@ -70,4 +70,22 @@ describe("summarize", () => {
     expect(days[13]).toBe("2026-08-05");
     expect(new Set(days).size).toBe(14);
   });
+
+  it("bounds and pseudonymizes provider-derived labels before emitting UI state", () => {
+    const today = localDay(now);
+    const entries = Array.from({ length: 40 }, (_, i) =>
+      entry({
+        date: today,
+        tool: i === 0 ? "private prompt text\nsecret" : `agent-${i}`,
+        model: i === 0 ? "customer code copied into model" : `model-${i}`,
+        inputTokens: i + 1,
+      }),
+    );
+    const summary = summarize(entries, entries.map((row) => row.tool), false, now);
+    expect(summary.byToolToday.length).toBeLessThanOrEqual(32);
+    expect(summary.byTool14d.length).toBeLessThanOrEqual(32);
+    expect(summary.toolsFound.length).toBeLessThanOrEqual(32);
+    expect(JSON.stringify(summary)).not.toContain("private prompt");
+    expect(JSON.stringify(summary)).not.toContain("customer code");
+  });
 });
