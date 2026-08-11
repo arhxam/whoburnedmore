@@ -41,15 +41,16 @@ assert(
 const help = run(["--help"]);
 assert(help.status === 0, "--help should exit 0", help);
 assert(
-  help.stdout.includes("npx whoburnedmore link --token=TOKEN"),
-  "help should advertise server linking",
+  help.stdout.includes("npx whoburnedmore link") &&
+    help.stdout.includes("prompts for a one-time code"),
+  "help should advertise secret-safe server linking",
   help,
 );
 
 const missingToken = run(["link"]);
-assert(missingToken.status === 1, "link without --token should fail", missingToken);
+assert(missingToken.status === 1, "link without an install code should fail", missingToken);
 assert(
-  missingToken.stderr.includes("missing install token") &&
+  missingToken.stderr.includes("missing install code") &&
     !missingToken.stderr.includes("unknown command"),
   "link should dispatch to server-link validation, not unknown-command help",
   missingToken,
