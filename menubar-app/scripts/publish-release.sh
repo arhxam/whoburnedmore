@@ -68,6 +68,10 @@ if gh release view "$TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
 fi
 gh release create "$TAG" dist/BurnBar.dmg dist/appcast.xml dist/BurnBar.md \
   --repo "$REPOSITORY" --title "BurnBar ${TAG}" --notes-file "$NOTES" --latest
+# GitHub can retain the previous `/releases/latest/download/*` redirect even
+# when `release create --latest` was requested. Re-assert the promotion before
+# polling the public feed so the updater cannot remain pinned to the old tag.
+gh release edit "$TAG" --repo "$REPOSITORY" --latest
 
 FEED_URL="https://github.com/${REPOSITORY}/releases/latest/download/appcast.xml"
 DMG_URL="https://github.com/${REPOSITORY}/releases/latest/download/BurnBar.dmg"
