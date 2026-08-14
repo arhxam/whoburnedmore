@@ -46,6 +46,10 @@ public final class SettingsStore: ObservableObject {
         metricSlot1 = MenuBarMetric.normalized(rawMetric1, for: source1, allowNone: true)
         metricSlot2 = MenuBarMetric.normalized(rawMetric2, for: source2, allowNone: true)
         metricSlot3 = MenuBarMetric.normalized(rawMetric3, for: source3, allowNone: true)
+        let islandSource = d.string(forKey: Keys.islandMetricProvider) ?? "all"
+        islandMetricProvider = islandSource
+        let rawIslandMetric = MenuBarMetric(rawValue: d.string(forKey: Keys.islandMetric) ?? "") ?? .tightestLimit
+        islandMetric = MenuBarMetric.normalized(rawIslandMetric, for: islandSource, allowNone: true)
         tintThresholds = Self.bool(d, Keys.tintThresholds, true)
         showLimits = Self.bool(d, Keys.showLimits, true)
         showForecast = Self.bool(d, Keys.showForecast, true)
@@ -96,6 +100,8 @@ public final class SettingsStore: ObservableObject {
     @Published public var metricProvider2: String { didSet { d.set(metricProvider2, forKey: Keys.metricProvider2) } }
     @Published public var metricProvider3: String { didSet { d.set(metricProvider3, forKey: Keys.metricProvider3) } }
     @Published public var tintThresholds: Bool { didSet { d.set(tintThresholds, forKey: Keys.tintThresholds) } }
+    @Published public var islandMetric: MenuBarMetric { didSet { d.set(islandMetric.rawValue, forKey: Keys.islandMetric) } }
+    @Published public var islandMetricProvider: String { didSet { d.set(islandMetricProvider, forKey: Keys.islandMetricProvider) } }
 
     @Published public var showLimits: Bool { didSet { d.set(showLimits, forKey: Keys.showLimits) } }
     @Published public var showForecast: Bool { didSet { d.set(showForecast, forKey: Keys.showForecast) } }
@@ -155,6 +161,8 @@ public final class SettingsStore: ObservableObject {
         public static let metricProvider2 = "menubar.metricProvider2"
         public static let metricProvider3 = "menubar.metricProvider3"
         public static let tintThresholds = "menubar.tint"
+        public static let islandMetric = "island.metric"
+        public static let islandMetricProvider = "island.metricProvider"
         public static let showLimits = "popover.showLimits"
         public static let showForecast = "popover.showForecast"
         public static let showPerModel = "popover.showPerModel"
@@ -188,7 +196,8 @@ public final class SettingsStore: ObservableObject {
         public static let onboardingDone = "onboarding.done"
         public static let all: [String] = [
             textMode, metricSlot1, metricSlot2, metricSlot3,
-            metricProvider1, metricProvider2, metricProvider3, tintThresholds, showLimits, showForecast, showPerModel, showBurn,
+            metricProvider1, metricProvider2, metricProvider3, tintThresholds, islandMetric, islandMetricProvider,
+            showLimits, showForecast, showPerModel, showBurn,
             showStreak, showTools, showSessions, showWbm, showRival, showStatusDot,
             providerClaude, providerCodex, providerCursor, providerVscode, providerLongtail, providerCopilot, providerGemini, primaryProvider,
             warnThreshold, criticalThreshold, notifyThresholds, notifyReset, notifyForecast,

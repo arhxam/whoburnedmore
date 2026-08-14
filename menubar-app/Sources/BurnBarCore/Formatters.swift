@@ -184,7 +184,7 @@ public enum MenuBarTextMode: String, CaseIterable, Sendable {
         switch self {
         case .sessionStatus: return "Session status"
         case .todayTokens: return "Today's tokens"
-        case .limitPercent: return "Tightest limit %"
+        case .limitPercent: return "Highest usage %"
         case .todayCost: return "Today's cost"
         case .tokensPlusLimit: return "Tokens + limit"
         case .iconOnly: return "Icon only"

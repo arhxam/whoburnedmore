@@ -100,6 +100,22 @@ final class MetricSlotTests: XCTestCase {
             XCTAssertEqual(store.metricProvider1, "all")
             XCTAssertEqual(store.metricProvider2, "claude")
             XCTAssertEqual(store.metricProvider3, "codex")
+            XCTAssertEqual(store.islandMetric, .tightestLimit)
+            XCTAssertEqual(store.islandMetricProvider, "all")
+        }
+    }
+
+    func testIslandHoverMetricRoundTrip() {
+        let d = UserDefaults(suiteName: "bb-island-metric-\(UUID().uuidString)")!
+        let store = MainActor.assumeIsolated { SettingsStore(defaults: d) }
+        MainActor.assumeIsolated {
+            store.islandMetricProvider = "codex"
+            store.islandMetric = .weeklyPercent
+        }
+        let reloaded = MainActor.assumeIsolated { SettingsStore(defaults: d) }
+        MainActor.assumeIsolated {
+            XCTAssertEqual(reloaded.islandMetricProvider, "codex")
+            XCTAssertEqual(reloaded.islandMetric, .weeklyPercent)
         }
     }
 
@@ -134,7 +150,7 @@ final class MetricSlotTests: XCTestCase {
         // "all" tokens are bare; each scoped provider tags its OWN value.
         XCTAssertEqual(
             MenuBarMetric.slotsText([(.todayTokens, "all"), (.sessionPercent, "claude"), (.sessionPercent, "codex")], i),
-            "147.7M · Claude 40% · Codex 71%"
+            "147.7M · Claude 40% · Codex 29%"
         )
         // Codex today's tokens resolve from its own breakdown, tagged.
         XCTAssertEqual(MenuBarMetric.slotsText([(.todayTokens, "codex")], i), "Codex 98.6M")
@@ -152,22 +168,25 @@ final class MetricSlotTests: XCTestCase {
         XCTAssertEqual(MenuBarMetric.slotsText([(.tightestLimit, "codex")], i), "54%")
     }
 
-    func testCodexCurrentLimitSlotFallsBackToWeeklyOnlyProPayload() {
+    func testCodexMenuBarMatchesCodexRemainingPercentageForWeeklyOnlyPlans() {
         let base = inputs()
         let now = Date(timeIntervalSince1970: 2_000_000)
         let codex = MenuBarMetric.ProviderStats(
-            weeklyPercent: 100,
+            weeklyPercent: 42,
             weeklyReset: now.addingTimeInterval(6 * 86_400 + 7 * 3600)
         )
         let i = MenuBarMetric.Inputs(
-            summary: base.summary, worstPercent: 100,
+            summary: base.summary, worstPercent: 42,
             sessionPercent: nil, sessionReset: nil, sessionTokens: nil,
             weeklyPercent: nil, byProvider: ["codex": codex], now: now
         )
-        XCTAssertEqual(MenuBarMetric.slotsText([(.sessionPercent, "codex")], i), "Codex 100%")
-        XCTAssertEqual(MenuBarMetric.slotsText([(.sessionCountdown, "codex")], i), "Codex 6d 7h")
-        XCTAssertEqual(MenuBarMetric.sessionPercent.label(for: "codex"), "Current limit used")
-        XCTAssertEqual(MenuBarMetric.sessionCountdown.label(for: "codex"), "Current limit reset")
+
+        // Codex reports 42% used in its protocol but presents 58% left in its
+        // own status UI. The menu bar must match that user-facing convention.
+        XCTAssertEqual(MenuBarMetric.slotsText([(.sessionPercent, "codex")], i), "Codex 58%")
+        XCTAssertEqual(MenuBarMetric.slotsText([(.weeklyPercent, "codex")], i), "Codex 58%")
+        XCTAssertEqual(MenuBarMetric.sessionPercent.label(for: "codex"), "Current limit left")
+        XCTAssertEqual(MenuBarMetric.weeklyPercent.label(for: "codex"), "Weekly left")
     }
 
     func testProviderCapabilitiesOnlyOfferTruthfulMetrics() {
@@ -187,6 +206,8 @@ final class MetricSlotTests: XCTestCase {
         XCTAssertEqual(MenuBarMetric.sessionPercent.label(for: "claude"), "5-hour used")
         XCTAssertEqual(MenuBarMetric.sessionPercent.label(for: "cursor"), "Plan used")
         XCTAssertEqual(MenuBarMetric.creditsRemaining.label(for: "codex"), "Credits remaining")
+        XCTAssertEqual(MenuBarMetric.tightestLimit.label, "Highest usage %")
+        XCTAssertEqual(MenuBarTextMode.limitPercent.label, "Highest usage %")
     }
 
     func testCompactTokensUnitBoundaryPromotion() {

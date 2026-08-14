@@ -3,7 +3,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-[[ -d BurnBar.xcodeproj ]] || xcodegen generate >/dev/null
+# Always regenerate: XcodeGen discovers new source/test files. Reusing a stale
+# project can report green while silently omitting newly added tests.
+xcodegen generate >/dev/null
 
 LOG=$(mktemp)
 trap 'rm -f "$LOG"' EXIT

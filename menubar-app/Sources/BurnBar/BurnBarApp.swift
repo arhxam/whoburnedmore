@@ -3,36 +3,97 @@ import SwiftUI
 
 @main
 struct BurnBarApp: App {
-    @StateObject private var model: AppModel
-    @StateObject private var settings: SettingsStore
-
-    init() {
-        let s = SettingsStore()
-        _settings = StateObject(wrappedValue: s)
-        _model = StateObject(wrappedValue: AppModel(settings: s))
-    }
+    @NSApplicationDelegateAdaptor(BurnBarApplicationDelegate.self) private var appDelegate
 
     var body: some Scene {
-        MenuBarExtra {
-            PopoverView()
-                .environmentObject(model)
-                .environmentObject(settings)
-                .onAppear { Task { await model.refreshRemote() } }
-        } label: {
-            MenuBarLabel(text: model.menuBarText, state: model.meterState)
-                .environmentObject(model)
-                .environmentObject(settings)
+        Settings {
+            EmptyView()
         }
-        .menuBarExtraStyle(.window)
     }
 }
 
-/// The status-item content. Its onAppear fires exactly once at launch, which
-/// makes it the reliable place to boot the engines (App.init runs before the
-/// main actor is fully set up; onAppear is on the main actor).
+@MainActor
+final class BurnBarApplicationDelegate: NSObject, NSApplicationDelegate {
+    private var model: AppModel?
+    private var settings: SettingsStore?
+    private var updates: UpdateController?
+    private var island: IslandWindowController?
+    private var statusItem: StatusItemController?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Start update scheduling independently from window/screen setup. An
+        // unavailable display must never prevent BurnBar from staying current.
+        let updates = UpdateController.shared
+        self.updates = updates
+        let settings = SettingsStore()
+        let model = AppModel(settings: settings)
+        self.settings = settings
+        self.model = model
+
+        let env = ProcessInfo.processInfo.environment
+        if env["BURNBAR_CHECK_FOR_UPDATES_ON_LAUNCH"] == "1" {
+            DispatchQueue.main.async { updates.checkForUpdates() }
+        }
+        let requestedScreen: NSScreen? = {
+            switch env["BURNBAR_ISLAND_SCREEN"] {
+            case "notched": return NSScreen.screens.first { $0.safeAreaInsets.top > 0 }
+            case "external": return NSScreen.screens.first { $0.safeAreaInsets.top == 0 }
+            default: return IslandWindowController.screenUnderPointer()
+            }
+        }()
+        guard let island = IslandWindowController(
+            model: model,
+            settings: settings,
+            screen: requestedScreen
+        ) else { return }
+        self.island = island
+        statusItem = StatusItemController(model: model, settings: settings) { [weak island] in
+            island?.toggle(on: IslandWindowController.screenUnderPointer())
+        }
+
+        model.startIfNeeded()
+        island.showCompact()
+        island.armScreenshot()
+
+        if env["BURNBAR_DEBUG_WINDOW"] == "1" {
+            DebugWindow.show(model: model, settings: settings)
+        }
+        if env["BURNBAR_OPEN_SETTINGS"] == "1" {
+            SettingsWindow.show(model: model, settings: settings)
+        }
+        OnboardingWindow.showIfNeeded(model: model, settings: settings)
+        WindowShot.arm(envKey: "BURNBAR_SHOT_MENUBAR") { [weak model] in
+            MenuBarRenderPreview(
+                text: model?.menuBarText,
+                state: model?.meterState ?? .normal
+            )
+        }
+
+        let shouldOpenExpanded = env["BURNBAR_ISLAND_EXPANDED"] == "1"
+            || CommandLine.arguments.contains("--expanded")
+        if shouldOpenExpanded {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak island] in
+                island?.expand()
+            }
+        } else if env["BURNBAR_ISLAND_REVEALED"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak island] in
+                island?.reveal()
+            }
+        }
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        statusItem?.remove()
+        island?.tearDown()
+    }
+}
+
+/// Shared visual content for the native status item and its verification render.
 struct MenuBarLabel: View {
-    @EnvironmentObject private var model: AppModel
-    @EnvironmentObject private var settings: SettingsStore
     let text: String?
     let state: MeterState
 
@@ -42,23 +103,6 @@ struct MenuBarLabel: View {
             if let text {
                 Text(text)
                     .font(.system(size: 12, weight: .medium, design: .monospaced))
-            }
-        }
-        .onAppear {
-            model.startIfNeeded()
-            let env = ProcessInfo.processInfo.environment
-            if env["BURNBAR_DEBUG_WINDOW"] == "1" {
-                DebugWindow.show(model: model, settings: settings)
-            }
-            if env["BURNBAR_OPEN_SETTINGS"] == "1" {
-                SettingsWindow.show(model: model, settings: settings)
-            }
-            OnboardingWindow.showIfNeeded(model: model, settings: settings)
-            WindowShot.arm(envKey: "BURNBAR_SHOT_MENUBAR") { [weak model] in
-                MenuBarRenderPreview(
-                    text: model?.menuBarText,
-                    state: model?.meterState ?? .normal
-                )
             }
         }
     }

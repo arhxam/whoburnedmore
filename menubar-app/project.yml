@@ -5,6 +5,11 @@ options:
     macOS: "14.0"
   createIntermediateGroups: true
 
+packages:
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    exactVersion: 2.9.2
+
 settings:
   base:
     SWIFT_VERSION: "5.10"
@@ -26,22 +31,31 @@ targets:
   BurnBar:
     type: application
     platform: macOS
-    sources: [Sources/BurnBar]
+    sources:
+      - path: Sources/BurnBar
+      - path: ../web/src/app/apple-icon.png
+        buildPhase: resources
     dependencies:
       - target: BurnBarCore
         embed: true
+      - package: Sparkle
     info:
       path: Info.plist
       properties:
         CFBundleIdentifier: com.whoburnedmore.burnbar
         CFBundleName: BurnBar
         CFBundleDisplayName: BurnBar
-        CFBundleShortVersionString: "0.7.3"
-        CFBundleVersion: "1"
+        CFBundleShortVersionString: "0.8.0"
+        CFBundleVersion: "8000"
         CFBundleIconFile: "AppIcon"
         LSUIElement: true
         LSMinimumSystemVersion: "14.0"
         NSHumanReadableCopyright: "© 2026 whoburnedmore"
+        SUFeedURL: https://github.com/arhxam/whoburnedmore/releases/latest/download/appcast.xml
+        SUPublicEDKey: 9kMJHuWCAYyBMx48e30Xh4g7qABppEKiPkQ5rdQE9vo=
+        SUEnableAutomaticChecks: true
+        SUScheduledCheckInterval: 86400
+        SUAutomaticallyUpdate: false
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.whoburnedmore.burnbar
@@ -50,8 +64,8 @@ targets:
         # settings — not the info.properties above — so they MUST be set or the
         # bundle ships with no CFBundleShortVersionString (which also blocks
         # notarization).
-        MARKETING_VERSION: "0.7.3"
-        CURRENT_PROJECT_VERSION: "1"
+        MARKETING_VERSION: "0.8.0"
+        CURRENT_PROJECT_VERSION: "8000"
 
   BurnBarCoreTests:
     type: bundle.unit-test

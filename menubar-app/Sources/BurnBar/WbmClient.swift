@@ -1,8 +1,8 @@
 import BurnBarCore
 import Foundation
 
-/// The optional whoburnedmore strip. Standalone-first: no config file → hidden;
-/// network failure → `.offline` (burn zones are never affected).
+/// Leaderboard data for the always-present island section. Standalone-first:
+/// no config file gets a connect prompt; network failure gets an offline state.
 enum WbmState: Equatable {
     case noAccount
     case offline(handle: String)
@@ -58,7 +58,7 @@ final class WbmClient {
         return .ready(
             profile.withLeaderboardContext(
                 board.context(for: handle),
-                dailyLeader: nil
+                dailyLeader: board.dailyLeader
             )
         )
     }
@@ -66,7 +66,7 @@ final class WbmClient {
     private func fetchData(from url: URL) async -> Data? {
         var req = URLRequest(url: url)
         req.timeoutInterval = 10
-        req.setValue("burnbar/0.7.3", forHTTPHeaderField: "User-Agent")
+        req.setValue("burnbar/0.8.0", forHTTPHeaderField: "User-Agent")
         do {
             let (data, http) = try await BoundedHTTP.data(for: req, maxBytes: 2 * 1024 * 1024)
             guard http.statusCode == 200 else { return nil }

@@ -62,6 +62,11 @@ bash scripts/make-dmg.sh       # dist/BurnBar.dmg
 open dist/BurnBar.app
 ```
 
+BurnBar uses Sparkle 2 for updates. It checks once per day by default, asks
+before installing, and exposes automatic-install plus **Check for Updates…**
+controls in General Settings. See `docs/runbooks/burnbar-release.md` for the
+signed appcast and release procedure.
+
 ## Run & debug
 
 - `BURNBAR_DEBUG_WINDOW=1` opens the popover content in a floating window
@@ -70,6 +75,8 @@ open dist/BurnBar.app
   `BURNBAR_SIDECAR` / `BURNBAR_CCUSAGE` point at dev binaries;
   `BURNBAR_CACHE_DIR`, `BURNBAR_DEBOUNCE_MS`, `BURNBAR_NATIVE_POLL_MS`,
   `BURNBAR_LIMITS_POLL_MS`, and `BURNBAR_SLOW_INTERVAL_MS` tune the engine.
+- `BURNBAR_CHECK_FOR_UPDATES_ON_LAUNCH=1` exercises Sparkle's foreground
+  update-check path for release verification.
 - Menu bar items are source-first (Overall / Claude / Codex / other providers),
   and only offer metrics that source can truthfully provide. Notification,
   Claude-limit, and launch-at-login permissions are explicit in Settings.
@@ -89,12 +96,13 @@ bash scripts/run-swift-tests.sh      # BurnBarCore: formatters, meter states, de
 `scripts/check-codex-limits.sh` · `scripts/check-launch.sh` ·
 `scripts/debug-window-shot.sh [--offline]`
 
-## Not in this round
+## Distribution status
 
-Notarization, Sparkle auto-update, Homebrew cask, in-app sign-in. Cursor plan
-limits and manual `sync` (submit) exist in the sidecar (see Protocol above) but
-have no Swift UI yet — BurnBar.app still relies on the CLI's launchd job for
-routine submission.
+Developer ID signing, notarization, a stapled DMG, and Sparkle auto-update are
+part of the release path. A Homebrew cask is not currently provided. BurnBar
+performs its own opt-in live leaderboard sync through the sidecar while agents
+are active, throttled to at most twice per minute. The CLI launchd job remains
+a slower independent convergence path, not BurnBar's primary live path.
 
 ## First run & how BurnBar connects to whoburnedmore
 

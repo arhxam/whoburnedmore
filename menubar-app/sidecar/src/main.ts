@@ -22,7 +22,7 @@ import { summarize } from "./summarize.js";
 import { runSync } from "./sync.js";
 import { runWatch } from "./watch.js";
 
-const VERSION = "0.7.3";
+const VERSION = "0.8.0";
 
 async function snapshot(): Promise<void> {
   const [native, slow] = await Promise.all([

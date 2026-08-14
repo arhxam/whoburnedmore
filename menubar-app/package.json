@@ -6,7 +6,8 @@
   "description": "BurnBar — native macOS menu bar app for live AI token burn + usage limits. Swift shell + bun-compiled sidecar.",
   "scripts": {
     "build:sidecar": "bun build --compile --outfile sidecar/dist/burnbar-sidecar sidecar/src/main.ts",
-    "test": "vitest run --root sidecar"
+    "test": "vitest run --root sidecar && node --test scripts/test/*.test.mjs",
+    "update:test": "node --test scripts/test/*.test.mjs"
   },
   "dependencies": {
     "ccusage": "20.0.19",

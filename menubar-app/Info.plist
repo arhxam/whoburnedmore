@@ -8,6 +8,8 @@
 	<string>BurnBar</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.whoburnedmore.burnbar</string>
 	<key>CFBundleInfoDictionaryVersion</key>
@@ -17,16 +19,24 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.7.3</string>
+	<string>0.8.0</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
-	<key>CFBundleIconFile</key>
-	<string>AppIcon</string>
+	<string>8000</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSHumanReadableCopyright</key>
 	<string>© 2026 whoburnedmore</string>
+	<key>SUAutomaticallyUpdate</key>
+	<false/>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUFeedURL</key>
+	<string>https://github.com/arhxam/whoburnedmore/releases/latest/download/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>9kMJHuWCAYyBMx48e30Xh4g7qABppEKiPkQ5rdQE9vo=</string>
+	<key>SUScheduledCheckInterval</key>
+	<integer>86400</integer>
 </dict>
 </plist>

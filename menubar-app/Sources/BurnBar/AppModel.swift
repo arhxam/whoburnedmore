@@ -286,21 +286,32 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private var metricInputs: MenuBarMetric.Inputs {
+        .init(
+            summary: summary,
+            worstPercent: worstPercent,
+            sessionPercent: sessionPercent,
+            sessionReset: sessionReset,
+            sessionTokens: sessionTokens,
+            weeklyPercent: weeklyPercent,
+            weeklyReset: weeklyReset,
+            byProvider: byProviderStats
+        )
+    }
+
     var menuBarText: String? {
         MenuBarMetric.slotsText(
             [(settings.metricSlot1, settings.metricProvider1),
              (settings.metricSlot2, settings.metricProvider2),
              (settings.metricSlot3, settings.metricProvider3)],
-            .init(
-                summary: summary,
-                worstPercent: worstPercent,
-                sessionPercent: sessionPercent,
-                sessionReset: sessionReset,
-                sessionTokens: sessionTokens,
-                weeklyPercent: weeklyPercent,
-                weeklyReset: weeklyReset,
-                byProvider: byProviderStats
-            )
+            metricInputs
+        )
+    }
+
+    var islandMetricText: String? {
+        MenuBarMetric.slotsText(
+            [(settings.islandMetric, settings.islandMetricProvider)],
+            metricInputs
         )
     }
 

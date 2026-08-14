@@ -17,9 +17,11 @@ enum SettingsWindow {
             window.makeKeyAndOrderFront(nil)
             return
         }
-        let hosting = NSHostingController(
-            rootView: SettingsRootView().environmentObject(model).environmentObject(settings)
-        )
+        let updates = UpdateController.shared
+        let hosting = NSHostingController(rootView: SettingsRootView()
+            .environmentObject(model)
+            .environmentObject(settings)
+            .environmentObject(updates))
         hosting.sizingOptions = []  // see DebugWindow: sizing negotiation loops
         let w = NSWindow(contentViewController: hosting)
         w.title = "BurnBar Settings"
@@ -32,7 +34,13 @@ enum SettingsWindow {
         w.makeKeyAndOrderFront(nil)
         window = w
         logFrame(w)
-        WindowShot.arm { SettingsRootView(renderStatic: true).environmentObject(model).environmentObject(settings).frame(width: 720, height: 520).environment(\.colorScheme, .dark).background(Color(red: 0.11, green: 0.11, blue: 0.125)) }
+        WindowShot.arm { SettingsRootView(renderStatic: true)
+            .environmentObject(model)
+            .environmentObject(settings)
+            .environmentObject(updates)
+            .frame(width: 720, height: 520)
+            .environment(\.colorScheme, .dark)
+            .background(Color(red: 0.11, green: 0.11, blue: 0.125)) }
     }
 
     /// Center on the ACTIVE screen — the one containing the mouse pointer.
@@ -119,7 +127,10 @@ struct SettingsRootView: View {
                     .buttonStyle(.plain)
                 }
                 Spacer()
-                Text("BurnBar 0.7.3").font(.caption2).foregroundStyle(.tertiary).padding(.leading, 8)
+                Text(bundleVersion.displayName)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .padding(.leading, 8)
             }
             .padding(10)
             .frame(width: 170)
@@ -137,6 +148,13 @@ struct SettingsRootView: View {
             }
         }
         .frame(minWidth: 720, minHeight: 520)
+    }
+
+    private var bundleVersion: BundleVersionPresentation {
+        BundleVersionPresentation(
+            marketingVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+            buildVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+        )
     }
 
     private var paneContent: some View {
@@ -172,6 +190,7 @@ private struct SectionHeader: View {
 struct GeneralPane: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var settings: SettingsStore
+    @EnvironmentObject private var updates: UpdateController
     @State private var launchAtLogin = LaunchAtLogin.isEnabled
 
     var body: some View {
@@ -184,6 +203,23 @@ struct GeneralPane: View {
                 }
             Text("Off by default. Enable it to keep token history continuous after a Mac restart.")
                 .font(.caption).foregroundStyle(.secondary)
+
+            SectionHeader("Updates")
+            Toggle("Automatically check for updates", isOn: Binding(
+                get: { updates.automaticallyChecksForUpdates },
+                set: { updates.setAutomaticallyChecksForUpdates($0) }
+            ))
+            Toggle("Download and install updates automatically", isOn: Binding(
+                get: { updates.automaticallyDownloadsUpdates },
+                set: { updates.setAutomaticallyDownloadsUpdates($0) }
+            ))
+            .disabled(!updates.allowsAutomaticUpdates)
+            Button("Check for Updates…") { updates.checkForUpdates() }
+                .disabled(!updates.canCheckForUpdates)
+            Text("Checks at most once per day. BurnBar asks before installing unless automatic updates are enabled.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
             SectionHeader("Permissions")
             Toggle("Claude limits access", isOn: Binding(
@@ -271,6 +307,12 @@ struct MenuBarPane: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
+            SectionHeader("Dynamic Island hover")
+            slotRow("Value revealed under the camera", metric: $settings.islandMetric, provider: $settings.islandMetricProvider, allowNone: true)
+            Text("Nothing is permanently added beside the camera. Move the pointer under it to reveal this one value, then click the camera area to open BurnBar.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
             SectionHeader("Menu bar items — choose each source and value")
             slotRow("Item 1", metric: $settings.metricSlot1, provider: $settings.metricProvider1, allowNone: false)
             slotRow("Item 2", metric: $settings.metricSlot2, provider: $settings.metricProvider2, allowNone: true)
@@ -292,7 +334,7 @@ struct PopoverPane: View {
     @EnvironmentObject private var settings: SettingsStore
 
     private let providers: [(String, String)] = [
-        ("tightest", "Tightest window (auto)"), ("none", "None — just the rings"),
+        ("tightest", "Highest usage (auto)"), ("none", "None — just the rings"),
         ("provider:claude", "Claude"), ("provider:codex", "Codex"),
         ("provider:cursor", "Cursor"), ("provider:copilot", "Copilot"), ("provider:gemini", "Gemini"),
     ]
@@ -307,7 +349,7 @@ struct PopoverPane: View {
                 ForEach(providers, id: \.0) { Text($0.1).tag($0.0) }
             }
             .labelsHidden().frame(maxWidth: 260)
-            Text("Pin one provider as a large hero ring, let it auto-follow whichever window is tightest, or drop it for a clean row of rings.")
+            Text("Pin one provider as a large hero ring, let it auto-follow the most-used window, or drop it for a clean row of rings.")
                 .font(.caption2).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
 
             SectionHeader("Sections — changes apply instantly")

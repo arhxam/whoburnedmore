@@ -94,7 +94,7 @@ struct HeroRing: View {
                 VStack(spacing: 0) {
                     Text(m?.percent.map { "\(Int($0.rounded()))%" } ?? "—")
                         .font(.system(size: 25, weight: .heavy, design: .rounded)).foregroundStyle(color)
-                    Text(settings.primaryProvider == "tightest" ? "tightest" : "primary")
+                    Text(settings.primaryProvider == "tightest" ? "highest usage" : "primary")
                         .font(.system(size: 8, weight: .semibold)).foregroundStyle(.secondary)
                         .textCase(.uppercase).tracking(0.6)
                 }
@@ -335,8 +335,7 @@ struct ToolsZone: View {
         VStack(alignment: .leading, spacing: 5) {
             Text("Top tools today").font(.caption).foregroundStyle(.secondary).textCase(.uppercase)
             if let s = model.summary {
-                let all = s.byToolToday.isEmpty ? s.byTool14d : s.byToolToday
-                let rows = all.filter { settings.providerEnabled($0.tool) }
+                let rows = s.byToolToday.filter { settings.providerEnabled($0.tool) }
                 if rows.isEmpty {
                     Text("No usage yet today").font(.caption).foregroundStyle(.secondary)
                 }
