@@ -38,7 +38,9 @@ try {
   validateReleaseVersionSources(project.marketingVersion, {
     infoPlist: fs.readFileSync("Info.plist", "utf8"),
     webPage: fs.readFileSync("../web/src/app/app/page.tsx", "utf8"),
+    campaign: fs.readFileSync("../web/src/lib/burnbar-campaign.ts", "utf8"),
     wbmClient: fs.readFileSync("Sources/BurnBar/WbmClient.swift", "utf8"),
+    deviceFlow: fs.readFileSync("Sources/BurnBar/DeviceFlow.swift", "utf8"),
     sidecarMain: fs.readFileSync("sidecar/src/main.ts", "utf8"),
     sidecarSync: fs.readFileSync("sidecar/src/sync.ts", "utf8"),
   });

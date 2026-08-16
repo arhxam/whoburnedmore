@@ -151,6 +151,7 @@ final class IslandWindowController: NSObject {
         withAnimation {
             presentation.state = next
         }
+        refreshPointerTimer()
 
         switch next {
         case .dormant:
@@ -221,10 +222,7 @@ final class IslandWindowController: NSObject {
                 Task { @MainActor [weak self] in self?.handleGlobalEvent(event) }
             }
 
-            pointerTimer = Timer.scheduledTimer(withTimeInterval: 0.03, repeats: true) { [weak self] _ in
-                Task { @MainActor [weak self] in self?.samplePointerAndButton() }
-            }
-            if let pointerTimer { RunLoop.main.add(pointerTimer, forMode: .common) }
+            refreshPointerTimer()
 
             localClickMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
                 guard let self,
@@ -240,6 +238,23 @@ final class IslandWindowController: NSObject {
             self?.apply(.escape, on: nil)
             return nil
         }
+    }
+
+    private func refreshPointerTimer() {
+        pointerTimer?.invalidate()
+        pointerTimer = nil
+        guard ProcessInfo.processInfo.environment["BURNBAR_ISLAND_DISABLE_AUTO_COLLAPSE"] != "1",
+              let interval = PointerSamplingPolicy.interval(for: presentation.state) else { return }
+
+        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
+            // This timer is installed only on the main run loop. Avoid creating
+            // a new unstructured Task on every pointer sample.
+            MainActor.assumeIsolated {
+                self?.samplePointerAndButton()
+            }
+        }
+        pointerTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     private func handleGlobalEvent(_: NSEvent) {

@@ -73,15 +73,15 @@ public final class SettingsStore: ObservableObject {
         // Default: NO hero — just the clean rings row. The big summary ring is
         // opt-in (Settings → Popover → Primary).
         primaryProvider = d.string(forKey: Keys.primaryProvider) ?? "none"
-        warnThreshold = Self.double(d, Keys.warnThreshold, 80)
-        criticalThreshold = Self.double(d, Keys.criticalThreshold, 95)
+        warnThreshold = Self.normalizedWarnThreshold(Self.double(d, Keys.warnThreshold, 80))
+        criticalThreshold = Self.normalizedCriticalThreshold(Self.double(d, Keys.criticalThreshold, 95))
         notifyThresholds = Self.bool(d, Keys.notifyThresholds, true)
         notifyReset = Self.bool(d, Keys.notifyReset, true)
         notifyForecast = Self.bool(d, Keys.notifyForecast, true)
         notifyOvertaken = Self.bool(d, Keys.notifyOvertaken, false)
         digestEnabled = Self.bool(d, Keys.digestEnabled, false)
-        digestHour = Int(Self.double(d, Keys.digestHour, 21))
-        limitsRefreshSeconds = Int(Self.double(d, Keys.limitsRefresh, 60))
+        digestHour = Self.normalizedDigestHour(Self.double(d, Keys.digestHour, 21))
+        limitsRefreshSeconds = Self.normalizedRefreshSeconds(Self.double(d, Keys.limitsRefresh, 60))
         syncEnabled = Self.bool(d, Keys.syncEnabled, false)
         // Fresh installs must opt in. Completed v0.6 users retain the behavior
         // they already had so an update does not silently disable their limits.
@@ -211,5 +211,31 @@ public final class SettingsStore: ObservableObject {
     }
     private static func double(_ d: UserDefaults, _ key: String, _ def: Double) -> Double {
         d.object(forKey: key) == nil ? def : d.double(forKey: key)
+    }
+
+    private static func nearest(_ value: Double, supported: [Double], fallback: Double) -> Double {
+        guard value.isFinite else { return fallback }
+        return supported.min {
+            let left = abs($0 - value)
+            let right = abs($1 - value)
+            return left == right ? $0 < $1 : left < right
+        } ?? fallback
+    }
+
+    static func normalizedRefreshSeconds(_ value: Double) -> Int {
+        guard value > 0 else { return 60 }
+        return Int(nearest(value, supported: [60, 120, 300], fallback: 60))
+    }
+
+    static func normalizedWarnThreshold(_ value: Double) -> Double {
+        nearest(value, supported: [60, 70, 75, 80, 85], fallback: 80)
+    }
+
+    static func normalizedCriticalThreshold(_ value: Double) -> Double {
+        nearest(value, supported: [85, 90, 95, 98], fallback: 95)
+    }
+
+    static func normalizedDigestHour(_ value: Double) -> Int {
+        Int(nearest(value, supported: [18, 19, 20, 21, 22], fallback: 21))
     }
 }

@@ -132,7 +132,9 @@ test("requires every distributed version string to match the project version", (
   const matching = {
     infoPlist: "<key>CFBundleShortVersionString</key><string>0.8.0</string>",
     webPage: 'const APP_VERSION = "0.8.0";',
+    campaign: 'export const BURNBAR_VERSION = "0.8.0";',
     wbmClient: 'req.setValue("burnbar/0.8.0", forHTTPHeaderField: "User-Agent")',
+    deviceFlow: 'req.setValue("burnbar/0.8.0", forHTTPHeaderField: "User-Agent")',
     sidecarMain: 'const VERSION = "0.8.0";',
     sidecarSync: 'const SIDECAR_CLI_VERSION = "burnbar-0.8.0";',
   };
@@ -140,5 +142,13 @@ test("requires every distributed version string to match the project version", (
   assert.throws(
     () => validateReleaseVersionSources("0.8.0", { ...matching, sidecarMain: 'const VERSION = "0.7.3";' }),
     /sidecar main.*0\.8\.0/i
+  );
+  assert.throws(
+    () => validateReleaseVersionSources("0.8.0", { ...matching, campaign: 'export const BURNBAR_VERSION = "0.7.3";' }),
+    /campaign.*0\.8\.0/i
+  );
+  assert.throws(
+    () => validateReleaseVersionSources("0.8.0", { ...matching, deviceFlow: 'burnbar/0.2.0' }),
+    /DeviceFlow.*0\.8\.0/i
   );
 });

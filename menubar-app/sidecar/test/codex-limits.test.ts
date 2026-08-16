@@ -1,9 +1,10 @@
-import { mkdtempSync, mkdirSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
+  CodexLimitsReader,
   newestSessionFiles,
   parseCodexLimitLines,
   readCodexLimits,
@@ -243,5 +244,77 @@ describe("codex-limits parsing", () => {
     expect(reconciled.present).toBe(true);
     expect(reconciled.secondary?.usedPercent).toBe(0);
     expect(reconciled.secondary?.resetsAt).toBeNull();
+  });
+
+  it("codex-limits: stateful reader reparses only changed rollout files", () => {
+    const root = mkdtempSync(join(tmpdir(), "bb-codex-reader-cache-"));
+    const dayDir = join(root, "sessions", "2026", "08", "02");
+    mkdirSync(dayDir, { recursive: true });
+    const file = join(dayDir, "rollout-live.jsonl");
+    writeFileSync(file, POPULATED + "\n");
+    const readFile = vi.fn((path: string) =>
+      parseCodexLimitLines(readFileSync(path, "utf8").split("\n")),
+    );
+    const reader = new CodexLimitsReader(
+      { CODEX_HOME: root } as NodeJS.ProcessEnv,
+      { discoveryIntervalMs: 30_000, readFile },
+    );
+    const now = new Date("2026-08-02T10:30:00.000Z").getTime();
+
+    expect(reader.read(now).planType).toBe("plus");
+    expect(reader.read(now + 1).planType).toBe("plus");
+    expect(readFile).toHaveBeenCalledTimes(1);
+
+    appendFileSync(
+      file,
+      POPULATED.replace("2026-08-02T10:00:00.000Z", "2026-08-02T10:01:00.000Z") + "\n",
+    );
+    expect(reader.read(now + 2).capturedAt).toBe("2026-08-02T10:01:00.000Z");
+    expect(readFile).toHaveBeenCalledTimes(2);
+  });
+
+  it("codex-limits: retries a transient read failure with unchanged metadata", () => {
+    const root = mkdtempSync(join(tmpdir(), "bb-codex-reader-retry-"));
+    const dayDir = join(root, "sessions", "2026", "08", "02");
+    mkdirSync(dayDir, { recursive: true });
+    const file = join(dayDir, "rollout-live.jsonl");
+    writeFileSync(file, POPULATED + "\n");
+    const readFile = vi.fn((path: string) =>
+      parseCodexLimitLines(readFileSync(path, "utf8").split("\n")),
+    );
+    readFile.mockImplementationOnce(() => {
+      throw new Error("transient open failure");
+    });
+    const reader = new CodexLimitsReader(
+      { CODEX_HOME: root } as NodeJS.ProcessEnv,
+      { discoveryIntervalMs: 30_000, readFile },
+    );
+    const now = new Date("2026-08-02T10:30:00.000Z").getTime();
+
+    expect(reader.read(now).present).toBe(false);
+    expect(reader.read(now + 1).planType).toBe("plus");
+    expect(readFile).toHaveBeenCalledTimes(2);
+  });
+
+  it("codex-limits: forced discovery finds a newly-created rollout immediately", () => {
+    const root = mkdtempSync(join(tmpdir(), "bb-codex-reader-discovery-"));
+    const dayDir = join(root, "sessions", "2026", "08", "02");
+    mkdirSync(dayDir, { recursive: true });
+    writeFileSync(join(dayDir, "rollout-old.jsonl"), POPULATED + "\n");
+    const reader = new CodexLimitsReader(
+      { CODEX_HOME: root } as NodeJS.ProcessEnv,
+      { discoveryIntervalMs: 30_000 },
+    );
+    const now = new Date("2026-08-02T10:30:00.000Z").getTime();
+    expect(reader.read(now).capturedAt).toBe("2026-08-02T10:00:00.000Z");
+
+    const newest = POPULATED
+      .replace("2026-08-02T10:00:00.000Z", "2026-08-02T10:05:00.000Z")
+      .replace('"used_percent":62.5', '"used_percent":88');
+    writeFileSync(join(dayDir, "rollout-new.jsonl"), newest + "\n");
+
+    expect(reader.read(now + 1).capturedAt).toBe("2026-08-02T10:00:00.000Z");
+    expect(reader.read(now + 2, true).capturedAt).toBe("2026-08-02T10:05:00.000Z");
+    expect(reader.read(now + 3).primary?.usedPercent).toBe(88);
   });
 });

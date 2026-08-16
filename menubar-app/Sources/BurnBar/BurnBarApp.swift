@@ -87,6 +87,7 @@ final class BurnBarApplicationDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        model?.stop()
         statusItem?.remove()
         island?.tearDown()
     }

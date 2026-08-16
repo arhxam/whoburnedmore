@@ -12,11 +12,10 @@
  *  - collectSlow(): the long-tail tier on a timer — every ccusage source plus
  *    the Cursor dashboard API (network) — merged over the latest native tier.
  */
-import { execFile } from "node:child_process";
+import { execFile, type ChildProcess } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { promisify } from "node:util";
 
 import type { DailyUsageEntry, SessionEntry } from "../../../src/shared.js";
 
@@ -46,7 +45,15 @@ import {
 } from "../../../src/native/vscode-agents.js";
 import { loadLivePricing } from "../../../src/pricing-live.js";
 
-const execFileAsync = promisify(execFile);
+const activeCollectorProcesses = new Set<ChildProcess>();
+
+/** Watch mode owns every parser it starts. Termination must not leave a CPU-
+ * intensive ccusage scan reparented and running after the menu-bar app exits. */
+export function terminateCollectorProcesses(): void {
+  for (const child of activeCollectorProcesses) {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+  }
+}
 
 const EMPTY_NATIVE: NativeCollectResult = { entries: [], found: false, filesScanned: 0 };
 type FastCodexResult = { result: NativeCollectResult; replayAware: boolean };
@@ -153,8 +160,8 @@ async function runCcusageBinary(
   args: string[],
   env?: NodeJS.ProcessEnv,
 ): Promise<unknown | null> {
-  try {
-    const { stdout } = await execFileAsync(
+  return await new Promise((resolve) => {
+    const child = execFile(
       command.cmd,
       [...command.prefixArgs, ...args],
       {
@@ -163,11 +170,21 @@ async function runCcusageBinary(
         timeout: 25_000,
         ...(env ? { env: { ...process.env, ...env } } : {}),
       },
+      (error, stdout) => {
+        activeCollectorProcesses.delete(child);
+        if (error) {
+          resolve(null);
+          return;
+        }
+        try {
+          resolve(stdout ? JSON.parse(stdout) : null);
+        } catch {
+          resolve(null);
+        }
+      },
     );
-    return stdout ? JSON.parse(stdout) : null;
-  } catch {
-    return null;
-  }
+    activeCollectorProcesses.add(child);
+  });
 }
 
 /**

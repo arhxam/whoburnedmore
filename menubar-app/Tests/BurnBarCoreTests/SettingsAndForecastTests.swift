@@ -100,6 +100,61 @@ final class SettingsStoreTests: XCTestCase {
         s.providerVscode = true
         XCTAssertTrue(s.providerEnabled("roo"))
     }
+
+    func testPersistedNumericPreferencesAreNormalizedToSupportedValues() {
+        XCTAssertEqual(SettingsStore.normalizedRefreshSeconds(119), 120)
+        XCTAssertEqual(SettingsStore.normalizedRefreshSeconds(90), 60)
+        XCTAssertEqual(SettingsStore.normalizedRefreshSeconds(0), 60)
+        XCTAssertEqual(SettingsStore.normalizedRefreshSeconds(-500), 60)
+        XCTAssertEqual(SettingsStore.normalizedRefreshSeconds(.nan), 60)
+
+        XCTAssertEqual(SettingsStore.normalizedWarnThreshold(73), 75)
+        XCTAssertEqual(SettingsStore.normalizedWarnThreshold(72.5), 70)
+        XCTAssertEqual(SettingsStore.normalizedWarnThreshold(.infinity), 80)
+        XCTAssertEqual(SettingsStore.normalizedCriticalThreshold(97), 98)
+        XCTAssertEqual(SettingsStore.normalizedCriticalThreshold(87.5), 85)
+        XCTAssertEqual(SettingsStore.normalizedCriticalThreshold(-1), 85)
+        XCTAssertEqual(SettingsStore.normalizedDigestHour(17), 18)
+        XCTAssertEqual(SettingsStore.normalizedDigestHour(20.6), 21)
+        XCTAssertEqual(SettingsStore.normalizedDigestHour(19.5), 19)
+        XCTAssertEqual(SettingsStore.normalizedDigestHour(.nan), 21)
+    }
+
+    func testSettingsStoreLoadsOnlySafeRefreshAndNotificationValues() {
+        let d = freshDefaults()
+        d.set(119.0, forKey: SettingsStore.Keys.limitsRefresh)
+        d.set(73.0, forKey: SettingsStore.Keys.warnThreshold)
+        d.set(97.0, forKey: SettingsStore.Keys.criticalThreshold)
+        d.set(20.6, forKey: SettingsStore.Keys.digestHour)
+
+        let settings = SettingsStore(defaults: d)
+        XCTAssertEqual(settings.limitsRefreshSeconds, 120)
+        XCTAssertEqual(settings.warnThreshold, 75)
+        XCTAssertEqual(settings.criticalThreshold, 98)
+        XCTAssertEqual(settings.digestHour, 21)
+    }
+
+    func testSettingsStoreRepairsPersistedZeroNegativeAndNonFiniteValues() {
+        let cases: [(Double, Int, Double, Double, Int)] = [
+            (0, 60, 60, 85, 18),
+            (-500, 60, 60, 85, 18),
+            (.nan, 60, 80, 95, 21),
+            (.infinity, 60, 80, 95, 21),
+        ]
+        for (stored, refresh, warn, critical, digest) in cases {
+            let d = freshDefaults()
+            d.set(stored, forKey: SettingsStore.Keys.limitsRefresh)
+            d.set(stored, forKey: SettingsStore.Keys.warnThreshold)
+            d.set(stored, forKey: SettingsStore.Keys.criticalThreshold)
+            d.set(stored, forKey: SettingsStore.Keys.digestHour)
+
+            let settings = SettingsStore(defaults: d)
+            XCTAssertEqual(settings.limitsRefreshSeconds, refresh)
+            XCTAssertEqual(settings.warnThreshold, warn)
+            XCTAssertEqual(settings.criticalThreshold, critical)
+            XCTAssertEqual(settings.digestHour, digest)
+        }
+    }
 }
 
 final class ForecastTests: XCTestCase {
@@ -192,6 +247,19 @@ final class LiveSyncThrottleTests: XCTestCase {
         throttle.markSynced(tokens: 50)
         throttle.observe(tokens: 50)
         XCTAssertNil(throttle.beginIfDue(now: now.addingTimeInterval(60)))
+    }
+}
+
+final class BackgroundActivityPolicyTests: XCTestCase {
+    func testSyncPollingSleepsOnlyWhenTheUserEnabledLiveSync() {
+        XCTAssertNil(BackgroundActivityPolicy.syncPollInterval(syncEnabled: false))
+        XCTAssertEqual(BackgroundActivityPolicy.syncPollInterval(syncEnabled: true), 5)
+    }
+
+    func testEqualPublishedValuesDoNotInvalidateTheUI() {
+        XCTAssertFalse(PublishedValuePolicy.shouldPublish(current: 10, incoming: 10))
+        XCTAssertTrue(PublishedValuePolicy.shouldPublish(current: 10, incoming: 11))
+        XCTAssertTrue(PublishedValuePolicy.shouldPublish(current: nil as Int?, incoming: 10))
     }
 }
 

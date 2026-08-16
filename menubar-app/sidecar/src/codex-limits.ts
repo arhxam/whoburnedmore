@@ -149,7 +149,7 @@ function readLatestLimitFromFile(file: string): CodexLimits {
       const bytesRead = readSync(fd, buffer, 0, buffer.length, start);
       // A rollout can vanish or be replaced between stat() and read(). Never
       // decode the unread portion of an unsafe buffer; retry on the next poll.
-      if (bytesRead !== buffer.length) return EMPTY;
+      if (bytesRead !== buffer.length) throw new Error("short rollout read");
       const text = buffer.toString("utf8") + suffix;
       const lines = text.split("\n");
       suffix = start > 0 ? (lines.shift() ?? "") : "";
@@ -160,8 +160,6 @@ function readLatestLimitFromFile(file: string): CodexLimits {
       end = start;
     }
     if (suffix) return parseCodexLimitLines([suffix]);
-  } catch {
-    /* raced/unreadable file */
   } finally {
     if (fd !== null) {
       try {
@@ -172,6 +170,111 @@ function readLatestLimitFromFile(file: string): CodexLimits {
     }
   }
   return EMPTY;
+}
+
+export interface CodexLimitsReaderOptions {
+  discoveryIntervalMs?: number;
+  readFile?: (file: string) => CodexLimits;
+}
+
+interface CachedLimitFile {
+  size: number;
+  mtimeMs: number;
+  limits: CodexLimits;
+}
+
+/**
+ * Stateful watch-mode reader. Directory discovery is expensive on a mature
+ * Codex history and tail parsing is unnecessary when a rollout did not change,
+ * so both layers are cached independently. An FSEvent can force discovery when
+ * a new rollout appears; the fallback interval covers missed events.
+ */
+export class CodexLimitsReader {
+  private readonly discoveryIntervalMs: number;
+  private readonly readFile: (file: string) => CodexLimits;
+  private candidates: string[] | null = null;
+  private lastDiscoveryAt: number | null = null;
+  private readonly parsed = new Map<string, CachedLimitFile>();
+
+  constructor(
+    private readonly env: NodeJS.ProcessEnv = process.env,
+    options: CodexLimitsReaderOptions = {},
+  ) {
+    const configured = options.discoveryIntervalMs ?? 30_000;
+    this.discoveryIntervalMs = Number.isFinite(configured) && configured >= 0
+      ? configured
+      : 30_000;
+    this.readFile = options.readFile ?? readLatestLimitFromFile;
+  }
+
+  read(now: number = Date.now(), forceDiscover = false): CodexLimits {
+    if (
+      forceDiscover ||
+      this.candidates === null ||
+      this.lastDiscoveryAt === null ||
+      now - this.lastDiscoveryAt >= this.discoveryIntervalMs
+    ) {
+      this.discover(now);
+    }
+
+    let latest: CodexLimits | null = null;
+    let latestCapturedAt = Number.NEGATIVE_INFINITY;
+    for (const file of this.candidates ?? []) {
+      let size: number;
+      let mtimeMs: number;
+      try {
+        const stat = statSync(file);
+        size = stat.size;
+        mtimeMs = stat.mtimeMs;
+      } catch {
+        this.parsed.delete(file);
+        continue;
+      }
+
+      const cached = this.parsed.get(file);
+      const limits = cached && cached.size === size && cached.mtimeMs === mtimeMs
+        ? cached.limits
+        : this.readAndCache(file, size, mtimeMs);
+      if (!limits.present) continue;
+      const capturedAt = limits.capturedAt === null
+        ? Number.NEGATIVE_INFINITY
+        : Date.parse(limits.capturedAt);
+      if (latest === null || (Number.isFinite(capturedAt) && capturedAt > latestCapturedAt)) {
+        latest = limits;
+        if (Number.isFinite(capturedAt)) latestCapturedAt = capturedAt;
+      }
+    }
+    return latest ? reconcileCodexLimits(null, latest, now) : EMPTY;
+  }
+
+  private discover(now: number): void {
+    try {
+      this.candidates = resolveCodexSessionsDirs(this.env).flatMap((root) =>
+        newestSessionFiles(root, 20),
+      );
+    } catch {
+      this.candidates = [];
+    }
+    this.lastDiscoveryAt = now;
+    const retained = new Set(this.candidates);
+    for (const file of this.parsed.keys()) {
+      if (!retained.has(file)) this.parsed.delete(file);
+    }
+  }
+
+  private readAndCache(file: string, size: number, mtimeMs: number): CodexLimits {
+    try {
+      const limits = this.readFile(file);
+      this.parsed.set(file, { size, mtimeMs, limits });
+      return limits;
+    } catch {
+      // Keep transient open/short-read failures retryable even when the file's
+      // metadata has not advanced. A valid file with no rate-limit event still
+      // returns and caches EMPTY through the normal path above.
+      this.parsed.delete(file);
+      return EMPTY;
+    }
+  }
 }
 
 function clearExpiredWindow(window: WindowLimit | null, now: number): WindowLimit | null {
@@ -243,26 +346,5 @@ export function readCodexLimits(
   env: NodeJS.ProcessEnv = process.env,
   now: number = Date.now(),
 ): CodexLimits {
-  try {
-    let latest: CodexLimits | null = null;
-    let latestCapturedAt = Number.NEGATIVE_INFINITY;
-    const files = resolveCodexSessionsDirs(env).flatMap((root) =>
-      newestSessionFiles(root, 20),
-    );
-    for (const file of files) {
-      const limits = readLatestLimitFromFile(file);
-      if (!limits.present) continue;
-      const capturedAt = limits.capturedAt === null ? Number.NEGATIVE_INFINITY : Date.parse(limits.capturedAt);
-      if (latest === null || (Number.isFinite(capturedAt) && capturedAt > latestCapturedAt)) {
-        latest = limits;
-        latestCapturedAt = Number.isFinite(capturedAt) ? capturedAt : latestCapturedAt;
-      }
-    }
-    if (latest) {
-      return reconcileCodexLimits(null, latest, now);
-    }
-  } catch {
-    /* missing dir / unreadable — fall through */
-  }
-  return EMPTY;
+  return new CodexLimitsReader(env, { discoveryIntervalMs: 0 }).read(now, true);
 }

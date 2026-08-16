@@ -45,6 +45,7 @@ final class AppModel: ObservableObject {
     private var statusTask: Task<Void, Never>?
     private var digestTask: Task<Void, Never>?
     private var syncTask: Task<Void, Never>?
+    private var activeSyncProcess: Process?
     /// Upload at most twice a minute while local totals keep changing. This is
     /// a fixed-window throttle, so a long agent turn cannot defer the website
     /// update until the turn ends.
@@ -345,12 +346,7 @@ final class AppModel: ObservableObject {
                 try? await Task.sleep(for: .seconds(60 * 10))
             }
         }
-        syncTask = Task { [weak self] in
-            while !Task.isCancelled {
-                await self?.maybeSync()
-                try? await Task.sleep(for: .seconds(5))
-            }
-        }
+        refreshSyncTask()
 
         wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
@@ -367,7 +363,14 @@ final class AppModel: ObservableObject {
     }
 
     func stop() {
+        started = false
         for t in [pollTask, statusTask, digestTask, syncTask] { t?.cancel() }
+        pollTask = nil
+        statusTask = nil
+        digestTask = nil
+        syncTask = nil
+        if activeSyncProcess?.isRunning == true { activeSyncProcess?.terminate() }
+        activeSyncProcess = nil
         if let wakeObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
             self.wakeObserver = nil
@@ -397,10 +400,31 @@ final class AppModel: ObservableObject {
     func setLeaderboardSyncEnabled(_ enabled: Bool) {
         settings.syncEnabled = enabled
         leaderboardSyncState = enabled ? .waiting : .off
+        refreshSyncTask()
         if enabled {
             Task { await syncLeaderboardNow() }
         } else {
+            if activeSyncProcess?.isRunning == true { activeSyncProcess?.terminate() }
+            activeSyncProcess = nil
             wbmState = .noAccount
+        }
+    }
+
+    private func refreshSyncTask() {
+        syncTask?.cancel()
+        syncTask = nil
+        guard let interval = BackgroundActivityPolicy.syncPollInterval(
+            syncEnabled: settings.syncEnabled
+        ) else { return }
+        syncTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .seconds(interval))
+                } catch {
+                    return
+                }
+                await self?.maybeSync()
+            }
         }
     }
 
@@ -561,11 +585,19 @@ final class AppModel: ObservableObject {
                 let text = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
                 continuation.resume(returning: (finished.terminationStatus == 0, text))
             }
+            activeSyncProcess = p
             do {
                 try p.run()
             } catch {
                 continuation.resume(returning: (false, error.localizedDescription))
             }
+        }
+        guard activeSyncProcess === p else { return }
+        activeSyncProcess = nil
+        guard started else { return }
+        guard settings.syncEnabled else {
+            leaderboardSyncState = .off
+            return
         }
 
         if result.ok {
@@ -638,14 +670,14 @@ final class AppModel: ObservableObject {
             if ProviderSamplePolicy.shouldAccept(
                 previousHasData: codexLimits?.present == true,
                 incomingHasData: l.codex.present
-            ) {
+            ), PublishedValuePolicy.shouldPublish(current: codexLimits, incoming: l.codex) {
                 codexLimits = l.codex
             }
             if let incoming = l.cursor,
                ProviderSamplePolicy.shouldAccept(
                    previousHasData: cursorLimits?.present == true,
                    incomingHasData: incoming.present
-               ) {
+               ), PublishedValuePolicy.shouldPublish(current: cursorLimits, incoming: incoming) {
                 cursorLimits = incoming
             }
         case .alert(let kind, let provider, let level, let percent):
@@ -655,7 +687,9 @@ final class AppModel: ObservableObject {
                 notifier.deliver(provider: provider.capitalized, kind: kind, level: level, percent: percent, isCritical: isCritical)
             }
         case .status(let isCollecting, _, let error):
-            collecting = isCollecting
+            if PublishedValuePolicy.shouldPublish(current: collecting, incoming: isCollecting) {
+                collecting = isCollecting
+            }
             if let error { log.warning("sidecar status error: \(error)") }
         case .hello, .heartbeat, .unknown:
             break

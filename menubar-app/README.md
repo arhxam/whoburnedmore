@@ -26,10 +26,13 @@ Two processes, one privacy rule — nothing sensitive crosses a boundary:
   `$CODEX_HOME/sessions` rollout JSONL — no auth needed.
 
 Real-time: the sidecar `watch` command puts `fs.watch` (FSEvents) recursively on
-every tool's log root, debounces 1.5s, re-collects the native tier (warm cache =
-sub-second) and emits events. A 5-second native safety poll covers missed
-FSEvents, while a separate 1-second Codex-limit poll publishes cap/reset changes
-without waiting for transcript aggregation. The ccusage/Cursor tier refreshes every 5 min.
+every tool's log root, coalesces bursts for 1.5s from their first event,
+re-collects the native tier (warm cache = sub-second), and emits only changed
+snapshots. A 30-second native safety poll covers missed FSEvents. Codex-limit
+events refresh independently within 250ms; a cached 5-second fallback advances
+reset boundaries without repeatedly traversing or reparsing the session tree.
+New provider roots are discovered every 60 seconds, and the ccusage/Cursor tier
+refreshes every 5 minutes.
 Caches live in `~/.config/burnbar`, isolated from the CLI's launchd sync.
 
 ## Sidecar protocol
@@ -74,7 +77,8 @@ signed appcast and release procedure.
 - `BURNBAR_API_BASE` / `WHOBURNEDMORE_WEB` override the whoburnedmore endpoints;
   `BURNBAR_SIDECAR` / `BURNBAR_CCUSAGE` point at dev binaries;
   `BURNBAR_CACHE_DIR`, `BURNBAR_DEBOUNCE_MS`, `BURNBAR_NATIVE_POLL_MS`,
-  `BURNBAR_LIMITS_POLL_MS`, and `BURNBAR_SLOW_INTERVAL_MS` tune the engine.
+  `BURNBAR_LIMITS_POLL_MS`, `BURNBAR_WATCH_RESCAN_MS`, and
+  `BURNBAR_SLOW_INTERVAL_MS` tune the engine.
 - `BURNBAR_CHECK_FOR_UPDATES_ON_LAUNCH=1` exercises Sparkle's foreground
   update-check path for release verification.
 - Menu bar items are source-first (Overall / Claude / Codex / other providers),

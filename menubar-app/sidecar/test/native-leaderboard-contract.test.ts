@@ -88,6 +88,17 @@ describe("native leaderboard sync contract", () => {
     const pollLoop = model.slice(model.indexOf("pollTask = Task"), model.indexOf("statusTask = Task"));
     expect(pollLoop).toContain("await self?.refreshRemote()");
     expect(pollLoop).not.toContain("syncLeaderboardNow");
+    const syncLoop = model.slice(
+      model.indexOf("syncTask = Task"),
+      model.indexOf("private func fetchClaudeIfEnabled"),
+    );
+    expect(syncLoop.indexOf("Task.sleep")).toBeGreaterThanOrEqual(0);
+    expect(syncLoop.indexOf("Task.sleep")).toBeLessThan(syncLoop.indexOf("maybeSync"));
+    expect(model).toContain("Task { await syncLeaderboardNow() }");
+    expect(model).toContain("private var activeSyncProcess: Process?");
+    expect(model).toContain("guard activeSyncProcess === p else { return }");
+    const stopMethod = model.slice(model.indexOf("func stop()"), model.indexOf("// MARK: refresh paths"));
+    expect(stopMethod).toContain("activeSyncProcess?.terminate()");
     expect(popover).toContain('Text("Sync now")');
     expect(popover).toContain('Text("sync off")');
     expect(popover).toContain('Text("synced")');
@@ -158,7 +169,9 @@ describe("local app bundle data integrity", () => {
 
   test("detects notch hover without Accessibility permission", async () => {
     const island = await readFile("Sources/BurnBar/IslandWindowController.swift", "utf8");
-    expect(island).toContain("Timer.scheduledTimer");
+    expect(island).toContain("PointerSamplingPolicy.interval");
+    expect(island).toContain("Timer(timeInterval:");
+    expect(island).toContain("RunLoop.main.add(timer, forMode: .common)");
     expect(island).toContain("NSEvent.mouseLocation");
     expect(island).toContain("if presentation.state == .revealed, compactPanel.frame.contains(point)");
     expect(island).toContain("localClickMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown)");

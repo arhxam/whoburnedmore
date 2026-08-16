@@ -31,7 +31,9 @@ export function validateReleaseVersionSources(marketingVersion, sources) {
   const checks = [
     ["Info.plist", sources.infoPlist, new RegExp(`<key>CFBundleShortVersionString</key>\\s*<string>${escaped}</string>`)],
     ["web page", sources.webPage, new RegExp(`const APP_VERSION = ["']${escaped}["']`)],
+    ["campaign", sources.campaign, new RegExp(`export const BURNBAR_VERSION = ["']${escaped}["']`)],
     ["WbmClient", sources.wbmClient, new RegExp(`burnbar/${escaped}`)],
+    ["DeviceFlow", sources.deviceFlow, new RegExp(`burnbar/${escaped}`)],
     ["sidecar main", sources.sidecarMain, new RegExp(`const VERSION = ["']${escaped}["']`)],
     ["sidecar sync", sources.sidecarSync, new RegExp(`burnbar-${escaped}`)],
   ];

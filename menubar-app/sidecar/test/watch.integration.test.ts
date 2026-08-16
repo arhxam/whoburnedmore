@@ -216,6 +216,176 @@ describe("watch mode real-time integration", () => {
     child = null;
   });
 
+  it("does not starve live snapshots while a transcript is written continuously", { timeout: 60_000 }, async () => {
+    await stopChild(child);
+    child = null;
+    const liveRoot = mkdtempSync(join(tmpdir(), "bb-watch-continuous-"));
+    const projectDir = join(liveRoot, "claude", "projects", "proj");
+    mkdirSync(projectDir, { recursive: true });
+    const transcript = join(projectDir, "session-live.jsonl");
+    writeFileSync(transcript, claudeLine("req_initial", 1000));
+    const env = {
+      ...process.env,
+      CLAUDE_CONFIG_DIR: join(liveRoot, "claude"),
+      CODEX_HOME: join(liveRoot, "missing-codex"),
+      BURNBAR_CACHE_DIR: join(liveRoot, "cache"),
+      BURNBAR_CCUSAGE: "",
+      BURNBAR_DEBOUNCE_MS: "300",
+      BURNBAR_SLOW_INTERVAL_MS: "600000",
+      BURNBAR_WATCH_RESCAN_MS: "600000",
+      BURNBAR_NATIVE_POLL_MS: "600000",
+      HOME: liveRoot,
+    };
+    child = spawn(BIN, ["watch"], { env, stdio: ["pipe", "pipe", "pipe"] });
+
+    const snapshots: Summary[] = [];
+    let buffer = "";
+    child.stdout!.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString();
+      let idx: number;
+      while ((idx = buffer.indexOf("\n")) >= 0) {
+        const ev = parseEvent(buffer.slice(0, idx));
+        buffer = buffer.slice(idx + 1);
+        if (ev?.type === "snapshot") snapshots.push(ev.summary);
+      }
+    });
+    await waitFor(() => snapshots.length >= 1, 30_000, "initial continuous-write snapshot");
+    const initial = snapshots.at(-1)!.today.totalTokens;
+
+    let sequence = 0;
+    const writer = setInterval(() => {
+      sequence += 1;
+      appendFileSync(transcript, claudeLine(`req_stream_${sequence}`, 100));
+    }, 100);
+    const startedAt = Date.now();
+    try {
+      await waitFor(
+        () => snapshots.some((snapshot) => snapshot.today.totalTokens > initial),
+        1_200,
+        "snapshot before continuous writes stop",
+      );
+      expect(Date.now() - startedAt).toBeLessThan(1_200);
+    } finally {
+      clearInterval(writer);
+    }
+
+    await stopChild(child);
+    child = null;
+    rmSync(liveRoot, { recursive: true, force: true });
+  });
+
+  it("does not emit duplicate snapshots for unchanged safety polls", { timeout: 60_000 }, async () => {
+    await stopChild(child);
+    child = null;
+    const idleRoot = mkdtempSync(join(tmpdir(), "bb-watch-idle-dedupe-"));
+    const projectDir = join(idleRoot, "claude", "projects", "proj");
+    mkdirSync(projectDir, { recursive: true });
+    writeFileSync(join(projectDir, "session-idle.jsonl"), claudeLine("req_idle", 1000));
+    const env = {
+      ...process.env,
+      CLAUDE_CONFIG_DIR: join(idleRoot, "claude"),
+      CODEX_HOME: join(idleRoot, "missing-codex"),
+      BURNBAR_CACHE_DIR: join(idleRoot, "cache"),
+      BURNBAR_CCUSAGE: "",
+      BURNBAR_DEBOUNCE_MS: "600000",
+      BURNBAR_SLOW_INTERVAL_MS: "600000",
+      BURNBAR_WATCH_RESCAN_MS: "600000",
+      BURNBAR_NATIVE_POLL_MS: "100",
+      HOME: idleRoot,
+    };
+    child = spawn(BIN, ["watch"], { env, stdio: ["pipe", "pipe", "pipe"] });
+
+    let snapshotCount = 0;
+    let buffer = "";
+    child.stdout!.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString();
+      let idx: number;
+      while ((idx = buffer.indexOf("\n")) >= 0) {
+        const ev = parseEvent(buffer.slice(0, idx));
+        buffer = buffer.slice(idx + 1);
+        if (ev?.type === "snapshot") snapshotCount += 1;
+      }
+    });
+    await waitFor(() => snapshotCount >= 1, 30_000, "initial idle snapshot");
+    await delay(700);
+    expect(snapshotCount).toBe(1);
+
+    await stopChild(child);
+    child = null;
+    rmSync(idleRoot, { recursive: true, force: true });
+  });
+
+  it("emits native usage before a blocked slow tier completes", { timeout: 60_000 }, async () => {
+    await stopChild(child);
+    child = null;
+    const fastRoot = mkdtempSync(join(tmpdir(), "bb-watch-fast-start-"));
+    const projectDir = join(fastRoot, "claude", "projects", "proj");
+    mkdirSync(projectDir, { recursive: true });
+    writeFileSync(join(projectDir, "session-fast.jsonl"), claudeLine("req_fast", 1000));
+    const slowParser = join(fastRoot, "slow-ccusage.cjs");
+    writeFileSync(
+      slowParser,
+      `#!/usr/bin/env node
+const source = process.argv[2];
+const empty = source === "session" ? { sessions: [] } : { daily: [] };
+if (source === "codex") process.stdout.write(JSON.stringify(empty));
+else if (source === "gemini") setTimeout(() => {
+  const payload = { daily: [{
+    date: new Date().toISOString().slice(0, 10),
+    totalCost: 0,
+    modelBreakdowns: [{
+      modelName: "gemini-test",
+      inputTokens: 77,
+      outputTokens: 0,
+      cacheCreationTokens: 0,
+      cacheReadTokens: 0,
+      cost: 0
+    }]
+  }] };
+  process.stdout.write(JSON.stringify(payload));
+}, 2500);
+else process.stdout.write(JSON.stringify(empty));
+`,
+    );
+    chmodSync(slowParser, 0o755);
+    const env = {
+      ...process.env,
+      CLAUDE_CONFIG_DIR: join(fastRoot, "claude"),
+      CODEX_HOME: join(fastRoot, "missing-codex"),
+      BURNBAR_CACHE_DIR: join(fastRoot, "cache"),
+      BURNBAR_CCUSAGE: slowParser,
+      BURNBAR_SLOW_INTERVAL_MS: "600000",
+      BURNBAR_WATCH_RESCAN_MS: "600000",
+      BURNBAR_NATIVE_POLL_MS: "600000",
+      HOME: fastRoot,
+    };
+    child = spawn(BIN, ["watch"], { env, stdio: ["pipe", "pipe", "pipe"] });
+
+    let sawNative = false;
+    let sawEnriched = false;
+    let buffer = "";
+    child.stdout!.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString();
+      let idx: number;
+      while ((idx = buffer.indexOf("\n")) >= 0) {
+        const ev = parseEvent(buffer.slice(0, idx));
+        buffer = buffer.slice(idx + 1);
+        if (ev?.type === "snapshot" && ev.summary.today.totalTokens === 1010) sawNative = true;
+        if (ev?.type === "snapshot" && ev.summary.toolsFound.includes("gemini")) {
+          sawEnriched = ev.summary.today.totalTokens === 1087;
+        }
+      }
+    });
+    const startedAt = Date.now();
+    await waitFor(() => sawNative, 2_000, "native snapshot before slow tier");
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    await waitFor(() => sawEnriched, 8_000, "slow-tier enrichment after first paint");
+
+    await stopChild(child);
+    child = null;
+    rmSync(fastRoot, { recursive: true, force: true });
+  });
+
   it("starts live-counting Codex when its sessions directory is created after launch", { timeout: 60_000 }, async () => {
     await stopChild(child);
     child = null;

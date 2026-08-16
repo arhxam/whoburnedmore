@@ -8,6 +8,7 @@ import {
   collectSlowTier,
   mergeTiers,
   resolveCcusageStandalone,
+  terminateCollectorProcesses,
 } from "../src/collector.js";
 import { watchRoots } from "../src/watch.js";
 
@@ -150,6 +151,42 @@ describe("Codex replay-aware collection", () => {
     await collectNativeTier(env);
     await collectNativeTier(env);
     expect(await readFile(count, "utf8")).toBe("1");
+  });
+
+  it("terminates in-flight parser children during watch shutdown", async () => {
+    const root = await mkdtemp(join(tmpdir(), "burnbar-codex-shutdown-"));
+    const bin = join(root, "blocking-ccusage");
+    const pidFile = join(root, "pid");
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+const fs = require("node:fs");
+fs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
+setTimeout(() => process.stdout.write('{"daily":[]}'), 60000);
+`,
+    );
+    await chmod(bin, 0o755);
+    const pending = collectNativeTier({
+      CODEX_HOME: join(root, "codex"),
+      CLAUDE_CONFIG_DIR: join(root, "claude"),
+      HOME: root,
+      BURNBAR_CCUSAGE: bin,
+      BURNBAR_CACHE_DIR: join(root, "cache"),
+      WHOBURNEDMORE_PRICING_OFFLINE: "1",
+    } as NodeJS.ProcessEnv);
+
+    let pid: number | null = null;
+    for (let attempt = 0; attempt < 40 && pid === null; attempt += 1) {
+      try {
+        pid = Number(await readFile(pidFile, "utf8"));
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    }
+    expect(pid).not.toBeNull();
+    terminateCollectorProcesses();
+    await pending;
+    expect(() => process.kill(pid!, 0)).toThrow();
   });
 
   it("keeps replay-aware Codex rows when merging with a native fallback", () => {

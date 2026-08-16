@@ -63,6 +63,12 @@ final class IslandLayoutTests: XCTestCase {
 }
 
 final class IslandPresentationTests: XCTestCase {
+    func testPointerSamplingAdaptsToInteractionState() {
+        XCTAssertEqual(PointerSamplingPolicy.interval(for: .dormant), 0.2)
+        XCTAssertEqual(PointerSamplingPolicy.interval(for: .revealed), 0.03)
+        XCTAssertNil(PointerSamplingPolicy.interval(for: .expanded))
+    }
+
     func testPointerOnlyRevealsCompactValueFromDormantState() {
         XCTAssertEqual(
             IslandPresentationReducer.reduce(.dormant, action: .pointerEntered),

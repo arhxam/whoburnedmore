@@ -13,33 +13,25 @@ import { resolveClaudeProjectDirs } from "../../../src/native/claude.js";
 import { resolveCodexSessionsDirs } from "../../../src/native/codex.js";
 import { vscodeGlobalStorageRoots } from "../../../src/native/vscode-agents.js";
 
-import { readCodexLimits, reconcileCodexLimits } from "./codex-limits.js";
+import { CodexLimitsReader, reconcileCodexLimits } from "./codex-limits.js";
 import {
   claudeSessionNames,
   collectNativeTier,
   collectSlowTier,
   mergeTiers,
+  terminateCollectorProcesses,
   type SlowTier,
 } from "./collector.js";
 import { fetchCursorLimits, reconcileCursorLimits } from "./cursor-limits.js";
 import { ALERT_THRESHOLDS, detectAlerts, forecastLimitHit, type PercentSample } from "./forecast.js";
 import { emit, PROTOCOL_VERSION, type CursorLimits, type Limits } from "./protocol.js";
 import { summarize } from "./summarize.js";
-
-function envInterval(name: string, fallback: number): number {
-  const value = Number(process.env[name] ?? fallback);
-  return Number.isFinite(value) && value >= 50 ? value : fallback;
-}
-
-const DEBOUNCE_MS = envInterval("BURNBAR_DEBOUNCE_MS", 1500);
-const SLOW_INTERVAL_MS = envInterval("BURNBAR_SLOW_INTERVAL_MS", 5 * 60 * 1000);
-const WATCH_RESCAN_MS = envInterval("BURNBAR_WATCH_RESCAN_MS", 5_000);
-const NATIVE_POLL_MS = envInterval("BURNBAR_NATIVE_POLL_MS", 5_000);
-// Limits are tiny tail reads and need a tighter SLA than transcript totals.
-// A dedicated poll also means a cold/large token collection cannot delay a
-// 100% lockout or reset transition in the menu bar.
-const LIMITS_POLL_MS = envInterval("BURNBAR_LIMITS_POLL_MS", 1_000);
-const HEARTBEAT_MS = 30_000;
+import {
+  FixedWindowCoalescer,
+  shouldForceLimitDiscovery,
+  stableSummarySignature,
+  watchIntervals,
+} from "./watch-policy.js";
 
 export function watchRoots(env: NodeJS.ProcessEnv = process.env): string[] {
   const targets = [
@@ -63,6 +55,8 @@ export function watchRoots(env: NodeJS.ProcessEnv = process.env): string[] {
 
 export async function runWatch(env: NodeJS.ProcessEnv = process.env): Promise<void> {
   emit({ type: "hello", version: PROTOCOL_VERSION, pid: process.pid });
+  const intervals = watchIntervals(env);
+  const codexLimitReader = new CodexLimitsReader(env);
 
   let slow: SlowTier | null = null;
   let cursorLimits: CursorLimits = {
@@ -79,11 +73,16 @@ export async function runWatch(env: NodeJS.ProcessEnv = process.env): Promise<vo
   const codexSamples: PercentSample[] = [];
   let lastCodexSampleAt: string | null = null;
   let lastLimitsSignature: string | null = null;
+  let lastSummarySignature: string | null = null;
   let lastCodexLimits: Limits["codex"] | null = null;
 
-  const refreshLimits = () => {
+  const refreshLimits = (forceDiscover = false) => {
     const now = Date.now();
-    const codex = reconcileCodexLimits(lastCodexLimits, readCodexLimits(env), now);
+    const codex = reconcileCodexLimits(
+      lastCodexLimits,
+      codexLimitReader.read(now, forceDiscover),
+      now,
+    );
     if (codex.present) lastCodexLimits = codex;
     const observedPercents = [codex.primary?.usedPercent, codex.secondary?.usedPercent]
       .filter((percent): percent is number => percent !== null && percent !== undefined);
@@ -140,10 +139,19 @@ export async function runWatch(env: NodeJS.ProcessEnv = process.env): Promise<vo
       const native = await collectNativeTier(env);
       const entries = mergeTiers(native, slow);
       const toolsFound = [...new Set([...native.toolsFound, ...(slow?.toolsFound ?? [])])];
-      emit({
-        type: "snapshot",
-        summary: summarize(entries, toolsFound, native.partial, new Date(), slow?.sessions ?? [], claudeSessionNames(env)),
-      });
+      const summary = summarize(
+        entries,
+        toolsFound,
+        native.partial,
+        new Date(),
+        slow?.sessions ?? [],
+        claudeSessionNames(env),
+      );
+      const signature = stableSummarySignature(summary);
+      if (signature !== lastSummarySignature) {
+        lastSummarySignature = signature;
+        emit({ type: "snapshot", summary });
+      }
 
       lastFullCollectAt = new Date().toISOString();
       emit({ type: "status", collecting: false, lastFullCollectAt });
@@ -196,17 +204,36 @@ export async function runWatch(env: NodeJS.ProcessEnv = process.env): Promise<vo
   };
 
   const watchers = new Map<string, FSWatcher>();
-  let debounce: ReturnType<typeof setTimeout> | null = null;
-  const onFsEvent = () => {
-    if (debounce) clearTimeout(debounce);
-    debounce = setTimeout(() => void collectAndEmit(), DEBOUNCE_MS);
+  const collectCoalescer = new FixedWindowCoalescer(
+    intervals.debounceMs,
+    () => void collectAndEmit(),
+  );
+  let limitsForceDiscover = false;
+  const limitsCoalescer = new FixedWindowCoalescer(
+    Math.min(250, intervals.debounceMs),
+    () => {
+      const forceDiscover = limitsForceDiscover;
+      limitsForceDiscover = false;
+      refreshLimits(forceDiscover);
+    },
+  );
+  const codexTargets = resolveCodexSessionsDirs(env);
+  const isCodexWatchRoot = (root: string) => codexTargets.some(
+    (target) => target === root || target.startsWith(`${root}/`) || root.startsWith(`${target}/`),
+  );
+  const onFsEvent = (root: string, eventType?: string) => {
+    collectCoalescer.trigger();
+    if (isCodexWatchRoot(root)) {
+      limitsForceDiscover ||= shouldForceLimitDiscovery(eventType);
+      limitsCoalescer.trigger();
+    }
   };
   const attachNewWatchers = (): boolean => {
     let added = false;
     for (const root of watchRoots(env)) {
       if (watchers.has(root)) continue;
       try {
-        const w = watch(root, { recursive: true }, onFsEvent);
+        const w = watch(root, { recursive: true }, (eventType) => onFsEvent(root, eventType));
         watchers.set(root, w);
         added = true;
         // FSWatcher can emit 'error' AFTER creation (watched dir deleted/moved,
@@ -233,22 +260,25 @@ export async function runWatch(env: NodeJS.ProcessEnv = process.env): Promise<vo
   // app restart; when a new root appears, collect immediately because its first
   // transcript may have been written before the watcher was attached.
   const watchRescanTimer = setInterval(() => {
-    if (attachNewWatchers()) void collectAndEmit();
-  }, WATCH_RESCAN_MS);
+    if (attachNewWatchers()) {
+      refreshLimits(true);
+      void collectAndEmit();
+    }
+  }, intervals.watchRescanMs);
 
   // FSEvents is a latency accelerator, not a delivery guarantee. In practice,
   // recursive watches on a large real-world transcript tree can miss an append
   // even while the active rollout's size and mtime keep advancing. The native
-  // readers are persistent-cache incremental, so a five-second safety collect
+  // readers are persistent-cache incremental, so a 30-second safety collect
   // reads only changed active files and guarantees forward progress for every
   // provider without falling back to the five-minute slow tier or archives.
-  const nativePollTimer = setInterval(() => void collectAndEmit(), NATIVE_POLL_MS);
-  const limitsPollTimer = setInterval(refreshLimits, LIMITS_POLL_MS);
+  const nativePollTimer = setInterval(() => void collectAndEmit(), intervals.nativePollMs);
+  const limitsPollTimer = setInterval(() => refreshLimits(), intervals.limitsPollMs);
 
-  const slowTimer = setInterval(() => void refreshSlow(), SLOW_INTERVAL_MS);
+  const slowTimer = setInterval(() => void refreshSlow(), intervals.slowMs);
   const heartbeat = setInterval(
     () => emit({ type: "heartbeat", ts: new Date().toISOString() }),
-    HEARTBEAT_MS,
+    intervals.heartbeatMs,
   );
 
   const shutdown = () => {
@@ -258,7 +288,9 @@ export async function runWatch(env: NodeJS.ProcessEnv = process.env): Promise<vo
     clearInterval(nativePollTimer);
     clearInterval(limitsPollTimer);
     clearInterval(heartbeat);
-    if (debounce) clearTimeout(debounce);
+    collectCoalescer.cancel();
+    limitsCoalescer.cancel();
+    terminateCollectorProcesses();
     process.exit(0);
   };
   process.on("SIGTERM", shutdown);
@@ -276,7 +308,11 @@ export async function runWatch(env: NodeJS.ProcessEnv = process.env): Promise<vo
   });
   rl.on("close", shutdown); // Swift died → don't linger as an orphan
 
-  await refreshSlow();
+  // Native readers populate the UI immediately. The slower all-source tier
+  // enriches it in the background instead of holding first paint hostage to a
+  // slow parser or network timeout.
+  void refreshSlow();
+  await collectAndEmit();
   // Keep the process alive for watchers/timers.
   await new Promise(() => {});
 }

@@ -66,7 +66,7 @@ final class WbmClient {
     private func fetchData(from url: URL) async -> Data? {
         var req = URLRequest(url: url)
         req.timeoutInterval = 10
-        req.setValue("burnbar/0.8.0", forHTTPHeaderField: "User-Agent")
+        req.setValue("burnbar/0.8.1", forHTTPHeaderField: "User-Agent")
         do {
             let (data, http) = try await BoundedHTTP.data(for: req, maxBytes: 2 * 1024 * 1024)
             guard http.statusCode == 200 else { return nil }

@@ -128,7 +128,7 @@ final class DeviceFlow: ObservableObject {
         req.httpMethod = "POST"
         req.timeoutInterval = 15
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.setValue("burnbar/0.2.0", forHTTPHeaderField: "User-Agent")
+        req.setValue("burnbar/0.8.1", forHTTPHeaderField: "User-Agent")
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
         let (data, http) = try await BoundedHTTP.data(for: req, maxBytes: 512 * 1024)
         guard (200..<300).contains(http.statusCode) else {
