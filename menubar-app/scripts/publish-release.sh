@@ -76,11 +76,18 @@ gh release edit "$TAG" --repo "$REPOSITORY" --latest
 FEED_URL="https://github.com/${REPOSITORY}/releases/latest/download/appcast.xml"
 DMG_URL="https://github.com/${REPOSITORY}/releases/latest/download/BurnBar.dmg"
 NOTES_URL="https://github.com/${REPOSITORY}/releases/latest/download/BurnBar.md"
+PUBLISHED_STAGE="$(mktemp -d)"
+trap 'rm -rf "$PUBLISHED_STAGE"' EXIT
+PUBLISHED_APPCAST="$PUBLISHED_STAGE/appcast.xml"
+PUBLISHED_DMG="$PUBLISHED_STAGE/BurnBar.dmg"
+LOCAL_DMG_LENGTH="$(stat -f %z dist/BurnBar.dmg)"
+
 wait_for_asset() {
   local url="$1"
   local attempts=12
   for ((attempt = 1; attempt <= attempts; attempt++)); do
-    if curl -fsSIL --retry 2 --retry-all-errors --max-time 30 "$url" >/dev/null; then
+    if curl -fsSIL --retry 2 --retry-all-errors --max-time 30 \
+      "${url}?verify=${attempt}-$(date +%s)" >/dev/null; then
       return 0
     fi
     [[ "$attempt" -lt "$attempts" ]] && sleep 5
@@ -88,16 +95,51 @@ wait_for_asset() {
   echo "published asset did not become reachable: $url" >&2
   return 1
 }
-wait_for_asset "$FEED_URL"
-wait_for_asset "$DMG_URL"
+
+wait_for_latest_appcast() {
+  local attempts=24
+  for ((attempt = 1; attempt <= attempts; attempt++)); do
+    if curl -fsSL --retry 2 --retry-all-errors --max-time 30 \
+      "${FEED_URL}?verify=${attempt}-$(date +%s)" -o "$PUBLISHED_APPCAST" && \
+      node scripts/verify-update-metadata.mjs \
+        --project project.yml \
+        --appcast "$PUBLISHED_APPCAST" \
+        --byte-length "$LOCAL_DMG_LENGTH" >/dev/null 2>&1; then
+      return 0
+    fi
+    [[ "$attempt" -lt "$attempts" ]] && sleep 5
+  done
+  echo "latest appcast did not converge to BurnBar $VERSION ($BUILD)" >&2
+  return 1
+}
+
+wait_for_latest_dmg() {
+  local attempts=24
+  local headers
+  local remote_length
+  for ((attempt = 1; attempt <= attempts; attempt++)); do
+    headers="$(curl -fsSIL --retry 2 --retry-all-errors --max-time 30 \
+      "${DMG_URL}?verify=${attempt}-$(date +%s)" || true)"
+    remote_length="$(printf '%s\n' "$headers" | tr -d '\r' | \
+      awk 'tolower($1) == "content-length:" { value=$2 } END { print value }')"
+    if [[ "$remote_length" == "$LOCAL_DMG_LENGTH" ]]; then
+      return 0
+    fi
+    [[ "$attempt" -lt "$attempts" ]] && sleep 5
+  done
+  echo "latest DMG did not converge to $LOCAL_DMG_LENGTH bytes" >&2
+  return 1
+}
+
+wait_for_latest_appcast
+wait_for_latest_dmg
 wait_for_asset "$NOTES_URL"
 
-PUBLISHED_STAGE="$(mktemp -d)"
-trap 'rm -rf "$PUBLISHED_STAGE"' EXIT
-PUBLISHED_APPCAST="$PUBLISHED_STAGE/appcast.xml"
-PUBLISHED_DMG="$PUBLISHED_STAGE/BurnBar.dmg"
-curl -fsSL --retry 3 --retry-all-errors --max-time 120 "$FEED_URL" -o "$PUBLISHED_APPCAST"
-curl -fsSL --retry 3 --retry-all-errors --max-time 300 "$DMG_URL" -o "$PUBLISHED_DMG"
+VERIFY_STAMP="$(date +%s)"
+curl -fsSL --retry 3 --retry-all-errors --max-time 120 \
+  "${FEED_URL}?verify=$VERIFY_STAMP" -o "$PUBLISHED_APPCAST"
+curl -fsSL --retry 3 --retry-all-errors --max-time 300 \
+  "${DMG_URL}?verify=$VERIFY_STAMP" -o "$PUBLISHED_DMG"
 BURNBAR_REQUIRE_NOTARIZATION=1 BURNBAR_CHECK_PUBLISHED_BUILD=0 \
   bash scripts/verify-update-artifacts.sh "$PUBLISHED_DMG" "$PUBLISHED_APPCAST"
 echo "PUBLISHED: ${REPOSITORY} ${TAG}"

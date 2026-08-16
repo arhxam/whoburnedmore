@@ -13,9 +13,12 @@ test("authorizes repository write permission rather than one GitHub username", (
 test("waits for latest-release assets after creating the immutable release", () => {
   assert.match(script, /release .* already exists; update archives are immutable/);
   assert.match(script, /gh release edit "\$TAG" --repo "\$REPOSITORY" --latest/);
-  assert.match(script, /wait_for_asset "\$FEED_URL"/);
-  assert.match(script, /wait_for_asset "\$DMG_URL"/);
+  assert.match(script, /wait_for_latest_appcast/);
+  assert.match(script, /verify-update-metadata\.mjs/);
+  assert.match(script, /wait_for_latest_dmg/);
+  assert.match(script, /LOCAL_DMG_LENGTH/);
   assert.match(script, /wait_for_asset "\$NOTES_URL"/);
+  assert.match(script, /\?verify=/);
   assert.match(script, /--retry-all-errors/);
 });
 
