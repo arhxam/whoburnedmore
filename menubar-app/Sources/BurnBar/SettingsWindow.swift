@@ -24,7 +24,7 @@ enum SettingsWindow {
             .environmentObject(updates))
         hosting.sizingOptions = []  // see DebugWindow: sizing negotiation loops
         let w = NSWindow(contentViewController: hosting)
-        w.title = "BurnBar Settings"
+        w.title = "whoburnedmore Settings"
         w.styleMask = [.titled, .closable, .miniaturizable]
         w.setContentSize(NSSize(width: 720, height: 520))
         w.isReleasedWhenClosed = false
@@ -216,7 +216,7 @@ struct GeneralPane: View {
             .disabled(!updates.allowsAutomaticUpdates)
             Button("Check for Updates…") { updates.checkForUpdates() }
                 .disabled(!updates.canCheckForUpdates)
-            Text("Checks at most once per day. BurnBar asks before installing unless automatic updates are enabled.")
+            Text("Checks at most once per day. whoburnedmore asks before installing unless automatic updates are enabled.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -309,7 +309,7 @@ struct MenuBarPane: View {
         VStack(alignment: .leading, spacing: 10) {
             SectionHeader("Dynamic Island hover")
             slotRow("Value revealed under the camera", metric: $settings.islandMetric, provider: $settings.islandMetricProvider, allowNone: true)
-            Text("Nothing is permanently added beside the camera. Move the pointer under it to reveal this one value, then click the camera area to open BurnBar.")
+            Text("Nothing is permanently added beside the camera. Move the pointer under it to reveal this one value, then click the camera area to open whoburnedmore.")
                 .font(.caption).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -397,7 +397,7 @@ struct NotificationsPane: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             SectionHeader("Permission")
-            Toggle("Allow BurnBar notifications", isOn: Binding(
+            Toggle("Allow whoburnedmore notifications", isOn: Binding(
                 get: { settings.notificationsEnabled },
                 set: { model.setNotificationsEnabled($0) }
             ))
@@ -467,7 +467,7 @@ struct AccountPane: View {
                 Label("Connected as @\(handle) — site unreachable right now", systemImage: "wifi.slash")
                     .foregroundStyle(.secondary)
             case .noAccount:
-                Text("Not connected. BurnBar works fully without an account — connect to see your rank and join the public leaderboard.")
+                Text("Not connected. whoburnedmore works fully without an account — connect to see your rank and join the public leaderboard.")
                     .foregroundStyle(.secondary)
                 ConnectButton()
             }

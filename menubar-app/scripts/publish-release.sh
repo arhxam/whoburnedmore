@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Upload a previously validated BurnBar DMG/appcast pair to the public release
+# Upload a previously validated whoburnedmore DMG/appcast pair to the public release
 # repository. This never pushes source or a monorepo branch.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -24,8 +24,16 @@ if [[ -z "$VERSION" || -z "$BUILD" || -z "$NOTES" || -z "$MODE" ]]; then
   exit 2
 fi
 [[ -f "$NOTES" ]] || { echo "release notes not found: $NOTES" >&2; exit 2; }
-[[ -f dist/BurnBar.dmg && -f dist/appcast.xml && -f dist/BurnBar.md ]] || {
-  echo "dist/BurnBar.dmg, dist/appcast.xml, and dist/BurnBar.md must exist" >&2
+[[ -f dist/whoburnedmore.dmg && -f dist/BurnBar.dmg && -f dist/appcast.xml && -f dist/whoburnedmore.md && -f dist/BurnBar.md ]] || {
+  echo "dist/whoburnedmore.dmg, dist/BurnBar.dmg, dist/appcast.xml, dist/whoburnedmore.md, and dist/BurnBar.md must exist" >&2
+  exit 2
+}
+cmp -s dist/whoburnedmore.dmg dist/BurnBar.dmg || {
+  echo "dist/BurnBar.dmg must be byte-identical to dist/whoburnedmore.dmg" >&2
+  exit 2
+}
+cmp -s dist/whoburnedmore.md dist/BurnBar.md || {
+  echo "dist/BurnBar.md must be byte-identical to dist/whoburnedmore.md" >&2
   exit 2
 }
 
@@ -57,7 +65,7 @@ if [[ "$MODE" == "dry-run" ]]; then
   echo "PUBLISH DRY RUN OK"
   echo "repository=$REPOSITORY"
   echo "tag=$TAG"
-  echo "assets=dist/BurnBar.dmg,dist/appcast.xml,dist/BurnBar.md"
+  echo "assets=dist/whoburnedmore.dmg,dist/BurnBar.dmg,dist/appcast.xml,dist/whoburnedmore.md,dist/BurnBar.md"
   echo "notes=$NOTES"
   exit 0
 fi
@@ -66,21 +74,26 @@ if gh release view "$TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
   echo "release $REPOSITORY $TAG already exists; update archives are immutable — use a new version/build" >&2
   exit 1
 fi
-gh release create "$TAG" dist/BurnBar.dmg dist/appcast.xml dist/BurnBar.md \
-  --repo "$REPOSITORY" --title "BurnBar ${TAG}" --notes-file "$NOTES" --latest
+gh release create "$TAG" dist/whoburnedmore.dmg dist/BurnBar.dmg dist/appcast.xml dist/whoburnedmore.md dist/BurnBar.md \
+  --repo "$REPOSITORY" --title "whoburnedmore ${TAG}" --notes-file "$NOTES" --latest
 # GitHub can retain the previous `/releases/latest/download/*` redirect even
 # when `release create --latest` was requested. Re-assert the promotion before
 # polling the public feed so the updater cannot remain pinned to the old tag.
 gh release edit "$TAG" --repo "$REPOSITORY" --latest
 
 FEED_URL="https://github.com/${REPOSITORY}/releases/latest/download/appcast.xml"
-DMG_URL="https://github.com/${REPOSITORY}/releases/latest/download/BurnBar.dmg"
-NOTES_URL="https://github.com/${REPOSITORY}/releases/latest/download/BurnBar.md"
+DMG_URL="https://github.com/${REPOSITORY}/releases/latest/download/whoburnedmore.dmg"
+COMPAT_DMG_URL="https://github.com/${REPOSITORY}/releases/latest/download/BurnBar.dmg"
+NOTES_URL="https://github.com/${REPOSITORY}/releases/latest/download/whoburnedmore.md"
+COMPAT_NOTES_URL="https://github.com/${REPOSITORY}/releases/latest/download/BurnBar.md"
 PUBLISHED_STAGE="$(mktemp -d)"
 trap 'rm -rf "$PUBLISHED_STAGE"' EXIT
 PUBLISHED_APPCAST="$PUBLISHED_STAGE/appcast.xml"
-PUBLISHED_DMG="$PUBLISHED_STAGE/BurnBar.dmg"
-LOCAL_DMG_LENGTH="$(stat -f %z dist/BurnBar.dmg)"
+PUBLISHED_DMG="$PUBLISHED_STAGE/whoburnedmore.dmg"
+PUBLISHED_COMPAT_DMG="$PUBLISHED_STAGE/BurnBar.dmg"
+PUBLISHED_NOTES="$PUBLISHED_STAGE/whoburnedmore.md"
+PUBLISHED_COMPAT_NOTES="$PUBLISHED_STAGE/BurnBar.md"
+LOCAL_DMG_LENGTH="$(stat -f %z dist/whoburnedmore.dmg)"
 
 wait_for_asset() {
   local url="$1"
@@ -109,17 +122,18 @@ wait_for_latest_appcast() {
     fi
     [[ "$attempt" -lt "$attempts" ]] && sleep 5
   done
-  echo "latest appcast did not converge to BurnBar $VERSION ($BUILD)" >&2
+  echo "latest appcast did not converge to whoburnedmore $VERSION ($BUILD)" >&2
   return 1
 }
 
 wait_for_latest_dmg() {
+  local url="${1:-$DMG_URL}"
   local attempts=24
   local headers
   local remote_length
   for ((attempt = 1; attempt <= attempts; attempt++)); do
     headers="$(curl -fsSIL --retry 2 --retry-all-errors --max-time 30 \
-      "${DMG_URL}?verify=${attempt}-$(date +%s)" || true)"
+      "${url}?verify=${attempt}-$(date +%s)" || true)"
     remote_length="$(printf '%s\n' "$headers" | tr -d '\r' | \
       awk 'tolower($1) == "content-length:" { value=$2 } END { print value }')"
     if [[ "$remote_length" == "$LOCAL_DMG_LENGTH" ]]; then
@@ -132,14 +146,34 @@ wait_for_latest_dmg() {
 }
 
 wait_for_latest_appcast
-wait_for_latest_dmg
+wait_for_latest_dmg "$DMG_URL"
+wait_for_latest_dmg "$COMPAT_DMG_URL"
 wait_for_asset "$NOTES_URL"
+wait_for_asset "$COMPAT_NOTES_URL"
 
 VERIFY_STAMP="$(date +%s)"
 curl -fsSL --retry 3 --retry-all-errors --max-time 120 \
   "${FEED_URL}?verify=$VERIFY_STAMP" -o "$PUBLISHED_APPCAST"
 curl -fsSL --retry 3 --retry-all-errors --max-time 300 \
   "${DMG_URL}?verify=$VERIFY_STAMP" -o "$PUBLISHED_DMG"
+curl -fsSL --retry 3 --retry-all-errors --max-time 300 \
+  "${COMPAT_DMG_URL}?verify=$VERIFY_STAMP" -o "$PUBLISHED_COMPAT_DMG"
+cmp -s "$PUBLISHED_DMG" "$PUBLISHED_COMPAT_DMG" || {
+  echo "published compatibility DMG differs from primary artifact" >&2
+  exit 1
+}
+curl -fsSL --retry 3 --retry-all-errors --max-time 120 \
+  "${NOTES_URL}?verify=$VERIFY_STAMP" -o "$PUBLISHED_NOTES"
+curl -fsSL --retry 3 --retry-all-errors --max-time 120 \
+  "${COMPAT_NOTES_URL}?verify=$VERIFY_STAMP" -o "$PUBLISHED_COMPAT_NOTES"
+cmp -s dist/whoburnedmore.md "$PUBLISHED_NOTES" || {
+  echo "published release notes differ from local primary artifact" >&2
+  exit 1
+}
+cmp -s "$PUBLISHED_NOTES" "$PUBLISHED_COMPAT_NOTES" || {
+  echo "published compatibility release notes differ from primary artifact" >&2
+  exit 1
+}
 BURNBAR_REQUIRE_NOTARIZATION=1 BURNBAR_CHECK_PUBLISHED_BUILD=0 \
   bash scripts/verify-update-artifacts.sh "$PUBLISHED_DMG" "$PUBLISHED_APPCAST"
 echo "PUBLISHED: ${REPOSITORY} ${TAG}"

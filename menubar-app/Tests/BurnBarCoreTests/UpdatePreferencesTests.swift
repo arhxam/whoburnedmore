@@ -36,21 +36,21 @@ final class UpdatePreferencesTests: XCTestCase {
     func testBundleVersionPresentationIncludesMarketingAndBuild() {
         XCTAssertEqual(
             BundleVersionPresentation(marketingVersion: "0.8.0", buildVersion: "8000").displayName,
-            "BurnBar 0.8.0 (8000)"
+            "whoburnedmore 0.8.0 (8000)"
         )
     }
 
     func testBundleVersionPresentationFallsBackToMarketingVersion() {
         XCTAssertEqual(
             BundleVersionPresentation(marketingVersion: "0.8.0", buildVersion: nil).displayName,
-            "BurnBar 0.8.0"
+            "whoburnedmore 0.8.0"
         )
     }
 
     func testBundleVersionPresentationHandlesMissingBundleMetadata() {
         XCTAssertEqual(
             BundleVersionPresentation(marketingVersion: nil, buildVersion: nil).displayName,
-            "BurnBar"
+            "whoburnedmore"
         )
     }
 }

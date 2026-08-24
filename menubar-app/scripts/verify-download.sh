@@ -4,19 +4,19 @@
 # + notarized app is "accepted" here even offline/quarantined; an un-notarized one
 # is "rejected". Prints "DOWNLOAD OK" only when Gatekeeper accepts it.
 set -euo pipefail
-URL="${1:-https://github.com/arhxam/whoburnedmore/releases/latest/download/BurnBar.dmg}"
+URL="${1:-https://github.com/arhxam/whoburnedmore/releases/latest/download/whoburnedmore.dmg}"
 TMP="$(mktemp -d)"
 MP=""
 cleanup() { [[ -n "$MP" ]] && hdiutil detach "$MP" -quiet 2>/dev/null || true; rm -rf "$TMP"; }
 trap cleanup EXIT
 
-DMG="$TMP/BurnBar.dmg"
+DMG="$TMP/whoburnedmore.dmg"
 # Retry + bound each attempt so transient GitHub-CDN slowness can't hang the check.
 curl -fsSL --retry 4 --retry-delay 3 --retry-all-errors --max-time 180 -o "$DMG" "$URL"
 # what a browser download sets:
 xattr -w com.apple.quarantine "0083;00000000;Safari;$(uuidgen)" "$DMG" 2>/dev/null || true
 
-MP="$(hdiutil attach "$DMG" -nobrowse -quiet && ls -d /Volumes/BurnBar* 2>/dev/null | head -1)"
+MP="$(hdiutil attach "$DMG" -nobrowse -quiet && ls -d /Volumes/whoburnedmore* /Volumes/BurnBar* 2>/dev/null | head -1)"
 APP="$MP/BurnBar.app"
 [[ -d "$APP" ]] || { echo "DOWNLOAD FAIL: no app in DMG"; exit 1; }
 

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "BurnBar — native macOS menu bar app for live AI token burn + usage limits. Swift shell + bun-compiled sidecar.",
+  "description": "whoburnedmore — native macOS menu bar app for live AI token burn + usage limits. Swift shell + bun-compiled sidecar.",
   "scripts": {
     "build:sidecar": "bun build --compile --outfile sidecar/dist/burnbar-sidecar sidecar/src/main.ts",
     "test": "vitest run --root sidecar && node --test scripts/test/*.test.mjs",

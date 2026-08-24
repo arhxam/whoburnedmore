@@ -23,7 +23,12 @@ test("waits for latest-release assets after creating the immutable release", () 
 });
 
 test("uploads release notes and verifies the downloaded production pair", () => {
+  assert.match(script, /dist\/whoburnedmore\.dmg/);
+  assert.match(script, /dist\/BurnBar\.dmg/);
+  assert.match(script, /cmp -s "\$PUBLISHED_DMG" "\$PUBLISHED_COMPAT_DMG"/);
+  assert.match(script, /dist\/whoburnedmore\.md/);
   assert.match(script, /dist\/BurnBar\.md/);
+  assert.match(script, /cmp -s "\$PUBLISHED_NOTES" "\$PUBLISHED_COMPAT_NOTES"/);
   assert.match(script, /verify-update-artifacts\.sh "\$PUBLISHED_DMG" "\$PUBLISHED_APPCAST"/);
   assert.match(script, /BURNBAR_CHECK_PUBLISHED_BUILD=0/);
 });

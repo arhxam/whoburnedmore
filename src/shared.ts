@@ -959,13 +959,13 @@ export type OrgProvisionInput = z.infer<typeof OrgProvisionInput>;
 
 /**
  * Signed-in self-service org creation: the authenticated caller becomes the
- * owner immediately (no approval, no claim link). Slug + name are run through the
- * reserved/abuse filters via OrgSlug and isCleanOrgText.
+ * owner immediately (no approval, no claim link). New clients may send only a
+ * name; legacy clients may continue choosing a validated slug and type.
  */
 export const OrgSelfServeInput = z.object({
-  slug: OrgSlug,
+  slug: OrgSlug.optional(),
   name: z.string().min(1).max(120).refine(isCleanOrgText, "name not allowed"),
-  type: OrgType,
+  type: OrgType.optional(),
   description: z.string().max(2000).optional(),
   accentColor: HexColor.optional(),
   /** Who can view the board — defaults to the type's default when omitted. */
@@ -1062,6 +1062,8 @@ export interface OrgPublic {
    * a placeholder instead of `0`. Optional (back-compat).
    */
   aggregatesHidden?: boolean;
+  /** Assigned platform subdomain readiness. Optional for older API responses. */
+  subdomainStatus?: "pending" | "active" | "error";
   window: { startDate: string | null; endDate: string | null };
   createdAt: string;
 }

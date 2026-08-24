@@ -44,7 +44,7 @@ import {
   mergeTiers,
 } from "./collector.js";
 
-const SIDECAR_CLI_VERSION = "burnbar-0.8.1";
+const SIDECAR_CLI_VERSION = "burnbar-0.8.2";
 
 function syncConfig(env: NodeJS.ProcessEnv) {
   return loadConfig(env.WHOBURNEDMORE_CONFIG_DIR);

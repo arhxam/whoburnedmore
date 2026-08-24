@@ -53,7 +53,7 @@ try {
   });
 
   const expectedURL =
-    `https://github.com/arhxam/whoburnedmore/releases/download/v${project.marketingVersion}/BurnBar.dmg`;
+    `https://github.com/arhxam/whoburnedmore/releases/download/v${project.marketingVersion}/whoburnedmore.dmg`;
   if (appcast.enclosureURL !== expectedURL) {
     throw new Error(`Appcast enclosure URL ${appcast.enclosureURL} does not match ${expectedURL}`);
   }
@@ -68,7 +68,7 @@ try {
     process.stdout.write(appcast.edSignature);
   } else {
     console.log(
-      `UPDATE METADATA OK: BurnBar ${project.marketingVersion} (${project.buildVersion}), ${appcast.byteLength} bytes`
+      `UPDATE METADATA OK: whoburnedmore ${project.marketingVersion} (${project.buildVersion}), ${appcast.byteLength} bytes`
     );
   }
 } catch (error) {

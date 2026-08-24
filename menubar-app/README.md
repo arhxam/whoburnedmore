@@ -1,4 +1,4 @@
-# BurnBar
+# whoburnedmore
 
 Native macOS menu bar app showing **live token burn + remaining usage limits**
 across your AI coding tools — Claude Code, Codex, Cursor, Cline, Roo, Continue,
@@ -12,7 +12,7 @@ Plan: `docs/superpowers/plans/2026-08-02-burnbar-impl.md`
 
 Two processes, one privacy rule — nothing sensitive crosses a boundary:
 
-- **BurnBar.app** (Swift/SwiftUI `MenuBarExtra`, macOS 14+): UI, notifications,
+- **whoburnedmore for macOS** (Swift/SwiftUI `MenuBarExtra`, macOS 14+): UI, notifications,
   the Claude limits fetch (Keychain "Claude Code-credentials" → Anthropic's OAuth
   usage endpoint; the token lives in memory for one request, is never written
   anywhere, and is never refreshed — rotating it would break `claude`'s login),
@@ -61,14 +61,21 @@ pnpm workspace installed (`pnpm install` at repo root).
 ```bash
 cd apps/menubar
 bash scripts/build-app.sh      # sidecar + xcodebuild + assemble + Developer ID sign
-bash scripts/make-dmg.sh       # dist/BurnBar.dmg
+bash scripts/make-dmg.sh       # dist/whoburnedmore.dmg + compatibility alias
 open dist/BurnBar.app
 ```
 
-BurnBar uses Sparkle 2 for updates. It checks once per day by default, asks
+whoburnedmore uses Sparkle 2 for updates. It checks once per day by default, asks
 before installing, and exposes automatic-install plus **Check for Updates…**
 controls in General Settings. See `docs/runbooks/burnbar-release.md` for the
 signed appcast and release procedure.
+
+The internal Xcode target, module, executable, bundle identifier, environment
+variables, and on-disk paths retain `BurnBar`/`burnbar` for compatibility with
+existing installations. New releases publish `whoburnedmore.dmg` as the primary
+artifact and an exact byte-for-byte `BurnBar.dmg` alias for older links/updaters.
+Appcast release notes follow the same rule: `whoburnedmore.md` is primary and
+`BurnBar.md` remains as a byte-identical compatibility asset.
 
 ## Run & debug
 
@@ -103,15 +110,15 @@ bash scripts/run-swift-tests.sh      # BurnBarCore: formatters, meter states, de
 ## Distribution status
 
 Developer ID signing, notarization, a stapled DMG, and Sparkle auto-update are
-part of the release path. A Homebrew cask is not currently provided. BurnBar
+part of the release path. A Homebrew cask is not currently provided. whoburnedmore
 performs its own opt-in live leaderboard sync through the sidecar while agents
 are active, throttled to at most twice per minute. The CLI launchd job remains
-a slower independent convergence path, not BurnBar's primary live path.
+a slower independent convergence path, not whoburnedmore's primary live path.
 
-## First run & how BurnBar connects to whoburnedmore
+## First run & how whoburnedmore connects
 
 **Minute one (no account needed):** download the DMG → drag to Applications →
-open. BurnBar detects which AI tools have local logs (`~/.claude`, `~/.codex`,
+open. whoburnedmore detects which AI tools have local logs (`~/.claude`, `~/.codex`,
 Cursor's app storage, VS Code globalStorage, `~/.continue`) and starts the
 sidecar's file watchers immediately — the flame + your chosen metrics appear in
 the menu bar within seconds, all parsed on-device. The onboarding window shows
@@ -121,7 +128,7 @@ Declining any of them leaves local burn tracking fully functional; Codex limits
 come from local session files and need no additional permission.
 
 **The whoburnedmore interconnect (all optional):**
-1. *Already a CLI user?* BurnBar reads `~/.config/whoburnedmore/config.json` —
+1. *Already a CLI user?* whoburnedmore reads `~/.config/whoburnedmore/config.json` —
    the same file `npx whoburnedmore` writes — and the leaderboard context lights
    up with today's live top burners and the people around your daily rank. If
    you have not burned yet today, it shows the daily top five. Zero setup.
@@ -138,5 +145,5 @@ come from local session files and need no additional permission.
 4. *Offline/site down:* only the leaderboard context greys out; limits, burn, forecasts
    and notifications are fully local and keep working.
 
-"Tokens this session" counts burn observed while BurnBar is running within the
+"Tokens this session" counts burn observed while whoburnedmore is running within the
 current 5-hour window (it can't see tokens burned while it wasn't running).

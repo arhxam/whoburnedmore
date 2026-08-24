@@ -578,7 +578,7 @@ struct FooterZone: View {
                 Button { SettingsWindow.show(model: model, settings: settings) } label: { Image(systemName: "gearshape") }
                     .buttonStyle(.plain).help("Settings")
                 Button { NSApp.terminate(nil) } label: { Image(systemName: "power") }
-                    .buttonStyle(.plain).help("Quit BurnBar")
+                    .buttonStyle(.plain).help("Quit whoburnedmore")
             }
         }
     }

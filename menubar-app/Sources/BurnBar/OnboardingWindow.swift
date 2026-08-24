@@ -15,7 +15,7 @@ enum OnboardingWindow {
         )
         hosting.sizingOptions = []  // see DebugWindow: sizing negotiation loops
         let w = NSWindow(contentViewController: hosting)
-        w.title = "Welcome to BurnBar"
+        w.title = "Welcome to whoburnedmore"
         w.setContentSize(NSSize(width: 520, height: 650))
         w.styleMask = [.titled, .closable]
         w.isReleasedWhenClosed = false
@@ -61,7 +61,7 @@ struct OnboardingView: View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 8) {
                 BurnFlame(size: 20)
-                Text("BurnBar is watching your burn").font(.title2.weight(.bold))
+                Text("whoburnedmore is watching your burn").font(.title2.weight(.bold))
             }
             Text("AI tools found — live tracking is already running on-device:")
                 .foregroundStyle(.secondary)
@@ -81,7 +81,7 @@ struct OnboardingView: View {
 
             Divider()
 
-            Text("Choose what BurnBar may do").font(.headline)
+            Text("Choose what whoburnedmore may do").font(.headline)
             VStack(alignment: .leading, spacing: 10) {
                 Toggle("Launch at login", isOn: $launchAtLogin)
                     .onChange(of: launchAtLogin) { _, on in
@@ -125,7 +125,7 @@ struct OnboardingView: View {
             Label {
                 Text("Optional: get ranked").font(.headline)
             } icon: { Image(systemName: "trophy.fill").foregroundStyle(.orange) }
-            Text("See your live daily rank and nearby burners. BurnBar works without an account.")
+            Text("See your live daily rank and nearby burners. whoburnedmore works without an account.")
                 .font(.callout).foregroundStyle(.secondary)
             HStack {
                 Button("See the leaderboard ↗") {

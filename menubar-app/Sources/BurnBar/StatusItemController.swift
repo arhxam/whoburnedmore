@@ -28,7 +28,7 @@ final class StatusItemController: NSObject {
         button.target = self
         button.action = #selector(toggleIsland)
         button.sendAction(on: [.leftMouseUp])
-        button.toolTip = "Open BurnBar Island"
+        button.toolTip = "Open whoburnedmore"
 
         hostingView.translatesAutoresizingMaskIntoConstraints = false
         button.addSubview(hostingView)

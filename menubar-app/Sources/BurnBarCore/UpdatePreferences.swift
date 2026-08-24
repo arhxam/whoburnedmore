@@ -46,11 +46,11 @@ public struct BundleVersionPresentation: Equatable, Sendable {
     public var displayName: String {
         switch (marketingVersion, buildVersion) {
         case let (.some(marketing), .some(build)):
-            return "BurnBar \(marketing) (\(build))"
+            return "whoburnedmore \(marketing) (\(build))"
         case let (.some(marketing), nil):
-            return "BurnBar \(marketing)"
+            return "whoburnedmore \(marketing)"
         default:
-            return "BurnBar"
+            return "whoburnedmore"
         }
     }
 

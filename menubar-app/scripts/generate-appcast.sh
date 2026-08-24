@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Generate dist/appcast.xml for the signed/notarized BurnBar DMG. The private
+# Generate dist/appcast.xml for the signed/notarized whoburnedmore DMG. The private
 # EdDSA key comes from Keychain by default or stdin via an environment secret.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-DMG="${1:-dist/BurnBar.dmg}"
+DMG="${1:-dist/whoburnedmore.dmg}"
 NOTES="${2:-}"
 [[ -f "$DMG" ]] || { echo "DMG not found: $DMG" >&2; exit 1; }
 
@@ -20,10 +20,10 @@ BIN="$(bash scripts/find-sparkle-tools.sh)"
 ACCOUNT="${BURNBAR_SPARKLE_KEY_ACCOUNT:-com.whoburnedmore.burnbar}"
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
-cp "$DMG" "$STAGE/BurnBar.dmg"
+cp "$DMG" "$STAGE/whoburnedmore.dmg"
 if [[ -n "$NOTES" ]]; then
   [[ -f "$NOTES" ]] || { echo "release notes not found: $NOTES" >&2; exit 1; }
-  cp "$NOTES" "$STAGE/BurnBar.md"
+  cp "$NOTES" "$STAGE/whoburnedmore.md"
 fi
 
 PREFIX="https://github.com/arhxam/whoburnedmore/releases/download/v${VERSION}/"
@@ -46,8 +46,13 @@ fi
 [[ -f "$STAGE/appcast.xml" ]] || { echo "Sparkle did not generate appcast.xml" >&2; exit 1; }
 cp "$STAGE/appcast.xml" dist/appcast.xml
 if [[ -n "$NOTES" ]]; then
-  cp "$NOTES" dist/BurnBar.md
+  cp "$NOTES" dist/whoburnedmore.md
+  cp -p dist/whoburnedmore.md dist/BurnBar.md
+  cmp -s dist/whoburnedmore.md dist/BurnBar.md || {
+    echo "compatibility release notes differ from primary artifact" >&2
+    exit 1
+  }
 else
-  rm -f dist/BurnBar.md
+  rm -f dist/whoburnedmore.md dist/BurnBar.md
 fi
-echo "==> appcast ready: dist/appcast.xml for BurnBar ${VERSION} (${BUILD})"
+echo "==> appcast ready: dist/appcast.xml for whoburnedmore ${VERSION} (${BUILD})"

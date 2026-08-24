@@ -47,7 +47,7 @@ struct IslandSurfaceView: View {
         .contentShape(Rectangle())
         .shadow(color: expanded ? .black.opacity(0.5) : .clear, radius: 24, x: 0, y: 14)
         .accessibilityElement(children: .contain)
-        .accessibilityLabel(expanded ? "BurnBar dashboard" : "BurnBar hover value")
+        .accessibilityLabel(expanded ? "whoburnedmore dashboard" : "whoburnedmore hover value")
         .animation(
             accessibilityReduceMotion
                 ? .linear(duration: 0.01)
@@ -74,7 +74,7 @@ struct IslandSurfaceView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Open BurnBar, \(model.islandMetricText ?? "no value")")
+        .accessibilityLabel("Open whoburnedmore, \(model.islandMetricText ?? "no value")")
         .accessibilityHint("Expands from the camera area")
     }
 
@@ -112,11 +112,11 @@ private struct IslandHeader: View {
                 .interpolation(.high)
                 .frame(width: 38, height: 38)
                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .accessibilityLabel("BurnBar")
+                .accessibilityLabel("whoburnedmore")
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
-                    Text("BurnBar")
+                    Text("whoburnedmore")
                         .font(.system(size: 15, weight: .bold, design: .rounded))
                     Circle().fill(Color.green).frame(width: 5, height: 5)
                     Text("live")
@@ -140,8 +140,8 @@ private struct IslandHeader: View {
                     .background(Color.white.opacity(0.09), in: Circle())
             }
             .buttonStyle(.plain)
-            .help("Close BurnBar")
-            .accessibilityLabel("Close BurnBar")
+            .help("Close whoburnedmore")
+            .accessibilityLabel("Close whoburnedmore")
         }
         .padding(.horizontal, 16)
         .frame(height: 56)
@@ -449,7 +449,7 @@ private struct IslandDashboard: View {
             Button { SettingsWindow.show(model: model, settings: settings) } label: { Image(systemName: "gearshape") }
                 .buttonStyle(.plain).help("Settings")
             Button { NSApp.terminate(nil) } label: { Image(systemName: "power") }
-                .buttonStyle(.plain).help("Quit BurnBar")
+                .buttonStyle(.plain).help("Quit whoburnedmore")
         }
         .foregroundStyle(.secondary)
         .frame(height: 24)

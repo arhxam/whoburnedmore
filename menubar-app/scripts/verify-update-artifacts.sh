@@ -3,7 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-DMG="${1:-dist/BurnBar.dmg}"
+DMG="${1:-dist/whoburnedmore.dmg}"
 APPCAST="${2:-dist/appcast.xml}"
 [[ -f "$DMG" ]] || { echo "DMG not found: $DMG" >&2; exit 1; }
 [[ -f "$APPCAST" ]] || { echo "appcast not found: $APPCAST" >&2; exit 1; }
@@ -27,8 +27,16 @@ PROJECT_VERSION="$(/usr/bin/awk '$1 == "MARKETING_VERSION:" { gsub(/"/, "", $2);
 PROJECT_BUILD="$(/usr/bin/awk '$1 == "CURRENT_PROJECT_VERSION:" { gsub(/"/, "", $2); print $2 }' project.yml)"
 APP_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
 APP_BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Contents/Info.plist")"
+APP_DISPLAY_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP/Contents/Info.plist")"
+APP_BUNDLE_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleName' "$APP/Contents/Info.plist")"
+APP_BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Contents/Info.plist")"
+APP_EXECUTABLE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Contents/Info.plist")"
 [[ "$APP_VERSION" == "$PROJECT_VERSION" ]] || { echo "embedded app version $APP_VERSION != project $PROJECT_VERSION" >&2; exit 1; }
 [[ "$APP_BUILD" == "$PROJECT_BUILD" ]] || { echo "embedded app build $APP_BUILD != project $PROJECT_BUILD" >&2; exit 1; }
+[[ "$APP_DISPLAY_NAME" == "whoburnedmore" ]] || { echo "embedded app display name is $APP_DISPLAY_NAME" >&2; exit 1; }
+[[ "$APP_BUNDLE_NAME" == "whoburnedmore" ]] || { echo "embedded app bundle name is $APP_BUNDLE_NAME" >&2; exit 1; }
+[[ "$APP_BUNDLE_ID" == "com.whoburnedmore.burnbar" ]] || { echo "embedded app bundle ID changed to $APP_BUNDLE_ID" >&2; exit 1; }
+[[ "$APP_EXECUTABLE" == "BurnBar" ]] || { echo "embedded app executable changed to $APP_EXECUTABLE" >&2; exit 1; }
 
 codesign --verify --strict --deep --verbose=4 "$APP"
 if [[ "${BURNBAR_REQUIRE_NOTARIZATION:-0}" == "1" ]]; then
@@ -81,4 +89,4 @@ else
   "$BIN/sign_update" --account "$ACCOUNT" --verify "$DMG" "$SIGNATURE"
 fi
 
-echo "UPDATE ARTIFACTS OK: BurnBar ${PROJECT_VERSION} (${PROJECT_BUILD})"
+echo "UPDATE ARTIFACTS OK: whoburnedmore ${PROJECT_VERSION} (${PROJECT_BUILD})"

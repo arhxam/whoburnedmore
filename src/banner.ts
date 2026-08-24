@@ -1,4 +1,5 @@
 import pc from "picocolors";
+import { PUBLIC_PRODUCT_NAME } from "./brand.js";
 
 /**
  * The startup banner: the "whoburnedmore?" wordmark painted in a flame gradient
@@ -6,7 +7,7 @@ import pc from "picocolors";
  * as one tidy block instead of loose ASCII. Printed once at the top of a normal
  * run — never in quiet/background-sync mode.
  */
-const WORD = "whoburnedmore";
+const WORD = PUBLIC_PRODUCT_NAME;
 // 256-colour flame gradient, hot (left) → ember (right).
 const SHADES = [226, 220, 214, 208, 202, 196];
 

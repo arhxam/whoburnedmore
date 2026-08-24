@@ -23,7 +23,7 @@ function appcast(overrides = {}) {
     version: "8000",
     shortVersion: "0.8.0",
     length: "12345",
-    url: "https://github.com/arhxam/whoburnedmore/releases/download/v0.8.0/BurnBar.dmg",
+    url: "https://github.com/arhxam/whoburnedmore/releases/download/v0.8.0/whoburnedmore.dmg",
     signature: "signed-update-value",
     minimumSystemVersion: "14.0",
     ...overrides,
@@ -81,7 +81,7 @@ test("parses a signed HTTPS appcast enclosure", () => {
     marketingVersion: "0.8.0",
     buildVersion: "8000",
     byteLength: 12345,
-    enclosureURL: "https://github.com/arhxam/whoburnedmore/releases/download/v0.8.0/BurnBar.dmg",
+    enclosureURL: "https://github.com/arhxam/whoburnedmore/releases/download/v0.8.0/whoburnedmore.dmg",
     edSignature: "signed-update-value",
     minimumSystemVersion: "14.0",
   });
@@ -104,7 +104,7 @@ test("parses Sparkle 2.9 item-level version elements", () => {
 
 test("rejects missing EdDSA signatures and non-HTTPS update URLs", () => {
   assert.throws(() => parseAppcastMetadata(appcast({ signature: "" })), /EdDSA signature/i);
-  assert.throws(() => parseAppcastMetadata(appcast({ url: "http://example.com/BurnBar.dmg" })), /HTTPS/i);
+  assert.throws(() => parseAppcastMetadata(appcast({ url: "http://example.com/whoburnedmore.dmg" })), /HTTPS/i);
 });
 
 test("rejects appcast metadata that disagrees with the release artifact", () => {

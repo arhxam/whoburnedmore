@@ -41,6 +41,7 @@ import {
   uninstallAutoSync,
 } from "./autosync.js";
 import { printBanner } from "./banner.js";
+import { LEGACY_COMMAND, PUBLIC_PRODUCT_NAME } from "./brand.js";
 import { daemonLoop } from "./daemon.js";
 import { collectAll, type ProgressFn } from "./collect.js";
 import { antigravityNoticeLines, detectAntigravity } from "./antigravity.js";
@@ -198,7 +199,7 @@ function showLocalDashboard(payload: SubmitPayload): void {
 async function run(flags: Flags): Promise<void> {
   if (!flags.quiet) {
     printBanner();
-    console.log(pc.dim(`  whoburnedmore v${VERSION} · ${flags.local ? "local mode" : apiBase()}`));
+    console.log(pc.dim(`  ${PUBLIC_PRODUCT_NAME} v${VERSION} · ${flags.local ? "local mode" : apiBase()}`));
     // No prompt — just a one-line heads-up of exactly what's about to happen and
     // how to undo it. The dashboard is claimable/private/removable after the
     // fact, so we don't block the happy path on a confirmation.
@@ -1066,24 +1067,24 @@ async function main(): Promise<void> {
 
 function printHelp(): void {
   console.log(`
-  ${pc.bold("whoburnedmore")} — who burned more tokens, you or them?
+  ${pc.bold(PUBLIC_PRODUCT_NAME)} — who burned more tokens, you or them?
 
   ${pc.bold("usage")}
-    npx whoburnedmore              sign in, burn + land on the public leaderboard, open your dashboard
-    npx whoburnedmore --board=CODE compare with friends — sign in and join their board
-    npx whoburnedmore --org=SLUG --pass=CODE  join your organization's board (companies/hackathons)
-    npx whoburnedmore --local      build the dashboard on your machine and open it (offline)
-    npx whoburnedmore --dry-run    print exactly what would be sent, send nothing
-    npx whoburnedmore --no-submit  collect locally, send nothing (no dashboard)
-    npx whoburnedmore link                link this server/VM (prompts for a one-time code)
-    npx whoburnedmore daemon       keep syncing in the foreground (VMs/containers with no cron)
-    npx whoburnedmore private      take yourself off the public leaderboard
-    npx whoburnedmore public       put yourself back on it
-    npx whoburnedmore remove       delete your usage data and stop background sync
-    npx whoburnedmore verify       submit detailed usage evidence for review (never prompts or code)
-    npx whoburnedmore status       check background-sync health (last sync, staleness)
-    npx whoburnedmore uninstall-sync   turn off the background sync
-    npx whoburnedmore install-sync     turn it back on after uninstalling
+    npx ${LEGACY_COMMAND}              sign in, burn + land on the public leaderboard, open your dashboard
+    npx ${LEGACY_COMMAND} --board=CODE compare with friends — sign in and join their board
+    npx ${LEGACY_COMMAND} --org=SLUG --pass=CODE  join your organization's board (companies/hackathons)
+    npx ${LEGACY_COMMAND} --local      build the dashboard on your machine and open it (offline)
+    npx ${LEGACY_COMMAND} --dry-run    print exactly what would be sent, send nothing
+    npx ${LEGACY_COMMAND} --no-submit  collect locally, send nothing (no dashboard)
+    npx ${LEGACY_COMMAND} link                link this server/VM (prompts for a one-time code)
+    npx ${LEGACY_COMMAND} daemon       keep syncing in the foreground (VMs/containers with no cron)
+    npx ${LEGACY_COMMAND} private      take yourself off the public leaderboard
+    npx ${LEGACY_COMMAND} public       put yourself back on it
+    npx ${LEGACY_COMMAND} remove       delete your usage data and stop background sync
+    npx ${LEGACY_COMMAND} verify       submit detailed usage evidence for review (never prompts or code)
+    npx ${LEGACY_COMMAND} status       check background-sync health (last sync, staleness)
+    npx ${LEGACY_COMMAND} uninstall-sync   turn off the background sync
+    npx ${LEGACY_COMMAND} install-sync     turn it back on after uninstalling
 
   Your first run signs you in (we open a page, you approve a short code) and binds
   this machine to your account — your usage lands on the leaderboard under your
@@ -1094,10 +1095,10 @@ function printHelp(): void {
   your machine at all.
 
   ${pc.bold("servers & VMs")}
-    Generate a one-time \`link\` command from your profile on whoburnedmore.com and
+    Generate a one-time \`link\` command from your profile on ${PUBLIC_PRODUCT_NAME}.com and
     run it inside the VM to bind that machine to your account. On a persistent VM
     background sync uses cron or a systemd user timer automatically; in a container
-    or any host without a scheduler, run \`whoburnedmore daemon\` under your process
+    or any host without a scheduler, run \`${LEGACY_COMMAND} daemon\` under your process
     manager instead. Set WHOBURNEDMORE_CONFIG_DIR to a persistent path so the
     machine identity survives restarts. See docs/SERVER-VM-SETUP.md.
 `);

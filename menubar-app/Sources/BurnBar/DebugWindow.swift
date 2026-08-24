@@ -16,7 +16,7 @@ enum DebugWindow {
         )
         hosting.sizingOptions = []  // no SwiftUI<->AppKit size negotiation: it loops (v2 bisect)
         let w = NSWindow(contentViewController: hosting)
-        w.title = "BurnBar Debug"
+        w.title = "whoburnedmore Debug"
         w.setContentSize(NSSize(width: 330, height: 700))
         w.styleMask = [.titled]
         w.level = .floating

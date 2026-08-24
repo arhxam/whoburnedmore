@@ -43,10 +43,10 @@ targets:
       path: Info.plist
       properties:
         CFBundleIdentifier: com.whoburnedmore.burnbar
-        CFBundleName: BurnBar
-        CFBundleDisplayName: BurnBar
-        CFBundleShortVersionString: "0.8.1"
-        CFBundleVersion: "8001"
+        CFBundleName: whoburnedmore
+        CFBundleDisplayName: whoburnedmore
+        CFBundleShortVersionString: "0.8.2"
+        CFBundleVersion: "8002"
         CFBundleIconFile: "AppIcon"
         LSUIElement: true
         LSMinimumSystemVersion: "14.0"
@@ -59,13 +59,16 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.whoburnedmore.burnbar
+        # Xcode's generated plist otherwise replaces CFBundleName with
+        # PRODUCT_NAME (BurnBar), even though the explicit plist says otherwise.
+        INFOPLIST_KEY_CFBundleName: whoburnedmore
+        INFOPLIST_KEY_CFBundleDisplayName: whoburnedmore
+        GENERATE_INFOPLIST_FILE: "NO"
         ENABLE_HARDENED_RUNTIME: "YES"
-        # With GENERATE_INFOPLIST_FILE=YES, the version keys come from these build
-        # settings — not the info.properties above — so they MUST be set or the
-        # bundle ships with no CFBundleShortVersionString (which also blocks
-        # notarization).
-        MARKETING_VERSION: "0.8.1"
-        CURRENT_PROJECT_VERSION: "8001"
+        # Keep these aligned with the explicit Info.plist. Sparkle and notarization
+        # validate both values at release time.
+        MARKETING_VERSION: "0.8.2"
+        CURRENT_PROJECT_VERSION: "8002"
 
   BurnBarCoreTests:
     type: bundle.unit-test
