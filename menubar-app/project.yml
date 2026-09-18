@@ -52,7 +52,9 @@ targets:
         LSMinimumSystemVersion: "14.0"
         NSHumanReadableCopyright: "© 2026 whoburnedmore"
         SUFeedURL: https://github.com/arhxam/whoburnedmore/releases/latest/download/appcast.xml
-        SUPublicEDKey: 9kMJHuWCAYyBMx48e30Xh4g7qABppEKiPkQ5rdQE9vo=
+        # 0.8.3 rotates the lost EdDSA key through the unchanged Developer ID
+        # designated requirement. See docs/runbooks/burnbar-release.md.
+        SUPublicEDKey: GVEg5oXZvNWjkuKCrbpC7kTRYZ2shnFpljBvT3dW8ek=
         SUEnableAutomaticChecks: true
         SUScheduledCheckInterval: 86400
         SUAutomaticallyUpdate: false

@@ -35,7 +35,7 @@
 	<key>SUFeedURL</key>
 	<string>https://github.com/arhxam/whoburnedmore/releases/latest/download/appcast.xml</string>
 	<key>SUPublicEDKey</key>
-	<string>9kMJHuWCAYyBMx48e30Xh4g7qABppEKiPkQ5rdQE9vo=</string>
+	<string>GVEg5oXZvNWjkuKCrbpC7kTRYZ2shnFpljBvT3dW8ek=</string>
 	<key>SUScheduledCheckInterval</key>
 	<integer>86400</integer>
 </dict>

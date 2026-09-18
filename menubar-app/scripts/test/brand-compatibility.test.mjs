@@ -8,6 +8,17 @@ import test from "node:test";
 const root = path.resolve(import.meta.dirname, "../..");
 const read = (relativePath) => readFile(path.join(root, relativePath), "utf8");
 
+test("real native clients and sidecar advertise the prepared bundle version", async () => {
+  const project = await read("project.yml");
+  const version = project.match(/MARKETING_VERSION: "([^"]+)"/)?.[1];
+  assert.ok(version, "project marketing version must be present");
+  for (const file of ["Sources/BurnBar/WbmClient.swift", "Sources/BurnBar/DeviceFlow.swift"]) {
+    assert.ok((await read(file)).includes(`"burnbar/${version}"`), `${file} has a stale User-Agent`);
+  }
+  assert.ok((await read("sidecar/src/main.ts")).includes(`const VERSION = "${version}";`));
+  assert.ok((await read("sidecar/src/sync.ts")).includes(`const SIDECAR_CLI_VERSION = "burnbar-${version}";`));
+});
+
 test("publishes whoburnedmore while preserving the installed-app identity", async () => {
   const [project, plist] = await Promise.all([read("project.yml"), read("Info.plist")]);
 
@@ -20,7 +31,9 @@ test("publishes whoburnedmore while preserving the installed-app identity", asyn
   assert.match(project, /INFOPLIST_KEY_CFBundleDisplayName: whoburnedmore/);
   assert.match(project, /GENERATE_INFOPLIST_FILE: "NO"/);
   assert.match(project, /SUFeedURL: https:\/\/github\.com\/arhxam\/whoburnedmore\/releases\/latest\/download\/appcast\.xml/);
-  assert.match(project, /SUPublicEDKey: 9kMJHuWCAYyBMx48e30Xh4g7qABppEKiPkQ5rdQE9vo=/);
+  const publicKey = "GVEg5oXZvNWjkuKCrbpC7kTRYZ2shnFpljBvT3dW8ek=";
+  assert.ok(project.includes(`SUPublicEDKey: ${publicKey}`));
+  assert.ok(plist.includes(`<string>${publicKey}</string>`));
 
   assert.match(plist, /<key>CFBundleExecutable<\/key>\s*<string>\$\(EXECUTABLE_NAME\)<\/string>/);
   assert.match(plist, /<key>CFBundleIdentifier<\/key>\s*<string>com\.whoburnedmore\.burnbar<\/string>/);
