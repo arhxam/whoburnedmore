@@ -72,23 +72,21 @@ fi
 
 node scripts/verify-update-metadata.mjs "${METADATA_ARGS[@]}"
 SIGNATURE="$(node scripts/verify-update-metadata.mjs "${METADATA_ARGS[@]}" --signature-only true)"
-BIN="$(bash scripts/find-sparkle-tools.sh)"
-ACCOUNT="${BURNBAR_SPARKLE_KEY_ACCOUNT:-com.whoburnedmore.burnbar}"
 BUNDLED_PUBLIC_KEY="$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "$APP/Contents/Info.plist")"
-if [[ -n "${BURNBAR_SPARKLE_PRIVATE_KEY:-}" && -n "${BURNBAR_SPARKLE_PUBLIC_KEY:-}" ]]; then
+if [[ -n "${BURNBAR_SPARKLE_PUBLIC_KEY:-}" ]]; then
   SIGNING_PUBLIC_KEY="$BURNBAR_SPARKLE_PUBLIC_KEY"
 else
+  BIN="$(bash scripts/find-sparkle-tools.sh)"
+  ACCOUNT="${BURNBAR_SPARKLE_KEY_ACCOUNT:-com.whoburnedmore.burnbar}"
   SIGNING_PUBLIC_KEY="$("$BIN/generate_keys" --account "$ACCOUNT" -p)"
 fi
 [[ "$BUNDLED_PUBLIC_KEY" == "$SIGNING_PUBLIC_KEY" ]] || {
   echo "bundled SUPublicEDKey does not match the configured Sparkle signing key" >&2
   exit 1
 }
-if [[ -n "${BURNBAR_SPARKLE_PRIVATE_KEY:-}" ]]; then
-  printf '%s' "$BURNBAR_SPARKLE_PRIVATE_KEY" \
-    | "$BIN/sign_update" --ed-key-file - --verify "$DMG" "$SIGNATURE"
-else
-  "$BIN/sign_update" --account "$ACCOUNT" --verify "$DMG" "$SIGNATURE"
-fi
+# Sparkle's sign_update --verify loads the private key before verification.
+# Verify the same Ed25519 signature with the authenticated bundle's public key
+# directly so repeated release/download gates need no private-key permission.
+node scripts/verify-sparkle-signature.mjs "$DMG" "$SIGNATURE" "$BUNDLED_PUBLIC_KEY"
 
 echo "UPDATE ARTIFACTS OK: whoburnedmore ${PROJECT_VERSION} (${PROJECT_BUILD})"
