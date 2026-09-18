@@ -106,6 +106,7 @@ struct MenuBarLabel: View {
                     .font(.system(size: 12, weight: .medium, design: .monospaced))
             }
         }
+        .foregroundStyle(state == .critical ? Color.red : (state == .amber ? Color.orange : Color.primary))
     }
 
 }

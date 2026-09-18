@@ -11,7 +11,7 @@
   ],
   "scripts": {
     "build": "node scripts/clean.mjs && esbuild src/index.ts --bundle --platform=node --format=esm --target=node20 --outfile=dist/index.js --external:ccusage --external:picocolors --external:tokscale",
-    "test": "vitest run",
+    "test": "vitest run --exclude '**/.context/**' --exclude 'menubar-app/**'",
     "lint": "tsc -p tsconfig.json --noEmit",
     "smoke:package": "node scripts/smoke-package.mjs",
     "prepublishOnly": "npm run lint && npm run test && npm run build && npm run smoke:package"

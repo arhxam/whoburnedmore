@@ -11,6 +11,7 @@ final class SidecarClient {
     private var stdinPipe: Pipe?
     private var stdoutPipe: Pipe?
     private var restartDelay: TimeInterval = 1
+    private var restartTask: Task<Void, Never>?
     private var stopped = false
     var onEvent: ((SidecarEvent) -> Void)?
 
@@ -30,12 +31,15 @@ final class SidecarClient {
     }
 
     func start() {
+        guard stopped || (process == nil && restartTask == nil) else { return }
         stopped = false
         launch()
     }
 
     func stop() {
         stopped = true
+        restartTask?.cancel()
+        restartTask = nil
         try? stdinPipe?.fileHandleForWriting.write(contentsOf: Data("{\"cmd\":\"quit\"}\n".utf8))
         stdoutPipe?.fileHandleForReading.readabilityHandler = nil // tear down the dispatch source
         process?.terminate()
@@ -49,6 +53,7 @@ final class SidecarClient {
     }
 
     private func launch() {
+        guard !stopped, process == nil else { return }
         guard let bin = Self.sidecarURL(), FileManager.default.isExecutableFile(atPath: bin.path) else {
             log.error("sidecar binary missing")
             return
@@ -68,16 +73,18 @@ final class SidecarClient {
         p.standardInput = stdin
         p.standardError = FileHandle.nullDevice
 
-        var framer = BoundedNDJSONFramer()
+        let framer = OSAllocatedUnfairLock(initialState: BoundedNDJSONFramer())
         stdout.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let chunk = handle.availableData
-            guard !chunk.isEmpty else { return }
             do {
-                for line in try framer.append(chunk) {
+                let lines = try framer.withLock { state in
+                    try state.append(handle.availableData)
+                }
+                for line in lines {
                     guard let event = SidecarEvent.parse(line: line) else { continue }
-                    Task { @MainActor [weak self] in
-                        self?.restartDelay = 1
-                        self?.onEvent?(event)
+                    Task { @MainActor [weak self, weak p] in
+                        guard let self, let p, self.process === p, !self.stopped else { return }
+                        self.restartDelay = 1
+                        self.onEvent?(event)
                     }
                 }
             } catch {
@@ -89,14 +96,14 @@ final class SidecarClient {
                 }
             }
         }
-        p.terminationHandler = { [weak self] _ in
+        p.terminationHandler = { [weak self] finished in
             Task { @MainActor [weak self] in
-                guard let self, !self.stopped else { return }
-                self.log.warning("sidecar exited — restarting in \(self.restartDelay, format: .fixed(precision: 0))s")
-                let delay = self.restartDelay
-                self.restartDelay = min(delay * 2, 60)
-                try? await Task.sleep(for: .seconds(delay))
-                if !self.stopped { self.launch() }
+                guard let self, self.process === finished else { return }
+                self.stdoutPipe?.fileHandleForReading.readabilityHandler = nil
+                self.process = nil
+                self.stdinPipe = nil
+                self.stdoutPipe = nil
+                self.scheduleRestart()
             }
         }
 
@@ -107,7 +114,23 @@ final class SidecarClient {
             stdoutPipe = stdout
             log.info("sidecar started pid \(p.processIdentifier)")
         } catch {
+            stdout.fileHandleForReading.readabilityHandler = nil
             log.error("sidecar spawn failed: \(error.localizedDescription)")
+            scheduleRestart()
+        }
+    }
+
+    private func scheduleRestart() {
+        guard !stopped, restartTask == nil else { return }
+        log.warning("sidecar exited — restarting in \(self.restartDelay, format: .fixed(precision: 0))s")
+        let delay = restartDelay
+        restartDelay = min(delay * 2, 60)
+        restartTask = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(delay)) }
+            catch { return }
+            guard let self, !self.stopped else { return }
+            self.restartTask = nil
+            self.launch()
         }
     }
 }

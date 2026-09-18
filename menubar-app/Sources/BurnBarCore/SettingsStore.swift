@@ -16,8 +16,9 @@ public final class SettingsStore: ObservableObject {
         let didCompleteOnboarding = Self.bool(d, Keys.onboardingDone, false)
         textMode = MenuBarTextMode(rawValue: d.string(forKey: Keys.textMode) ?? "") ?? .sessionStatus
         // Metric slots. Explicit values win. A legacy user (only textMode stored)
-        // migrates from it; a fresh install gets the default trio the bar ships
-        // with: overall tokens · Claude 5h % · Codex 5h %.
+        // migrates from it. Keep three remembered choices; a fresh install
+        // initially displays only overall tokens, with provider limits ready
+        // when the user increases the item count.
         let hasLegacy = d.string(forKey: Keys.textMode) != nil
         let migrated = MenuBarMetric.migrate(
             from: MenuBarTextMode(rawValue: d.string(forKey: Keys.textMode) ?? "") ?? .sessionStatus
@@ -46,6 +47,36 @@ public final class SettingsStore: ObservableObject {
         metricSlot1 = MenuBarMetric.normalized(rawMetric1, for: source1, allowNone: true)
         metricSlot2 = MenuBarMetric.normalized(rawMetric2, for: source2, allowNone: true)
         metricSlot3 = MenuBarMetric.normalized(rawMetric3, for: source3, allowNone: true)
+        if d.object(forKey: Keys.menuBarItemCount) != nil {
+            menuBarItemCount = min(3, max(0, d.integer(forKey: Keys.menuBarItemCount)))
+        } else {
+            // Migrate hidden legacy slots without changing the visible order.
+            // A fresh install starts compact; existing installations retain
+            // their exact visible choices, including an icon-only bar.
+            let slots = [(MenuBarMetric.normalized(rawMetric1, for: source1, allowNone: true), source1),
+                         (MenuBarMetric.normalized(rawMetric2, for: source2, allowNone: true), source2),
+                         (MenuBarMetric.normalized(rawMetric3, for: source3, allowNone: true), source3)]
+            let visible = slots.filter { $0.0 != .none }
+            let existing = hasLegacy || didCompleteOnboarding ||
+                [Keys.metricSlot1, Keys.metricSlot2, Keys.metricSlot3].contains { defaults.object(forKey: $0) != nil }
+            let initialCount = existing ? visible.count : 1
+            menuBarItemCount = initialCount
+            let ordered = visible + slots.filter { $0.0 == .none }
+            metricSlot1 = ordered[0].0
+            metricProvider1 = ordered[0].1
+            metricSlot2 = ordered[1].0
+            metricProvider2 = ordered[1].1
+            metricSlot3 = ordered[2].0
+            metricProvider3 = ordered[2].1
+            // Property observers do not run during initialization.
+            for (index, key) in [Keys.metricSlot1, Keys.metricSlot2, Keys.metricSlot3].enumerated() {
+                d.set(ordered[index].0.rawValue, forKey: key)
+            }
+            for (index, key) in [Keys.metricProvider1, Keys.metricProvider2, Keys.metricProvider3].enumerated() {
+                d.set(ordered[index].1, forKey: key)
+            }
+            d.set(initialCount, forKey: Keys.menuBarItemCount)
+        }
         let islandSource = d.string(forKey: Keys.islandMetricProvider) ?? "all"
         islandMetricProvider = islandSource
         let rawIslandMetric = MenuBarMetric(rawValue: d.string(forKey: Keys.islandMetric) ?? "") ?? .tightestLimit
@@ -96,6 +127,7 @@ public final class SettingsStore: ObservableObject {
     @Published public var metricSlot1: MenuBarMetric { didSet { d.set(metricSlot1.rawValue, forKey: Keys.metricSlot1) } }
     @Published public var metricSlot2: MenuBarMetric { didSet { d.set(metricSlot2.rawValue, forKey: Keys.metricSlot2) } }
     @Published public var metricSlot3: MenuBarMetric { didSet { d.set(metricSlot3.rawValue, forKey: Keys.metricSlot3) } }
+    @Published public private(set) var menuBarItemCount: Int
     @Published public var metricProvider1: String { didSet { d.set(metricProvider1, forKey: Keys.metricProvider1) } }
     @Published public var metricProvider2: String { didSet { d.set(metricProvider2, forKey: Keys.metricProvider2) } }
     @Published public var metricProvider3: String { didSet { d.set(metricProvider3, forKey: Keys.metricProvider3) } }
@@ -139,6 +171,23 @@ public final class SettingsStore: ObservableObject {
     @Published public var notificationsEnabled: Bool { didSet { d.set(notificationsEnabled, forKey: Keys.notificationsEnabled) } }
     @Published public var onboardingDone: Bool { didSet { d.set(onboardingDone, forKey: Keys.onboardingDone) } }
 
+    /// Only active items participate in rendering; hidden choices are retained.
+    public var activeMenuBarSlots: [(MenuBarMetric, String)] {
+        Array([(metricSlot1, metricProvider1), (metricSlot2, metricProvider2),
+               (metricSlot3, metricProvider3)].prefix(menuBarItemCount))
+    }
+
+    public func setMenuBarItemCount(_ count: Int) {
+        let count = min(3, max(0, count))
+        // Fill only newly enabled legacy empty slots. Hidden choices survive
+        // reducing the count and are restored when the user adds an item.
+        if count >= 1 { metricSlot1 = MenuBarMetric.normalized(metricSlot1, for: metricProvider1, allowNone: false) }
+        if count >= 2 { metricSlot2 = MenuBarMetric.normalized(metricSlot2, for: metricProvider2, allowNone: false) }
+        if count >= 3 { metricSlot3 = MenuBarMetric.normalized(metricSlot3, for: metricProvider3, allowNone: false) }
+        menuBarItemCount = count
+        d.set(count, forKey: Keys.menuBarItemCount)
+    }
+
     /// Display filter: is this tool's UI row enabled?
     public func providerEnabled(_ tool: String) -> Bool {
         switch tool.lowercased() {
@@ -157,6 +206,7 @@ public final class SettingsStore: ObservableObject {
         public static let metricSlot1 = "menubar.metricSlot1"
         public static let metricSlot2 = "menubar.metricSlot2"
         public static let metricSlot3 = "menubar.metricSlot3"
+        public static let menuBarItemCount = "menubar.itemCount"
         public static let metricProvider1 = "menubar.metricProvider1"
         public static let metricProvider2 = "menubar.metricProvider2"
         public static let metricProvider3 = "menubar.metricProvider3"
@@ -195,7 +245,7 @@ public final class SettingsStore: ObservableObject {
         public static let notificationsEnabled = "permissions.notifications"
         public static let onboardingDone = "onboarding.done"
         public static let all: [String] = [
-            textMode, metricSlot1, metricSlot2, metricSlot3,
+            textMode, metricSlot1, metricSlot2, metricSlot3, menuBarItemCount,
             metricProvider1, metricProvider2, metricProvider3, tintThresholds, islandMetric, islandMetricProvider,
             showLimits, showForecast, showPerModel, showBurn,
             showStreak, showTools, showSessions, showWbm, showRival, showStatusDot,

@@ -35,6 +35,17 @@ New provider roots are discovered every 60 seconds, and the ccusage/Cursor tier
 refreshes every 5 minutes.
 Caches live in `~/.config/burnbar`, isolated from the CLI's launchd sync.
 
+Unchanged Claude/Codex transcript metadata reuses aggregate results instead of
+launching another parser or loading the complete parse cache. Fast/slow Codex
+requests share one in-flight collection, and at most two external parsers run
+concurrently. Watchers retire redundant roots. Live leaderboard sync schedules
+a deadline only while changed usage or a failed upload is pending; it does not
+wake every five seconds when idle. Quit/cancellation terminates owned parsers.
+
+Settings → Menu bar offers one, two, or three independently selected source/value
+items, plus icon-only mode. Reducing the count preserves hidden choices. Fresh
+installs show one token counter; upgrades preserve existing visible items.
+
 ## Sidecar protocol
 
 NDJSON on stdout, one event per line (`sidecar/src/protocol.ts` is the source of

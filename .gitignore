@@ -6,6 +6,7 @@ dist/
 
 # agent goal-tracking — never publish to the public repo
 .ultragoal/
+.context/
 CLAUDE.md
 GEMINI.md
 AGENTS.md

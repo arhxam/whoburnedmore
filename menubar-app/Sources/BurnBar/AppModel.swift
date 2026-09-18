@@ -302,9 +302,7 @@ final class AppModel: ObservableObject {
 
     var menuBarText: String? {
         MenuBarMetric.slotsText(
-            [(settings.metricSlot1, settings.metricProvider1),
-             (settings.metricSlot2, settings.metricProvider2),
-             (settings.metricSlot3, settings.metricProvider3)],
+            settings.activeMenuBarSlots,
             metricInputs
         )
     }
@@ -413,18 +411,13 @@ final class AppModel: ObservableObject {
     private func refreshSyncTask() {
         syncTask?.cancel()
         syncTask = nil
-        guard let interval = BackgroundActivityPolicy.syncPollInterval(
-            syncEnabled: settings.syncEnabled
-        ) else { return }
+        guard started, settings.syncEnabled, leaderboardSyncState != .syncing,
+              let interval = liveSyncThrottle.nextAttemptDelay() else { return }
         syncTask = Task { [weak self] in
-            while !Task.isCancelled {
-                do {
-                    try await Task.sleep(for: .seconds(interval))
-                } catch {
-                    return
-                }
-                await self?.maybeSync()
-            }
+            do { try await Task.sleep(for: .seconds(max(0.1, interval))) }
+            catch { return }
+            self?.syncTask = nil
+            await self?.maybeSync()
         }
     }
 
@@ -554,7 +547,9 @@ final class AppModel: ObservableObject {
     func syncLeaderboardNow() async {
         let localTokens = summary?.today.totalTokens
         if let localTokens { liveSyncThrottle.observe(tokens: localTokens) }
+        _ = liveSyncThrottle.beginIfDue()
         await performLeaderboardSync(markingTokens: localTokens, nativeOnly: false)
+        refreshSyncTask()
     }
 
     private func performLeaderboardSync(markingTokens: Int?, nativeOnly: Bool) async {
@@ -617,8 +612,12 @@ final class AppModel: ObservableObject {
         guard settings.syncEnabled, leaderboardSyncState != .syncing,
               let localTokens = summary?.today.totalTokens else { return }
         liveSyncThrottle.observe(tokens: localTokens)
-        guard let dueTokens = liveSyncThrottle.beginIfDue() else { return }
+        guard let dueTokens = liveSyncThrottle.beginIfDue() else {
+            refreshSyncTask()
+            return
+        }
         await performLeaderboardSync(markingTokens: dueTokens, nativeOnly: true)
+        refreshSyncTask()
     }
 
     /// The public board serves stale data while its cache recomputes. A successful

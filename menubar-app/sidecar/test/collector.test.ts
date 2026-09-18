@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -87,6 +87,51 @@ describe("Codex replay-aware collection", () => {
     // This parser-only test must never inherit a real Cursor session and wait
     // on cursor.com. The fake ccusage children finish comfortably under 5s.
     expect(Date.now() - startedAt).toBeLessThan(5_000);
+  });
+
+  it("uses one ancestor watcher until both Codex transcript roots exist", async () => {
+    const root = await mkdtemp(join(tmpdir(), "burnbar-watch-roots-"));
+    const home = join(root, "codex");
+    await mkdir(join(home, "sessions"), { recursive: true });
+    const env = { HOME: root, CODEX_HOME: home, CLAUDE_CONFIG_DIR: join(root, "claude") };
+    expect(watchRoots(env).filter((path) => path.startsWith(home))).toEqual([home]);
+    await mkdir(join(home, "archived_sessions"));
+    expect(watchRoots(env).filter((path) => path.startsWith(home))).toEqual([
+      join(home, "sessions"), join(home, "archived_sessions"),
+    ]);
+  });
+
+  it("keeps unchanged Claude aggregates in memory without rewriting the parse cache", async () => {
+    const root = await mkdtemp(join(tmpdir(), "burnbar-claude-idle-"));
+    const project = join(root, "claude", "projects", "fixture");
+    await mkdir(project, { recursive: true });
+    const transcript = join(project, "session.jsonl");
+    const fixture = (tokens: number) => JSON.stringify({
+      timestamp: new Date().toISOString(), requestId: "request", message: {
+        id: "message", model: "claude-sonnet-4-5", usage: {
+          input_tokens: tokens, output_tokens: 10, cache_creation_input_tokens: 0, cache_read_input_tokens: 0,
+        },
+      },
+    });
+    await writeFile(transcript, fixture(100));
+    const bin = join(root, "ccusage");
+    await writeFile(bin, "#!/bin/sh\nprintf '{\"daily\":[]}'\n");
+    await chmod(bin, 0o755);
+    const env = {
+      HOME: root, CLAUDE_CONFIG_DIR: join(root, "claude"), CODEX_HOME: join(root, "codex"),
+      BURNBAR_CACHE_DIR: join(root, "cache"), BURNBAR_CCUSAGE: bin, WHOBURNEDMORE_PRICING_OFFLINE: "1",
+    };
+    const initial = await collectNativeTier(env);
+    const cachePath = join(root, "cache", "native-cache-claude.json");
+    const cacheTime = (await stat(cachePath)).mtimeMs;
+    const idle = await collectNativeTier(env);
+    expect(idle.claude.entries).toEqual(initial.claude.entries);
+    expect(idle.claude.filesScanned).toBe(0);
+    expect((await stat(cachePath)).mtimeMs).toBe(cacheTime);
+    await writeFile(transcript, fixture(200));
+    const updated = await collectNativeTier(env);
+    expect(updated.claude.filesScanned).toBe(1);
+    expect(updated.claude.entries[0]?.inputTokens).toBe(200);
   });
 
   it("does not publish native Codex fallback rows when ccusage fails", async () => {
@@ -178,7 +223,11 @@ setTimeout(() => process.stdout.write('{"daily":[]}'), 60000);
     let pid: number | null = null;
     for (let attempt = 0; attempt < 40 && pid === null; attempt += 1) {
       try {
-        pid = Number(await readFile(pidFile, "utf8"));
+        const candidate = Number(await readFile(pidFile, "utf8"));
+        // The file can exist before writeFileSync fills it. PID 0 targets our
+        // process group, so wait for an actual child ID before asserting exit.
+        if (Number.isInteger(candidate) && candidate > 0) pid = candidate;
+        else await new Promise((resolve) => setTimeout(resolve, 25));
       } catch {
         await new Promise((resolve) => setTimeout(resolve, 25));
       }
@@ -187,6 +236,52 @@ setTimeout(() => process.stdout.write('{"daily":[]}'), 60000);
     terminateCollectorProcesses();
     await pending;
     expect(() => process.kill(pid!, 0)).toThrow();
+  });
+
+  it("avoids idle parser launches, shares fast/slow Codex work and caps all parser children at two", async () => {
+    const root = await mkdtemp(join(tmpdir(), "burnbar-parser-budget-"));
+    const bin = join(root, "counting-ccusage");
+    const events = join(root, "events");
+    await writeFile(bin, `#!/usr/bin/env node
+const fs = require("node:fs");
+const source = process.argv[2];
+const events = ${JSON.stringify(events)};
+fs.appendFileSync(events, JSON.stringify({ source, delta: 1 }) + "\\n");
+setTimeout(() => {
+  fs.appendFileSync(events, JSON.stringify({ source, delta: -1 }) + "\\n");
+  process.stdout.write('{"daily":[],"sessions":[]}');
+}, 50);
+`);
+    await chmod(bin, 0o755);
+    const env = {
+      CODEX_HOME: join(root, "codex"),
+      CLAUDE_CONFIG_DIR: join(root, "claude"),
+      HOME: root,
+      BURNBAR_CCUSAGE: bin,
+      BURNBAR_CACHE_DIR: join(root, "cache"),
+      BURNBAR_CODEX_MIN_INTERVAL_MS: "0",
+      WHOBURNEDMORE_PRICING_OFFLINE: "1",
+    } as NodeJS.ProcessEnv;
+
+    await Promise.all([collectNativeTier(env), collectSlowTier(env, { offline: true })]);
+    await collectNativeTier(env);
+    await collectNativeTier(env);
+    const observations = (await readFile(events, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    expect(observations.filter((event) => event.source === "codex" && event.delta === 1)).toHaveLength(1);
+    let active = 0;
+    let peak = 0;
+    for (const event of observations) {
+      active += event.delta;
+      peak = Math.max(peak, active);
+    }
+    expect(active).toBe(0);
+    expect(peak).toBeLessThanOrEqual(2);
+
+    await mkdir(join(root, "codex", "sessions"), { recursive: true });
+    await writeFile(join(root, "codex", "sessions", "rollout.jsonl"), "{}\n");
+    await collectNativeTier(env);
+    const changed = (await readFile(events, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    expect(changed.filter((event) => event.source === "codex" && event.delta === 1)).toHaveLength(2);
   });
 
   it("keeps replay-aware Codex rows when merging with a native fallback", () => {

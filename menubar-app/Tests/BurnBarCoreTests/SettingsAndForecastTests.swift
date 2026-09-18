@@ -251,9 +251,19 @@ final class LiveSyncThrottleTests: XCTestCase {
 }
 
 final class BackgroundActivityPolicyTests: XCTestCase {
-    func testSyncPollingSleepsOnlyWhenTheUserEnabledLiveSync() {
-        XCTAssertNil(BackgroundActivityPolicy.syncPollInterval(syncEnabled: false))
-        XCTAssertEqual(BackgroundActivityPolicy.syncPollInterval(syncEnabled: true), 5)
+    func testSyncOnlySchedulesADeadlineForPendingUsage() {
+        let now = Date(timeIntervalSince1970: 2_000_000)
+        var throttle = LiveSyncThrottle(minimumInterval: 30)
+        XCTAssertNil(throttle.nextAttemptDelay(now: now))
+        throttle.observe(tokens: 100)
+        XCTAssertEqual(throttle.nextAttemptDelay(now: now), 0)
+        XCTAssertEqual(throttle.beginIfDue(now: now), 100)
+        XCTAssertEqual(throttle.nextAttemptDelay(now: now.addingTimeInterval(5)), 25)
+        throttle.markSynced(tokens: 100)
+        XCTAssertNil(throttle.nextAttemptDelay(now: now.addingTimeInterval(5)))
+        throttle.observe(tokens: 200)
+        XCTAssertEqual(throttle.nextAttemptDelay(now: now.addingTimeInterval(5)), 25)
+        XCTAssertEqual(throttle.nextAttemptDelay(now: now.addingTimeInterval(30)), 0)
     }
 
     func testEqualPublishedValuesDoNotInvalidateTheUI() {

@@ -9,6 +9,7 @@ import {
   chmodSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -162,6 +163,45 @@ describe("watch mode real-time integration", () => {
   afterAll(async () => {
     await stopChild(child);
     if (root) rmSync(root, { recursive: true, force: true });
+  });
+
+  it("stops parser children when a one-shot sync is cancelled", { timeout: 30_000 }, async () => {
+    const syncRoot = mkdtempSync(join(tmpdir(), "bb-sync-cancel-"));
+    const parser = join(syncRoot, "blocking-parser.cjs");
+    const pidFile = join(syncRoot, "parser-pid");
+    writeFileSync(parser, `#!/usr/bin/env node
+require("node:fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
+setTimeout(() => process.stdout.write('{"daily":[]}'), 60000);
+`);
+    chmodSync(parser, 0o755);
+    const sync = spawn(BIN, ["sync", "--native-only", "--dry-run"], {
+      env: {
+        ...process.env,
+        HOME: syncRoot,
+        CLAUDE_CONFIG_DIR: join(syncRoot, "claude"),
+        CODEX_HOME: join(syncRoot, "codex"),
+        BURNBAR_CACHE_DIR: join(syncRoot, "cache"),
+        BURNBAR_CCUSAGE: parser,
+        WHOBURNEDMORE_PRICING_OFFLINE: "1",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let parserPid = 0;
+    try {
+      await waitFor(() => {
+        try { parserPid = Number(readFileSync(pidFile, "utf8")); return parserPid > 0; }
+        catch { return false; }
+      }, 5_000, "sync parser start");
+      await stopChild(sync);
+      await waitFor(() => {
+        try { process.kill(parserPid, 0); return false; }
+        catch { return true; }
+      }, 2_000, "cancelled sync parser exit");
+    } finally {
+      await stopChild(sync);
+      if (parserPid) { try { process.kill(parserPid, "SIGTERM"); } catch {} }
+      rmSync(syncRoot, { recursive: true, force: true });
+    }
   });
 
   it("emits an updated snapshot within 5s of a transcript append", { timeout: 60_000 }, async () => {
@@ -329,6 +369,7 @@ describe("watch mode real-time integration", () => {
 const source = process.argv[2];
 const empty = source === "session" ? { sessions: [] } : { daily: [] };
 if (source === "codex") process.stdout.write(JSON.stringify(empty));
+else if (source === "claude" || source === "session") setTimeout(() => process.stdout.write(JSON.stringify(empty)), 2500);
 else if (source === "gemini") setTimeout(() => {
   const payload = { daily: [{
     date: new Date().toISOString().slice(0, 10),

@@ -307,16 +307,30 @@ struct MenuBarPane: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            SectionHeader("Dynamic Island hover")
-            slotRow("Value revealed under the camera", metric: $settings.islandMetric, provider: $settings.islandMetricProvider, allowNone: true)
-            Text("Nothing is permanently added beside the camera. Move the pointer under it to reveal this one value, then click the camera area to open whoburnedmore.")
+            SectionHeader("Your menu bar")
+            Text("Keep it compact with one value, or show up to three. Choose the source and value for each item.")
                 .font(.caption).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-
-            SectionHeader("Menu bar items — choose each source and value")
-            slotRow("Item 1", metric: $settings.metricSlot1, provider: $settings.metricProvider1, allowNone: false)
-            slotRow("Item 2", metric: $settings.metricSlot2, provider: $settings.metricProvider2, allowNone: true)
-            slotRow("Item 3", metric: $settings.metricSlot3, provider: $settings.metricProvider3, allowNone: true)
+            Picker("Items", selection: Binding(
+                get: { settings.menuBarItemCount },
+                set: { settings.setMenuBarItemCount($0) }
+            )) {
+                Text("Icon only").tag(0)
+                Text("1 item").tag(1)
+                Text("2 items").tag(2)
+                Text("3 items").tag(3)
+            }
+            .pickerStyle(.segmented)
+            .accessibilityIdentifier("menuBarItemCount")
+            if settings.menuBarItemCount >= 1 {
+                slotRow("Item 1", metric: $settings.metricSlot1, provider: $settings.metricProvider1, allowNone: false)
+            }
+            if settings.menuBarItemCount >= 2 {
+                slotRow("Item 2", metric: $settings.metricSlot2, provider: $settings.metricProvider2, allowNone: false)
+            }
+            if settings.menuBarItemCount >= 3 {
+                slotRow("Item 3", metric: $settings.metricSlot3, provider: $settings.metricProvider3, allowNone: false)
+            }
             MenuBarPreviewLine()
             Text("Overall covers combined burn. Claude and Codex each use their own live 5-hour and weekly limits; Codex can also show credits. Provider names stay visible in the menu bar so the numbers are never ambiguous.")
                 .font(.caption).foregroundStyle(.secondary)
@@ -326,6 +340,12 @@ struct MenuBarPane: View {
             Toggle("Tint amber/red when a limit passes the alert thresholds", isOn: $settings.tintThresholds)
             Text("Thresholds are configured in Notifications (currently \(Int(settings.warnThreshold))% / \(Int(settings.criticalThreshold))%).")
                 .font(.caption).foregroundStyle(.secondary)
+
+            SectionHeader("Dynamic Island hover")
+            slotRow("Value revealed under the camera", metric: $settings.islandMetric, provider: $settings.islandMetricProvider, allowNone: true)
+            Text("Move the pointer under the camera to reveal this value, then click to open whoburnedmore.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }
@@ -511,11 +531,7 @@ struct MenuBarPreviewLine: View {
     var body: some View {
         HStack(spacing: 6) {
             Text("Preview:").font(.caption).foregroundStyle(.secondary)
-            HStack(spacing: 3) {
-                Image(systemName: model.meterState.iconName)
-                Text(model.menuBarText ?? "")
-                    .font(.system(size: 12, weight: .medium, design: .monospaced))
-            }
+            MenuBarLabel(text: model.menuBarText, state: model.meterState)
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
             .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 5))

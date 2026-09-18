@@ -50,7 +50,10 @@ export function watchRoots(env: NodeJS.ProcessEnv = process.env): string[] {
     const parent = dirname(target);
     return parent !== target && existsSync(parent) ? [parent] : [];
   });
-  return [...new Set(roots)];
+  const unique = [...new Set(roots)];
+  return unique.filter((root) => !unique.some(
+    (other) => root !== other && root.startsWith(`${other}/`),
+  ));
 }
 
 export async function runWatch(env: NodeJS.ProcessEnv = process.env): Promise<void> {
@@ -230,7 +233,8 @@ export async function runWatch(env: NodeJS.ProcessEnv = process.env): Promise<vo
   };
   const attachNewWatchers = (): boolean => {
     let added = false;
-    for (const root of watchRoots(env)) {
+    const desired = watchRoots(env);
+    for (const root of desired) {
       if (watchers.has(root)) continue;
       try {
         const w = watch(root, { recursive: true }, (eventType) => onFsEvent(root, eventType));
@@ -249,6 +253,16 @@ export async function runWatch(env: NodeJS.ProcessEnv = process.env): Promise<vo
         });
       } catch {
         /* root vanished or is not ready yet — the rescan timer will retry */
+      }
+    }
+    // Once provider leaf directories exist, retire the broad startup fallback.
+    // Otherwise both recursive watchers keep waking us for each transcript write
+    // and the config root also reacts to unrelated editor/cache activity forever.
+    if (desired.every((root) => watchers.has(root))) {
+      for (const [root, watcher] of watchers) {
+        if (desired.includes(root)) continue;
+        watcher.close();
+        watchers.delete(root);
       }
     }
     return added;

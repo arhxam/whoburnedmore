@@ -16,7 +16,7 @@
  *      envs (CLAUDE_CONFIG_DIR, CODEX_HOME, XDG_CONFIG_HOME).
  */
 import { readCodexLimits } from "./codex-limits.js";
-import { claudeSessionNames, collectNativeTier, collectSlowTier, mergeTiers } from "./collector.js";
+import { claudeSessionNames, collectNativeTier, collectSlowTier, mergeTiers, terminateCollectorProcesses } from "./collector.js";
 import { fetchCursorLimits } from "./cursor-limits.js";
 import { summarize } from "./summarize.js";
 import { runSync } from "./sync.js";
@@ -49,6 +49,18 @@ async function limits(): Promise<void> {
 }
 
 const cmd = process.argv[2] ?? "snapshot";
+// Swift can cancel a sync when the user disables uploads or quits. One-shot
+// helpers own their parser children just as watch mode does; otherwise those
+// children continue consuming CPU after their parent is gone.
+if (cmd !== "watch") {
+  for (const signal of ["SIGTERM", "SIGINT"] as const) {
+    process.once(signal, () => {
+      terminateCollectorProcesses();
+      process.exit(signal === "SIGTERM" ? 143 : 130);
+    });
+  }
+}
+process.once("exit", terminateCollectorProcesses);
 switch (cmd) {
   case "snapshot":
     await snapshot();

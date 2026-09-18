@@ -18,7 +18,9 @@ export function readTextFileSyncCapped(path: string, maxBytes: number): string |
   const limit = Math.max(1, maxBytes);
   let fd: number | null = null;
   try {
-    fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    // A FIFO blocks inside open(), before fstat() can reject it. Nonblocking
+    // open leaves ordinary files unchanged and lets us reject special files.
+    fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
     const metadata = fstatSync(fd);
     if (!metadata.isFile() || metadata.size > limit) return null;
 

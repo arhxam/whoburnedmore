@@ -5,6 +5,9 @@ async function readResponseBytesCapped(
   const limit = Math.max(1, maxBytes);
   const declared = Number(response.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > limit) {
+    // No reader is acquired on this path. Explicitly stop the body anyway so
+    // background collectors do not leave an oversized transfer/socket running.
+    await response.body?.cancel("response body too large").catch(() => undefined);
     throw new Error("response body too large");
   }
   if (!response.body) throw new Error("response body missing");

@@ -1,4 +1,5 @@
 import { z } from "zod";
+export * from "./embeds.js";
 import type { LaunchStatusResponse } from "./launch-gate.js";
 import { RESERVED_SUBDOMAINS } from "./tenant.js";
 export * from "./launch-gate.js";

@@ -88,9 +88,9 @@ final class MetricSlotTests: XCTestCase {
         )
     }
 
-    func testFreshInstallDefaultTrio() {
-        // A fresh install (no legacy textMode) ships the default bar:
-        // overall today tokens, then distinct Claude and Codex 5-hour limits.
+    func testFreshInstallShowsOneItemWithThreeRememberedChoices() {
+        // A fresh install shows overall tokens, with separate Claude and Codex
+        // choices ready to enable without configuring every slot from scratch.
         let d = UserDefaults(suiteName: "bb-fresh-\(UUID().uuidString)")!
         let store = MainActor.assumeIsolated { SettingsStore(defaults: d) }
         MainActor.assumeIsolated {
@@ -100,8 +100,73 @@ final class MetricSlotTests: XCTestCase {
             XCTAssertEqual(store.metricProvider1, "all")
             XCTAssertEqual(store.metricProvider2, "claude")
             XCTAssertEqual(store.metricProvider3, "codex")
+            XCTAssertEqual(store.menuBarItemCount, 1)
+            XCTAssertEqual(store.activeMenuBarSlots.map(\.0), [.todayTokens])
             XCTAssertEqual(store.islandMetric, .tightestLimit)
             XCTAssertEqual(store.islandMetricProvider, "all")
+        }
+    }
+
+    func testItemCountRemembersHiddenChoicesAndPersists() {
+        let name = "bb-count-\(UUID().uuidString)"
+        let d = UserDefaults(suiteName: name)!
+        defer { d.removePersistentDomain(forName: name) }
+        MainActor.assumeIsolated {
+            let store = SettingsStore(defaults: d)
+            store.metricSlot1 = .todayCost
+            store.metricProvider2 = "codex"
+            store.metricSlot2 = .creditsRemaining
+            store.metricProvider3 = "claude"
+            store.metricSlot3 = .weeklyReset
+            for count in [3, 1, 2, 3] {
+                store.setMenuBarItemCount(count)
+                let reloaded = SettingsStore(defaults: d)
+                XCTAssertEqual(reloaded.menuBarItemCount, count)
+                XCTAssertEqual(reloaded.activeMenuBarSlots.count, count)
+                XCTAssertEqual(reloaded.metricSlot2, .creditsRemaining)
+                XCTAssertEqual(reloaded.metricProvider2, "codex")
+                XCTAssertEqual(reloaded.metricSlot3, .weeklyReset)
+                XCTAssertEqual(reloaded.metricProvider3, "claude")
+            }
+        }
+    }
+
+    func testExistingTrioAndSparseSlotsMigrateWithoutChangingVisibleOrder() {
+        for sparse in [false, true] {
+            let name = "bb-count-migrate-\(UUID().uuidString)"
+            let d = UserDefaults(suiteName: name)!
+            defer { d.removePersistentDomain(forName: name) }
+            d.set(true, forKey: SettingsStore.Keys.onboardingDone)
+            if sparse { d.set("none", forKey: SettingsStore.Keys.metricSlot2) }
+            MainActor.assumeIsolated {
+                let store = SettingsStore(defaults: d)
+                XCTAssertEqual(store.menuBarItemCount, sparse ? 2 : 3)
+                XCTAssertEqual(store.activeMenuBarSlots.map(\.1), sparse ? ["all", "codex"] : ["all", "claude", "codex"])
+                let reloaded = SettingsStore(defaults: d)
+                XCTAssertEqual(reloaded.activeMenuBarSlots.map(\.1), store.activeMenuBarSlots.map(\.1))
+                store.setMenuBarItemCount(3)
+                XCTAssertFalse(store.activeMenuBarSlots.contains { $0.0 == .none })
+            }
+        }
+    }
+
+    func testLegacyIconOnlySurvivesAndCountsAreBounded() {
+        let name = "bb-count-icon-\(UUID().uuidString)"
+        let d = UserDefaults(suiteName: name)!
+        defer { d.removePersistentDomain(forName: name) }
+        d.set("iconOnly", forKey: SettingsStore.Keys.textMode)
+        MainActor.assumeIsolated {
+            let store = SettingsStore(defaults: d)
+            XCTAssertEqual(store.menuBarItemCount, 0)
+            XCTAssertTrue(store.activeMenuBarSlots.isEmpty)
+            store.setMenuBarItemCount(1)
+            XCTAssertEqual(store.activeMenuBarSlots.map(\.0), [.todayTokens])
+            store.setMenuBarItemCount(100)
+            XCTAssertEqual(store.activeMenuBarSlots.count, 3)
+            store.setMenuBarItemCount(-1)
+            XCTAssertTrue(store.activeMenuBarSlots.isEmpty)
+            d.set(99, forKey: SettingsStore.Keys.menuBarItemCount)
+            XCTAssertEqual(SettingsStore(defaults: d).menuBarItemCount, 3)
         }
     }
 

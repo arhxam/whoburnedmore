@@ -20,7 +20,6 @@ import { join } from "node:path";
 import type { DailyUsageEntry, SessionEntry } from "../../../src/shared.js";
 
 import {
-  CCUSAGE_MAX_CONCURRENCY,
   mapConcurrent,
   SOURCES,
   ccusageClaudeEnv,
@@ -44,12 +43,21 @@ import {
   collectVscodeAgent,
 } from "../../../src/native/vscode-agents.js";
 import { loadLivePricing } from "../../../src/pricing-live.js";
+import { resolveCodexSessionsDirs } from "../../../src/native/codex.js";
+import { transcriptFingerprint } from "./transcript-fingerprint.js";
 
 const activeCollectorProcesses = new Set<ChildProcess>();
+// The CLI's foreground throughput cap is too expensive for a resident menu-bar
+// utility. Bound ALL parser calls, including session and fast-tier work.
+const MAX_BACKGROUND_PARSERS = 2;
+let parserSlots = 0;
+let parserGeneration = 0;
+const parserWaiters: Array<() => void> = [];
 
 /** Watch mode owns every parser it starts. Termination must not leave a CPU-
  * intensive ccusage scan reparented and running after the menu-bar app exits. */
 export function terminateCollectorProcesses(): void {
+  parserGeneration += 1;
   for (const child of activeCollectorProcesses) {
     if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
   }
@@ -57,10 +65,13 @@ export function terminateCollectorProcesses(): void {
 
 const EMPTY_NATIVE: NativeCollectResult = { entries: [], found: false, filesScanned: 0 };
 type FastCodexResult = { result: NativeCollectResult; replayAware: boolean };
-const fastCodexCache = new Map<string, { at: number; value: FastCodexResult }>();
+const fastCodexCache = new Map<string, { at: number; fingerprint: string | null; value: FastCodexResult }>();
+const fastCodexInFlight = new Map<string, Promise<FastCodexResult>>();
+const claudeCache = new Map<string, { at: number; fingerprint: string; value: NativeCollectResult }>();
+const pricingRefreshes = new Map<string, { at: number; pending: Promise<unknown> }>();
 
 function fastCodexCacheKey(env: NodeJS.ProcessEnv, command: CcusageCommand | null): string {
-  return `${command?.cmd ?? "none"}|${env.CODEX_HOME ?? ""}`;
+  return JSON.stringify([command, resolveCodexSessionsDirs(env)]);
 }
 
 function fastCodexMinInterval(env: NodeJS.ProcessEnv): number {
@@ -92,13 +103,20 @@ export async function collectNativeTier(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<NativeTier> {
   const cacheDir = burnbarCacheDir(env);
-  await loadLivePricing(env, Date.now, join(cacheDir, "pricing-cache.json")).catch(
-    () => {},
-  );
+  const pricingKey = JSON.stringify([cacheDir, env.WHOBURNEDMORE_PRICING_OFFLINE, env.WHOBURNEDMORE_PRICING_URL]);
+  let pricing = pricingRefreshes.get(pricingKey);
+  if (!pricing || Date.now() - pricing.at >= 60 * 60_000) {
+    pricing = {
+      at: Date.now(),
+      pending: loadLivePricing(env, Date.now, join(cacheDir, "pricing-cache.json")).catch(() => {}),
+    };
+    pricingRefreshes.set(pricingKey, pricing);
+  }
+  await pricing.pending;
   const cache = (name: string) => join(cacheDir, `native-cache-${name}.json`);
 
   const [claude, fastCodex, cont, ...vscode] = await Promise.all([
-    collectClaudeNative(env, { cachePath: cache("claude") }).catch(() => EMPTY_NATIVE),
+    collectFastClaude(env, cache("claude")).catch(() => EMPTY_NATIVE),
     collectFastCodex(env),
     collectContinue({ env, cachePath: cache("continue") }).catch(() => EMPTY_NATIVE),
     ...VSCODE_AGENTS.map((a) =>
@@ -125,6 +143,23 @@ export async function collectNativeTier(
     toolsFound,
     partial: [claude, codex, cont, ...vscode].some((r) => r.timedOut === true),
   };
+}
+
+async function collectFastClaude(env: NodeJS.ProcessEnv, cachePath: string): Promise<NativeCollectResult> {
+  const roots = resolveClaudeProjectDirs(env);
+  const key = JSON.stringify([roots, cachePath]);
+  const fingerprint = await transcriptFingerprint(roots);
+  const cached = claudeCache.get(key);
+  if (fingerprint !== null && cached?.fingerprint === fingerprint && Date.now() - cached.at < 60 * 60_000) {
+    return { ...cached.value, filesScanned: 0 };
+  }
+  const value = await collectClaudeNative(env, { cachePath });
+  // Retain only aggregate rows, not transcript/request caches. Idle safety
+  // polls should not deserialize and rewrite a potentially 128-MiB cache.
+  if (fingerprint !== null && !value.timedOut) {
+    claudeCache.set(key, { at: Date.now(), fingerprint, value });
+  }
+  return value;
 }
 
 export interface SlowTier {
@@ -160,31 +195,44 @@ async function runCcusageBinary(
   args: string[],
   env?: NodeJS.ProcessEnv,
 ): Promise<unknown | null> {
-  return await new Promise((resolve) => {
-    const child = execFile(
-      command.cmd,
-      [...command.prefixArgs, ...args],
-      {
-        encoding: "utf8",
-        maxBuffer: 32 * 1024 * 1024,
-        timeout: 25_000,
-        ...(env ? { env: { ...process.env, ...env } } : {}),
-      },
-      (error, stdout) => {
-        activeCollectorProcesses.delete(child);
-        if (error) {
-          resolve(null);
-          return;
-        }
-        try {
-          resolve(stdout ? JSON.parse(stdout) : null);
-        } catch {
-          resolve(null);
-        }
-      },
-    );
-    activeCollectorProcesses.add(child);
-  });
+  const generation = parserGeneration;
+  if (parserSlots >= MAX_BACKGROUND_PARSERS) {
+    await new Promise<void>((resolve) => parserWaiters.push(resolve));
+  } else {
+    parserSlots += 1;
+  }
+  try {
+    if (generation !== parserGeneration) return null;
+    return await new Promise((resolve) => {
+      const child = execFile(
+        command.cmd,
+        [...command.prefixArgs, ...args],
+        {
+          encoding: "utf8",
+          maxBuffer: 32 * 1024 * 1024,
+          timeout: 25_000,
+          ...(env ? { env: { ...process.env, ...env } } : {}),
+        },
+        (error, stdout) => {
+          activeCollectorProcesses.delete(child);
+          if (error) {
+            resolve(null);
+            return;
+          }
+          try {
+            resolve(stdout ? JSON.parse(stdout) : null);
+          } catch {
+            resolve(null);
+          }
+        },
+      );
+      activeCollectorProcesses.add(child);
+    });
+  } finally {
+    const next = parserWaiters.shift();
+    if (next) next();
+    else parserSlots -= 1;
+  }
 }
 
 /**
@@ -197,11 +245,34 @@ async function runCcusageBinary(
  */
 async function collectFastCodex(
   env: NodeJS.ProcessEnv,
+  force = false,
 ): Promise<FastCodexResult> {
   const command = resolveCcusageStandalone(env);
   const cacheKey = fastCodexCacheKey(env, command);
+  const inFlight = fastCodexInFlight.get(cacheKey);
+  if (inFlight) return inFlight;
   const cached = fastCodexCache.get(cacheKey);
-  if (cached && Date.now() - cached.at < fastCodexMinInterval(env)) return cached.value;
+  if (!force && cached && Date.now() - cached.at < fastCodexMinInterval(env)) return cached.value;
+  const pending = collectFreshCodex(env, command, cacheKey);
+  fastCodexInFlight.set(cacheKey, pending);
+  try {
+    return await pending;
+  } finally {
+    fastCodexInFlight.delete(cacheKey);
+  }
+}
+
+async function collectFreshCodex(
+  env: NodeJS.ProcessEnv,
+  command: CcusageCommand | null,
+  cacheKey: string,
+): Promise<FastCodexResult> {
+  const fingerprint = await transcriptFingerprint(resolveCodexSessionsDirs(env));
+  const cached = fastCodexCache.get(cacheKey);
+  if (fingerprint !== null && cached?.value.replayAware && cached.fingerprint === fingerprint) {
+    cached.at = Date.now();
+    return cached.value;
+  }
   let value: FastCodexResult = { result: EMPTY_NATIVE, replayAware: false };
   if (command) {
     const json = await runCcusageBinary(
@@ -217,7 +288,7 @@ async function collectFastCodex(
       };
     }
   }
-  fastCodexCache.set(cacheKey, { at: Date.now(), value });
+  fastCodexCache.set(cacheKey, { at: Date.now(), fingerprint, value });
   return value;
 }
 
@@ -238,10 +309,17 @@ export async function collectSlowTier(
   }));
 
   if (command) {
+    // The native first paint also awaits Codex. Start its shared read before
+    // long-tail/session parsers occupy both slots, so a large Claude archive
+    // cannot hold the fast snapshot behind two 25-second slow-tier timeouts.
+    const codex = await collectFastCodex(env, true);
+    bySource.set("codex", codex.result.entries);
+    if (codex.replayAware) succeededSources.add("codex");
+    if (codex.result.found) toolsFound.push("codex");
     const [results, sessionsJson] = await Promise.all([
       mapConcurrent(
-        SOURCES,
-        CCUSAGE_MAX_CONCURRENCY,
+        SOURCES.filter((source) => source !== "codex"),
+        MAX_BACKGROUND_PARSERS,
         async (source) => {
           const sourceEnv = source === "claude" ? ccusageClaudeEnv(env) : env;
           const json = await runCcusageBinary(
@@ -266,16 +344,6 @@ export async function collectSlowTier(
       bySource.set(source, mapped);
       if (succeeded) succeededSources.add(source);
       if (mapped.length > 0) toolsFound.push(source);
-      if (source === "codex" && succeeded) {
-        const command = resolveCcusageStandalone(env);
-        fastCodexCache.set(fastCodexCacheKey(env, command), {
-          at: Date.now(),
-          value: {
-            result: { entries: mapped, found: mapped.length > 0, filesScanned: 0 },
-            replayAware: true,
-          },
-        });
-      }
     }
     sessions = sessionsJson ? mapCcusageSessions(sessionsJson) : [];
   }

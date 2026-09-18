@@ -45,8 +45,8 @@ targets:
         CFBundleIdentifier: com.whoburnedmore.burnbar
         CFBundleName: whoburnedmore
         CFBundleDisplayName: whoburnedmore
-        CFBundleShortVersionString: "0.8.2"
-        CFBundleVersion: "8002"
+        CFBundleShortVersionString: "0.8.3"
+        CFBundleVersion: "8003"
         CFBundleIconFile: "AppIcon"
         LSUIElement: true
         LSMinimumSystemVersion: "14.0"
@@ -67,8 +67,8 @@ targets:
         ENABLE_HARDENED_RUNTIME: "YES"
         # Keep these aligned with the explicit Info.plist. Sparkle and notarization
         # validate both values at release time.
-        MARKETING_VERSION: "0.8.2"
-        CURRENT_PROJECT_VERSION: "8002"
+        MARKETING_VERSION: "0.8.3"
+        CURRENT_PROJECT_VERSION: "8003"
 
   BurnBarCoreTests:
     type: bundle.unit-test

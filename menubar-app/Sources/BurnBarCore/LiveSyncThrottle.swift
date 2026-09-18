@@ -24,12 +24,17 @@ public struct LiveSyncThrottle {
     /// attempt time. Call `markSynced` after a successful upload; failures stay
     /// pending and are retried after the same bounded interval.
     public mutating func beginIfDue(now: Date = Date()) -> Int? {
-        guard pendingTokens > 0, pendingTokens != lastSyncedTokens else { return nil }
-        if let lastAttemptAt, now.timeIntervalSince(lastAttemptAt) < minimumInterval {
-            return nil
-        }
+        guard nextAttemptDelay(now: now) == 0 else { return nil }
         lastAttemptAt = now
         return pendingTokens
+    }
+
+    /// No timer is needed after unchanged usage has been synced. A pending
+    /// change or failed upload gets one deadline, rather than a perpetual poll.
+    public func nextAttemptDelay(now: Date = Date()) -> TimeInterval? {
+        guard pendingTokens > 0, pendingTokens != lastSyncedTokens else { return nil }
+        guard let lastAttemptAt else { return 0 }
+        return max(0, minimumInterval - now.timeIntervalSince(lastAttemptAt))
     }
 
     public mutating func markSynced(tokens: Int) {
