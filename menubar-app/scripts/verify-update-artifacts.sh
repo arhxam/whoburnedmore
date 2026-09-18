@@ -38,7 +38,9 @@ APP_EXECUTABLE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/C
 [[ "$APP_BUNDLE_ID" == "com.whoburnedmore.burnbar" ]] || { echo "embedded app bundle ID changed to $APP_BUNDLE_ID" >&2; exit 1; }
 [[ "$APP_EXECUTABLE" == "BurnBar" ]] || { echo "embedded app executable changed to $APP_EXECUTABLE" >&2; exit 1; }
 
-codesign --verify --strict --deep --verbose=4 "$APP"
+# Reject notarization carriers and stale packaged helpers. The verifier checks
+# the exact Developer ID app/team/sidecar requirements before running `version`.
+node scripts/verify-packaged-app.mjs "$APP" "$PROJECT_VERSION"
 if [[ "${BURNBAR_REQUIRE_NOTARIZATION:-0}" == "1" ]]; then
   xcrun stapler validate "$APP"
   xcrun stapler validate "$DMG"

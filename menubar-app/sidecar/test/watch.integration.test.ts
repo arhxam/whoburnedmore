@@ -92,7 +92,9 @@ function codexRateLimitLine(percent: number, resetsAt: number): string {
 /** Deterministic parser stand-in for the directory-discovery test. Replay
  * correctness against the real bundled binary is covered in collector.test and
  * packages/cli/test/ccusage-codex-replay.test; this test is specifically about
- * a watch process noticing a sessions tree that did not exist at launch. */
+ * a watch process noticing a sessions tree that did not exist at launch.
+ * Daily reports use the local calendar date, matching real ccusage and the
+ * sidecar summarizer even when local and UTC dates differ. */
 function fakeCodexParser(root: string): string {
   const file = join(root, "fake-ccusage.cjs");
   writeFileSync(
@@ -124,7 +126,7 @@ const walk = (dir) => {
 };
 walk(process.env.CODEX_HOME || "");
 const daily = latest ? [{
-  date: new Date().toISOString().slice(0, 10),
+  date: new Date().toLocaleDateString("en-CA"),
   totalCost: 0,
   modelBreakdowns: [{
     modelName: "gpt-5-codex",
@@ -372,7 +374,7 @@ if (source === "codex") process.stdout.write(JSON.stringify(empty));
 else if (source === "claude" || source === "session") setTimeout(() => process.stdout.write(JSON.stringify(empty)), 2500);
 else if (source === "gemini") setTimeout(() => {
   const payload = { daily: [{
-    date: new Date().toISOString().slice(0, 10),
+    date: new Date().toLocaleDateString("en-CA"),
     totalCost: 0,
     modelBreakdowns: [{
       modelName: "gemini-test",
