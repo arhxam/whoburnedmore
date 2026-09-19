@@ -31,6 +31,10 @@ import {
   syncIntervalLabel,
 } from "../src/autosync.js";
 
+const packageVersion = JSON.parse(
+  readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+).version as string;
+
 describe("buildLaunchdPlist", () => {
   it("does not opt the job into macOS I/O throttling", () => {
     // ProcessType=Background throttles disk reads, and this job is almost pure
@@ -53,7 +57,7 @@ describe("buildLaunchdPlist", () => {
     expect(plist).toContain("<string>--yes</string>");
     expect(plist).toContain("<string>--ignore-scripts</string>");
     expect(plist).toContain("<string>--package</string>");
-    expect(plist).toContain("<string>whoburnedmore@0.9.21</string>");
+    expect(plist).toContain(`<string>whoburnedmore@${packageVersion}</string>`);
     expect(plist).toContain("<string>--</string>");
     expect(plist).toContain("<string>whoburnedmore</string>");
     expect(plist).toContain("<string>sync</string>");
@@ -200,7 +204,7 @@ describe("scheduled sync command", () => {
       "--yes",
       "--ignore-scripts",
       "--package",
-      "whoburnedmore@0.9.21",
+      `whoburnedmore@${packageVersion}`,
       "--",
       "whoburnedmore",
       "sync",
@@ -251,7 +255,7 @@ describe("scheduled sync command", () => {
       logPath,
     });
     expect(line).toContain("*/15 * * * *");
-    expect(line).toContain("'whoburnedmore@0.9.21'");
+    expect(line).toContain(`'whoburnedmore@${packageVersion}'`);
     expect(line).toContain("'sync'");
     expect(line).toContain(shellQuote(logPath));
   });
@@ -259,7 +263,7 @@ describe("scheduled sync command", () => {
   it("quotes windows scheduled-task commands", () => {
     const line = windowsCommandLine(syncCommandArgs("C:\\Program Files\\nodejs\\npm.cmd"));
     expect(line).toContain('"C:\\Program Files\\nodejs\\npm.cmd"');
-    expect(line).toContain('"whoburnedmore@0.9.21"');
+    expect(line).toContain(`"whoburnedmore@${packageVersion}"`);
     expect(line).toContain('"sync"');
   });
 
@@ -275,10 +279,10 @@ describe("systemd user-timer fallback (linux without crontab)", () => {
     expect(service).toContain("[Service]");
     expect(service).toContain("Type=oneshot");
     expect(service).toContain('ExecStart="/usr/local/bin/npm"');
-    expect(service).toContain('"whoburnedmore@0.9.21"');
+    expect(service).toContain(`"whoburnedmore@${packageVersion}"`);
     expect(service).toContain('"sync"');
     // systemd parses ExecStart itself — must NOT carry shell single-quotes.
-    expect(service).not.toContain("'whoburnedmore@0.9.21'");
+    expect(service).not.toContain(`'whoburnedmore@${packageVersion}'`);
   });
 
   it("exports a PATH so npm's `env node` shebang resolves under systemd", () => {
