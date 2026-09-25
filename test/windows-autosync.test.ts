@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { runInNewContext } from "node:vm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -239,6 +239,26 @@ describe.skipIf(process.platform !== "win32")("native Windows launcher", () => {
     expect(log).toContain("missing-node.exe");
     expect(log).not.toContain("sync exited 0");
   }, 35_000);
+  it("runs the actual packed CLI through npm exec offline with a fresh config", async () => {
+    const { spawnSync: realSpawn } = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+    const configDir = tempDir();
+    const npmCliPath = resolveWindowsNpmCli();
+    expect(existsSync(resolve("dist/index.js")), "build the release bundle before native Windows tests").toBe(true);
+    const packed = realSpawn(process.execPath, [npmCliPath, "pack", "--ignore-scripts", "--json", "--pack-destination", configDir], {
+      encoding: "utf8", windowsHide: true, timeout: 30_000,
+    });
+    expect(packed.status, packed.stderr).toBe(0);
+    const tarball = join(configDir, JSON.parse(packed.stdout)[0].filename);
+    const options = { ...opts, configDir, nodePath: process.execPath, npmCliPath,
+      systemRoot: process.env.SystemRoot!, envPairs: [["WHOBURNEDMORE_CONFIG_DIR", configDir]] as Array<[string, string]>,
+      commandArgs: ["exec", "--offline", "--yes", "--ignore-scripts", "--package", tarball, "--", "whoburnedmore", "sync"] };
+    writeFileSync(windowsLauncherPath(options), buildWindowsLauncher(options));
+    const result = realSpawn("wscript.exe", ["//B", "//Nologo", "//E:JScript", windowsLauncherPath(options)], { windowsHide: true, timeout: 60_000 });
+    const log = readFileSync(join(configDir, "sync.log"), "utf8");
+    expect(result.status, log).toBe(0);
+    expect(log).toContain("sync exited 0");
+    expect(existsSync(join(configDir, "config.json"))).toBe(false);
+  }, 95_000);
   it("rolls back the launcher and surfaces task registration failures", () => {
     const configDir = tempDir();
     const options = { ...opts, configDir, systemRoot: process.env.SystemRoot! };
