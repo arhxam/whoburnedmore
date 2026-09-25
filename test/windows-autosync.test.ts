@@ -126,6 +126,10 @@ describe("Windows task reconciliation", () => {
     expect(windowsTaskDrift(xml, launcher, opts)).toBe("ok");
     const withDefaults = xml.replace("<Settings>", "<Settings><IdleSettings><Duration>PT10M</Duration><WaitTimeout>PT1H</WaitTimeout><StopOnIdleEnd>true</StopOnIdleEnd><RestartOnIdle>false</RestartOnIdle></IdleSettings>");
     expect(windowsTaskDrift(withDefaults, launcher, opts)).toBe("ok");
+    const omittedDefaults = withDefaults.replaceAll("<Enabled>true</Enabled>", "")
+      .replace("<RunLevel>LeastPrivilege</RunLevel>", "")
+      .replace("<StopAtDurationEnd>false</StopAtDurationEnd>", "");
+    expect(windowsTaskDrift(omittedDefaults, launcher, opts)).toBe("ok");
   });
   it("repairs legacy npm.cmd actions, missing files and stale versions/env", () => {
     expect(windowsTaskDrift(null, null, opts)).toBe("absent");
@@ -204,9 +208,10 @@ describe.skipIf(process.platform !== "win32")("native Windows launcher", () => {
     for (let tick = 0; tick < 4; tick++) {
       writeFileSync(npmCliPath, `
         const assert = require('node:assert/strict');
+        const { realpathSync } = require('node:fs');
         assert.deepEqual(process.argv.slice(2), ${JSON.stringify(opts.commandArgs)});
-        assert.equal(process.cwd(), ${JSON.stringify(configDir)});
-        assert.equal(process.env.WHOBURNEDMORE_CONFIG_DIR, process.cwd());
+        assert.equal(realpathSync(process.cwd()), realpathSync(${JSON.stringify(configDir)}));
+        assert.equal(process.env.WHOBURNEDMORE_CONFIG_DIR, ${JSON.stringify(configDir)});
         console.log('tick-${tick}');
         for (let line = 0; line < 80; line++) console.log('x'.repeat(4096));
         console.error('stderr-${tick}');

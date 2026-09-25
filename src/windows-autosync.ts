@@ -168,19 +168,38 @@ export function windowsTaskDrift(
   // Respect an explicit Disable-ScheduledTask; foreground sync must not undo it.
   if (!windowsTaskEnabled(installed)) return "ok";
   if (launcher !== buildWindowsLauncher(opts)) return "drift";
-  const expected = buildWindowsTaskXml(opts);
-  for (const tag of ["Command", "Arguments", "WorkingDirectory", "Interval", "StopAtDurationEnd",
-    "LogonType", "RunLevel", "MultipleInstancesPolicy", "DisallowStartIfOnBatteries",
-    "StopIfGoingOnBatteries", "StartWhenAvailable", "ExecutionTimeLimit", "Enabled"]) {
-    if (JSON.stringify(xmlValues(installed, tag)) !== JSON.stringify(xmlValues(expected, tag))) return "drift";
-  }
   const triggers = xmlValues(installed, "Triggers")[0] ?? "";
   const repetition = xmlValues(triggers, "Repetition")[0] ?? "";
+  const settings = xmlValues(installed, "Settings")[0] ?? "";
+  const principal = xmlValues(installed, "Principal")[0] ?? "";
+  const actions = xmlValues(installed, "Actions")[0] ?? "";
+  // Exported XML omits schema defaults (including Enabled=true and
+  // RunLevel=LeastPrivilege). Compare their meaning, not their spelling.
+  const fields: Array<[string, string, string, string]> = [
+    [actions, "Command", "", windowsHostPath(opts)],
+    [actions, "Arguments", "", windowsTaskArguments(opts)],
+    [actions, "WorkingDirectory", "", opts.configDir],
+    [repetition, "Interval", "", `PT${opts.intervalMinutes}M`],
+    [repetition, "StopAtDurationEnd", "false", "false"],
+    [triggers, "Enabled", "true", "true"],
+    [principal, "LogonType", "", "InteractiveToken"],
+    [principal, "RunLevel", "LeastPrivilege", "LeastPrivilege"],
+    [settings, "MultipleInstancesPolicy", "IgnoreNew", "IgnoreNew"],
+    [settings, "DisallowStartIfOnBatteries", "true", "false"],
+    [settings, "StopIfGoingOnBatteries", "true", "false"],
+    [settings, "StartWhenAvailable", "false", "true"],
+    [settings, "ExecutionTimeLimit", "PT72H", "PT14M"],
+  ];
+  for (const [scope, tag, fallback, expected] of fields) {
+    const values = xmlValues(scope, tag);
+    if (values.length > 1 || (values[0] ?? fallback) !== expected) return "drift";
+  }
   // Scheduler also adds IdleSettings/Duration by default. Only a repetition
   // duration expires our timer; treating idle duration as drift reinstalls on
   // every successful sync, immediately scheduling yet another run.
   if (xmlValues(triggers, "EndBoundary").length || xmlValues(repetition, "Duration").length ||
-      xmlValues(triggers, "TimeTrigger").length !== 1 || xmlValues(triggers, "StartBoundary").length !== 1) return "drift";
+      xmlValues(triggers, "TimeTrigger").length !== 1 || xmlValues(triggers, "StartBoundary").length !== 1 ||
+      xmlValues(actions, "Exec").length !== 1) return "drift";
   return "ok";
 }
 
