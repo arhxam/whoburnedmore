@@ -124,6 +124,8 @@ describe("Windows task reconciliation", () => {
     const expected = buildWindowsTaskXml(other, new Date("2026-01-01T00:00:00Z"));
     expect(windowsTaskDrift(expected.replace('<Principal id="Author">', '<Principal id="Author"><UserId>S-1-5-21-123</UserId>'), buildWindowsLauncher(other), other)).toBe("ok");
     expect(windowsTaskDrift(xml, launcher, opts)).toBe("ok");
+    const withDefaults = xml.replace("<Settings>", "<Settings><IdleSettings><Duration>PT10M</Duration><WaitTimeout>PT1H</WaitTimeout><StopOnIdleEnd>true</StopOnIdleEnd><RestartOnIdle>false</RestartOnIdle></IdleSettings>");
+    expect(windowsTaskDrift(withDefaults, launcher, opts)).toBe("ok");
   });
   it("repairs legacy npm.cmd actions, missing files and stale versions/env", () => {
     expect(windowsTaskDrift(null, null, opts)).toBe("absent");
@@ -210,8 +212,8 @@ describe.skipIf(process.platform !== "win32")("native Windows launcher", () => {
         console.error('stderr-${tick}');
       `);
       const result = realSpawn("wscript.exe", ["//B", "//Nologo", "//E:JScript", windowsLauncherPath(options)], { windowsHide: true, timeout: 30_000 });
-      expect(result.status).toBe(0);
       const log = readFileSync(join(configDir, "sync.log"), "utf8");
+      expect(result.status, log.slice(0, 6000)).toBe(0);
       expect(log).toContain(`tick-${tick}`);
       expect(log).toContain(`stderr-${tick}`);
       expect(log).toContain("sync exited 0");
@@ -257,7 +259,8 @@ describe.skipIf(process.platform !== "win32")("native Windows launcher", () => {
       expect(created.status, created.stderr || created.stdout).toBe(0);
       const queried = realSpawn("schtasks.exe", ["/Query", "/TN", name, "/XML"], { windowsHide: true, timeout: 15_000 });
       expect(queried.status).toBe(0);
-      expect(windowsTaskDrift(decodeTaskXml(queried.stdout), buildWindowsLauncher(options), options)).toBe("ok");
+      const installed = decodeTaskXml(queried.stdout);
+      expect(windowsTaskDrift(installed, buildWindowsLauncher(options), options), installed).toBe("ok");
     } finally {
       const removed = realSpawn("schtasks.exe", ["/Delete", "/F", "/TN", name], { windowsHide: true, timeout: 15_000 });
       expect(removed.status).toBe(0);

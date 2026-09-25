@@ -174,8 +174,13 @@ export function windowsTaskDrift(
     "StopIfGoingOnBatteries", "StartWhenAvailable", "ExecutionTimeLimit", "Enabled"]) {
     if (JSON.stringify(xmlValues(installed, tag)) !== JSON.stringify(xmlValues(expected, tag))) return "drift";
   }
-  if (xmlValues(installed, "EndBoundary").length || xmlValues(installed, "Duration").length ||
-      xmlValues(installed, "TimeTrigger").length !== 1 || xmlValues(installed, "StartBoundary").length !== 1) return "drift";
+  const triggers = xmlValues(installed, "Triggers")[0] ?? "";
+  const repetition = xmlValues(triggers, "Repetition")[0] ?? "";
+  // Scheduler also adds IdleSettings/Duration by default. Only a repetition
+  // duration expires our timer; treating idle duration as drift reinstalls on
+  // every successful sync, immediately scheduling yet another run.
+  if (xmlValues(triggers, "EndBoundary").length || xmlValues(repetition, "Duration").length ||
+      xmlValues(triggers, "TimeTrigger").length !== 1 || xmlValues(triggers, "StartBoundary").length !== 1) return "drift";
   return "ok";
 }
 
