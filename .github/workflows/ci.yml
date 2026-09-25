@@ -15,3 +15,31 @@ jobs:
       - run: npm run build
       - run: npm run lint
       - run: npm test
+  windows-sync:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm install --ignore-scripts
+      - run: npm run lint
+      - run: npx vitest run test/windows-autosync.test.ts test/autosync.test.ts
+      - run: npm run build
+      - run: npm run smoke:package
+  macos-regression:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install --ignore-scripts
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+      - run: npm run smoke:package

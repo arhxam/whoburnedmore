@@ -72,7 +72,7 @@ export function readCursorToken(db: string): string | null {
       const res = spawnSync(
         sqlite3,
         [db, "SELECT value FROM ItemTable WHERE key='cursorAuth/accessToken';"],
-        { encoding: "utf8", timeout: 10_000 },
+        { encoding: "utf8", windowsHide: true, timeout: 10_000 },
       );
       const out = res.stdout?.trim();
       if (res.status === 0 && out) return out;
