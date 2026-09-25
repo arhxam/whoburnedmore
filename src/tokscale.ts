@@ -104,7 +104,7 @@ function runTokscaleDay(
       "model",
       "--no-spinner",
     ],
-    { encoding: "utf8", maxBuffer: 32 * 1024 * 1024, timeout: 60_000 },
+    { encoding: "utf8", windowsHide: true, maxBuffer: 32 * 1024 * 1024, timeout: 60_000 },
   );
   if (res.status !== 0 || !res.stdout) return null;
   try {

@@ -10,8 +10,13 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir, platform } from "node:os";
-import { dirname, join, posix, win32 } from "node:path";
+import { dirname, join, posix, resolve, win32 } from "node:path";
 import { defaultConfigDir } from "./config.js";
+import {
+  installWindowsSync, readWindowsLauncher, readWindowsTask, resolveWindowsNpmCli,
+  uninstallWindowsSync, windowsTaskDrift, windowsTaskEnabled,
+  type WindowsSyncOptions,
+} from "./windows-autosync.js";
 
 /**
  * How often the background agent re-collects usage and submits it. Dropped from
@@ -281,6 +286,20 @@ export function syncCommandArgs(npmPath: string = resolveNpmPath()): string[] {
   ];
 }
 
+function windowsSyncOptions(): WindowsSyncOptions {
+  const configDir = resolve(defaultConfigDir());
+  const env = { ...process.env, WHOBURNEDMORE_CONFIG_DIR: configDir };
+  return {
+    nodePath: process.execPath,
+    npmCliPath: resolveWindowsNpmCli(),
+    configDir,
+    commandArgs: syncCommandArgs("npm").slice(1),
+    envPairs: syncEnv({ npmPath: "npm", env }).filter(([key]) => key !== "PATH"),
+    intervalMinutes: SYNC_INTERVAL_MINUTES,
+    systemRoot: process.env.SystemRoot || "C:\\Windows",
+  };
+}
+
 export function xmlEscape(value: string): string {
   return value
     .replaceAll("&", "&amp;")
@@ -355,15 +374,8 @@ export function installAutoSync(): string {
     );
   }
   if (os === "win32") {
-    const res = spawnSync("schtasks", [
-      "/Create", "/F",
-      "/SC", "MINUTE",
-      "/MO", String(SYNC_INTERVAL_MINUTES),
-      "/TN", "whoburnedmore-sync",
-      "/TR", windowsCommandLine(syncCommandArgs()),
-    ]);
-    if (res.status !== 0) throw new Error("could not create scheduled task");
-    return `scheduled task installed, syncing every ${syncIntervalLabel()}`;
+    installWindowsSync(windowsSyncOptions());
+    return `windowless scheduled task installed, syncing every ${syncIntervalLabel()} while signed in (log: ${syncLogPath()})`;
   }
   throw new Error(`auto-sync is not supported on ${os}`);
 }
@@ -565,7 +577,7 @@ export function uninstallAutoSync(): string {
     return removed ? "background sync removed" : "nothing to remove";
   }
   if (os === "win32") {
-    spawnSync("schtasks", ["/Delete", "/F", "/TN", "whoburnedmore-sync"]);
+    uninstallWindowsSync(defaultConfigDir());
     return "scheduled task removed";
   }
   return "nothing to remove";
@@ -577,10 +589,10 @@ export function autoSyncInstalled(): boolean {
     return linuxSyncMechanism() !== "none";
   }
   if (platform() === "win32") {
-    const res = spawnSync("schtasks", ["/Query", "/TN", "whoburnedmore-sync"], {
-      stdio: "ignore",
-    });
-    return res.status === 0;
+    // This boolean probe is also used in post-submit UI: scheduler access
+    // failure must not turn an already-successful upload into an exit-code 1.
+    // Explicit install/repair/status still surface the inspection error.
+    try { return readWindowsTask() !== null; } catch { return false; }
   }
   return false;
 }
@@ -631,10 +643,17 @@ function expectedAgent(): string | null {
   return null;
 }
 
-/** Current drift state of the background agent (darwin/linux). */
+/** Current drift state of the background agent. */
 export function autoSyncDrift(): DriftState {
+  if (platform() === "win32") {
+    const installed = readWindowsTask();
+    if (installed === null) return "absent";
+    if (!windowsTaskEnabled(installed)) return "ok";
+    const opts = windowsSyncOptions();
+    return windowsTaskDrift(installed, readWindowsLauncher(opts), opts);
+  }
   const expected = expectedAgent();
-  // Platforms we can't read back (win32) fall back to existence-only.
+  // Unsupported platforms fall back to existence-only.
   if (expected === null) return autoSyncInstalled() ? "ok" : "absent";
   return plistDrift(readInstalledAgent(), expected);
 }
@@ -717,10 +736,14 @@ export function notifyLaunchLive(opts?: {
 
 /** True if the launchd/cron/schtasks job is currently loaded with the scheduler. */
 export function autoSyncLoaded(): boolean {
+  if (platform() === "win32") {
+    const task = readWindowsTask();
+    return task !== null && windowsTaskEnabled(task);
+  }
   if (platform() === "darwin") {
     const res = spawnSync("launchctl", ["list"], { encoding: "utf8" });
     return res.status === 0 && res.stdout.includes(LABEL);
   }
-  // On linux/win, "installed" == "loaded" (cron/schtasks have no separate state).
+  // On Linux, installation is used as the loaded-state approximation.
   return autoSyncInstalled();
 }

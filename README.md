@@ -53,9 +53,26 @@ npx whoburnedmore uninstall-sync   turn off the background sync
 
 After your first run, a background sync keeps your page fresh automatically
 every 15 minutes (`uninstall-sync` to stop). The installed background job runs
-the latest published `whoburnedmore` package on each sync tick, so future CLI
-fixes are picked up automatically after the next refresh. The server endpoint is
+the exact CLI version that installed it, with npm lifecycle scripts disabled.
+Run an updated CLI in the foreground to repair the job and advance its version;
+background jobs do not automatically download a newer release. The server endpoint is
 overridable with `WHOBURNEDMORE_API`.
+
+On Windows, sync runs while you are signed in using a windowless Windows Script
+Host launcher. It keeps your normal user/network access and writes output and exit
+codes to `~/.config/whoburnedmore/sync.log` (or `WHOBURNEDMORE_CONFIG_DIR/sync.log`).
+The log rotates to `sync.log.1` after 256 KiB. Windows Script Host and Windows
+PowerShell must be available; managed machines may restrict them.
+
+To repair an older Windows task that opens a console, run `whoburnedmore install-sync`
+from an updated installation. `whoburnedmore status` reports stale definitions and
+the last successful upload. If a run still fails, inspect `sync.log` or run
+`whoburnedmore sync` in a terminal. A task result of `1` alone does not identify
+whether npm, collection, authentication, or an upload failed. Setting the task's
+`Hidden` property only hides it in Task Scheduler; changing its logon type to S4U
+can restrict network/encrypted-file access and is not the windowless-sync fix.
+Tasks explicitly disabled in Task Scheduler stay disabled during automatic repair;
+`install-sync` explicitly enables them again.
 
 ## Privacy & transparency
 

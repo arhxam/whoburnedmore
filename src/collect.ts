@@ -609,6 +609,7 @@ async function runCcusageOnce(
   try {
     const { stdout } = await execFileAsync(cmd, args, {
       encoding: "utf8",
+      windowsHide: true,
       maxBuffer: CCUSAGE_MAX_BUFFER_BYTES,
       // A single source shouldn't be able to hang the whole run: a hung source
       // gets killed and (if transient) retried once below rather than stalling
