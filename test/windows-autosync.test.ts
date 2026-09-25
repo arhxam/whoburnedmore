@@ -208,9 +208,14 @@ describe.skipIf(process.platform !== "win32")("native Windows launcher", () => {
     for (let tick = 0; tick < 4; tick++) {
       writeFileSync(npmCliPath, `
         const assert = require('node:assert/strict');
-        const { realpathSync } = require('node:fs');
+        const { statSync } = require('node:fs');
         assert.deepEqual(process.argv.slice(2), ${JSON.stringify(opts.commandArgs)});
-        assert.equal(realpathSync(process.cwd()), realpathSync(${JSON.stringify(configDir)}));
+        // Compare file identity: Windows may expand the runner's 8.3 TEMP path,
+        // and fs.realpath's JS implementation also preserves those short names.
+        const actualDir = statSync(process.cwd(), { bigint: true });
+        const expectedDir = statSync(${JSON.stringify(configDir)}, { bigint: true });
+        assert.equal(actualDir.dev, expectedDir.dev);
+        assert.equal(actualDir.ino, expectedDir.ino);
         assert.equal(process.env.WHOBURNEDMORE_CONFIG_DIR, ${JSON.stringify(configDir)});
         console.log('tick-${tick}');
         for (let line = 0; line < 80; line++) console.log('x'.repeat(4096));
