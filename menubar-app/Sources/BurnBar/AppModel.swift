@@ -217,6 +217,7 @@ final class AppModel: ObservableObject {
         case "cline": return "Cline"
         case "roo": return "Roo"
         case "continue": return "Continue"
+        case "autoclaw": return "AutoClaw"
         default: return id
         }
     }
