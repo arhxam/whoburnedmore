@@ -13,7 +13,8 @@ machines. This repository is a public, always-in-sync mirror of it.
 ## What it does
 
 `whoburnedmore` reads your local AI coding-agent usage (Claude Code, Codex, Gemini CLI,
-Copilot, Cursor and more, via [ccusage](https://github.com/ryoppippi/ccusage)), adds up
+Copilot, Cursor, Cline, Roo, Continue, AutoClaw and more, via
+[ccusage](https://github.com/ryoppippi/ccusage) plus our own native readers), adds up
 the tokens and estimated cost, and **submits your daily totals to the whoburnedmore.com
 server** so you land on the public leaderboard and get a shareable dashboard.
 
