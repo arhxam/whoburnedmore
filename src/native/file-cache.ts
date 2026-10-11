@@ -70,6 +70,8 @@ export async function readTextFileCapped(
     maxBytes?: number;
     deadline?: number;
     now?: () => number;
+    /** Decoding of the returned string. "latin1" keeps a binary file's bytes intact. */
+    encoding?: BufferEncoding;
   } = {},
 ): Promise<CappedTextRead> {
   const maxBytes = Math.max(1, opts.maxBytes ?? MAX_NATIVE_FILE_BYTES);
@@ -100,7 +102,10 @@ export async function readTextFileCapped(
       if (total > maxBytes) return { ok: false, reason: "too-large" };
       chunks.push(chunk.subarray(0, bytesRead));
     }
-    return { ok: true, content: Buffer.concat(chunks, total).toString("utf8") };
+    return {
+      ok: true,
+      content: Buffer.concat(chunks, total).toString(opts.encoding ?? "utf8"),
+    };
   } catch {
     return { ok: false, reason: "unreadable" };
   } finally {
@@ -208,6 +213,8 @@ export async function readFilesWithCache<T>(opts: {
   now?: () => number;
   maxFileBytes?: number;
   maxCacheBytes?: number;
+  /** How `content` is decoded before `parseFile` sees it (default utf8). */
+  encoding?: BufferEncoding;
 }): Promise<FileCacheResult<T>> {
   const now = opts.now ?? Date.now;
   const maxFileBytes = Math.max(1, opts.maxFileBytes ?? MAX_NATIVE_FILE_BYTES);
@@ -247,6 +254,7 @@ export async function readFilesWithCache<T>(opts: {
       maxBytes: maxFileBytes,
       deadline: opts.deadline,
       now,
+      encoding: opts.encoding,
     });
     if (!read.ok) {
       if (read.reason === "timed-out") {
