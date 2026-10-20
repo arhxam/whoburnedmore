@@ -152,6 +152,15 @@ const AGENT_HOME_DIRS: readonly string[] = [
 ];
 
 /**
+ * Directory names that are scratch space, not an agent home. The home
+ * directory sweep finds things like `~/.openskills-temp-1777148120188`,
+ * which are a few thousand files of nothing and would otherwise be reported
+ * as an agent we could not read.
+ */
+const TEMP_DIR_NAME_RE =
+  /(^|[-_.])(tmp|temp|cache|backup|bak|old|logs?|scratch)([-_.]|$)|-\d{8,}$/i;
+
+/**
  * Directories that are never agent homes. They are large, they are not
  * transcripts, and walking them would blow the reader's time budget.
  */
@@ -474,7 +483,8 @@ export function candidateRoots(
         (e) =>
           e.isDirectory() &&
           e.name.startsWith(".") &&
-          !NEVER_AGENT_DIRS.has(e.name.toLowerCase()),
+          !NEVER_AGENT_DIRS.has(e.name.toLowerCase()) &&
+          !TEMP_DIR_NAME_RE.test(e.name),
       )
       .map((e) => e.name);
   } catch {
