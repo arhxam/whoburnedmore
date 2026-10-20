@@ -1,5 +1,11 @@
 // Create a fake "brand new" agent home so the generic discovery reader can be
 // exercised end to end against the real CLI.
+//
+// This writes into the user's home directory (~/.brandnewcli). It is a manual
+// test helper, not something the CLI ever runs; pass --clean to remove it.
+//
+//   node scripts/make-fake-agent.mjs          # plant the fixture
+//   node scripts/make-fake-agent.mjs --clean  # remove it
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
