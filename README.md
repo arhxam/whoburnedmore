@@ -13,9 +13,19 @@ machines. This repository is a public, always-in-sync mirror of it.
 ## What it does
 
 `whoburnedmore` reads your local AI coding-agent usage (Claude Code, Codex, Gemini CLI,
-Copilot, Cursor and more, via [ccusage](https://github.com/ryoppippi/ccusage)), adds up
-the tokens and estimated cost, and **submits your daily totals to the whoburnedmore.com
-server** so you land on the public leaderboard and get a shareable dashboard.
+Copilot, Cursor, Qoder CLI and more, via [ccusage](https://github.com/ryoppippi/ccusage)),
+adds up the tokens and estimated cost, and **submits your daily totals to the
+whoburnedmore.com server** so you land on the public leaderboard and get a
+shareable dashboard.
+
+It also runs a **generic discovery pass**: it sweeps your agent home
+directories, recognises the usage-record shapes that coding agents actually
+write (the Claude Code format and its many forks, the OpenCode format, and
+camelCase usage blocks), and adds any agent it finds — with the models it
+read — even if that agent has never been heard of before. It skips anything
+`ccusage` already covers, so nothing is counted twice, and it never submits a
+partially-read agent: if a directory is too large to read in full it is left
+out rather than counted in part.
 
 Your **first run signs you in** — the CLI opens a page and you approve a short code — then
 binds this machine to your account so your usage lands on the leaderboard under your handle.

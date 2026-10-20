@@ -24,6 +24,11 @@ import {
   type NativeCollectResult,
 } from "./native/claude.js";
 import { collectCodexNative } from "./native/codex.js";
+import {
+  collectDiscovered,
+  type DiscoveredAgent,
+} from "./native/discover.js";
+import { collectQoder } from "./native/qoder.js";
 import { plausibleUsageDate } from "./native/usage-date.js";
 import { collectVscodeAgent, VSCODE_AGENTS } from "./native/vscode-agents.js";
 import { loadLivePricing } from "./pricing-live.js";
@@ -330,6 +335,17 @@ export interface CollectResult {
   agent: AgentStat;
   /** True when transcript scanning finished within its time budget (full snapshot). */
   attributionComplete: boolean;
+  /**
+   * Agents the generic discovery reader found, with the models each one used.
+   * Surfaced so the CLI can show the user WHAT was picked up, not just add
+   * silent numbers to their dashboard.
+   */
+  discoveredAgents: DiscoveredAgent[];
+  /**
+   * Agent homes the discovery reader found but could not read in full, so it
+   * left them out rather than submit a partial count.
+   */
+  skippedRoots: string[];
 }
 
 export function codexReplayTombstoneDates(
@@ -652,9 +668,10 @@ export type ProgressFn = (done: number, total: number, label: string) => void;
 /**
  * Total number of collection stages: the ccusage sources, plus the fixed extra
  * ticking tasks — sessions, blocks, cursor, attribution (4), and the native
- * non-ccusage readers cline, roo, continue (VSCODE_AGENTS.length + 1).
+ * non-ccusage readers cline, roo, continue, qoder, discovery
+ * (VSCODE_AGENTS.length + 3).
  */
-export const COLLECT_STAGES = SOURCES.length + 4 + VSCODE_AGENTS.length + 1;
+export const COLLECT_STAGES = SOURCES.length + 4 + VSCODE_AGENTS.length + 3;
 
 /**
  * A run is AUTHORITATIVE — safe to lower a stored requestCount fingerprint —
@@ -796,6 +813,21 @@ export async function collectAll(
     tick();
     return r;
   });
+  // Qoder CLI — not a ccusage source either. Its transcripts record credits
+  // rather than tokens, so the reader reconstructs the token counts from
+  // Qoder's own context-occupancy report (see src/native/qoder.ts).
+  const qoderTask = collectQoder().then((r) => {
+    tick();
+    return r;
+  });
+  // Generic discovery: sweep the agent home directories for a usage-bearing
+  // transcript and read whatever shape it turns out to be. This is what makes
+  // an agent we have never heard of still reach the leaderboard. The reader
+  // skips every agent ccusage already covers, so nothing is counted twice.
+  const discoveredTask = collectDiscovered().then((r) => {
+    tick();
+    return r;
+  });
 
   const [
     sourceResults,
@@ -807,6 +839,8 @@ export async function collectAll(
     nativeCodex,
     vscodeResults,
     continueResult,
+    qoderResult,
+    discoveredResult,
   ] = await Promise.all([
     sourceTasks,
     sessionTask,
@@ -817,6 +851,8 @@ export async function collectAll(
     nativeCodexTask,
     Promise.all(vscodeTasks),
     continueTask,
+    qoderTask,
+    discoveredTask,
   ]);
 
   const native = { claude: nativeClaude, codex: nativeCodex };
@@ -874,6 +910,26 @@ export async function collectAll(
     entries.push(...continueResult.entries);
     toolsFound.push("continue");
   }
+  if (qoderResult.found && qoderResult.entries.length > 0) {
+    entries.push(...qoderResult.entries);
+    toolsFound.push("qoder");
+  }
+  // The generic discovery reader. Second net against double counting: even
+  // though it skips every agent id ccusage owns statically, drop anything
+  // ccusage actually reported this run as well — that covers a ccusage
+  // release that adds an agent this build doesn't know about yet.
+  const ccusageReported = new Set<string>(
+    sourceResults.filter((s) => s.mapped.length > 0).map((s) => s.source as string),
+  );
+  const discoveredEntries = discoveredResult.entries.filter(
+    (e) => !ccusageReported.has(e.tool),
+  );
+  if (discoveredEntries.length > 0) {
+    entries.push(...discoveredEntries);
+    for (const tool of new Set(discoveredEntries.map((e) => e.tool))) {
+      toolsFound.push(tool);
+    }
+  }
 
   const { tools, skills, agent, sessionMessages, complete } = attribution;
   onProgress?.(COLLECT_STAGES, COLLECT_STAGES, "");
@@ -905,6 +961,8 @@ export async function collectAll(
     nativeCodex,
     ...vscodeResults.map(({ result }) => result),
     continueResult,
+    qoderResult,
+    discoveredResult,
   );
   const storePath = provenanceStorePath();
   const reconciled = reconcileProvenance(
@@ -953,5 +1011,7 @@ export async function collectAll(
     skills: sanitizeSkillStats(skills),
     agent: sanitizeAgentStat(reconciled.agent),
     attributionComplete: complete,
+    discoveredAgents: discoveredResult.agents,
+    skippedRoots: discoveredResult.skippedRoots,
   };
 }

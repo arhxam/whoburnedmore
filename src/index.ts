@@ -232,7 +232,37 @@ async function run(flags: Flags): Promise<void> {
     skills,
     agent,
     attributionComplete,
+    discoveredAgents,
+    skippedRoots,
   } = collected;
+
+  // Say WHAT we read. A silent number on a public dashboard is hard to
+  // trust, and the whole point of the generic reader is that it finds agents
+  // nobody listed — so the user should see which ones it picked up and
+  // which models it saw.
+  if (discoveredAgents.length > 0) {
+    console.log();
+    console.log(
+      `  Found ${discoveredAgents.length} more agent${discoveredAgents.length === 1 ? "" : "s"}:`,
+    );
+    for (const a of discoveredAgents) {
+      console.log(
+        pc.dim(
+          `    ${a.id} — ${a.models.join(", ")} (${a.requests} request${a.requests === 1 ? "" : "s"})`,
+        ),
+      );
+    }
+  }
+  if (skippedRoots.length > 0) {
+    console.log();
+    for (const id of skippedRoots) {
+      console.log(
+        pc.dim(
+          `  • ${id} was found but is too large to read in full, so it was left out rather than counted partially.`,
+        ),
+      );
+    }
+  }
   if (entries.length === 0) {
     console.log();
     console.log("  Nothing to burn yet — no local usage found from any coding agent.");
