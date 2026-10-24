@@ -34,7 +34,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { open, stat } from "node:fs/promises";
+import { lstat, open, stat } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 import { defaultConfigDir } from "../config.js";
@@ -182,6 +182,8 @@ export interface FileCacheResult<T> {
   /** Files actually READ (parsed) this run — cache hits don't count. */
   filesRead: number;
   timedOut: boolean;
+  /** A streaming reader could not complete a file; never submit partial rows. */
+  incomplete?: boolean;
 }
 
 /**
@@ -204,6 +206,10 @@ export async function readFilesWithCache<T>(opts: {
    *  file-scoped identifiers (claude's synthetic request keys must never collide
    *  across files or across runs, or the max-wins dedup would merge them). */
   parseFile: (content: string, path: string) => T[];
+  /** Optional bounded streaming parser for transcripts exceeding the text cap. */
+  streamFile?: (path: string) => Promise<
+    { ok: true; items: T[] } | { ok: false; reason: string }
+  >;
   deadline: number;
   now?: () => number;
   maxFileBytes?: number;
@@ -221,13 +227,20 @@ export async function readFilesWithCache<T>(opts: {
     let size: number;
     let mtimeMs: number;
     try {
-      const s = await stat(f);
+      const s = opts.streamFile ? await lstat(f) : await stat(f);
+      if (opts.streamFile && !s.isFile()) throw new Error("Not a regular transcript");
       size = s.size;
       mtimeMs = s.mtimeMs;
     } catch {
+      if (opts.streamFile) {
+        const progress = { ...cached, ...fresh };
+        delete progress[f];
+        saveCache(opts.cachePath, opts.version, progress, maxCacheBytes);
+        return { itemsByFile: null, filesRead, timedOut: false, incomplete: true };
+      }
       continue; // vanished between listing and stat — skip
     }
-    if (size > maxFileBytes) {
+    if (!opts.streamFile && size > maxFileBytes) {
       // Never reuse an old cache row for a file that has since become hostile.
       continue;
     }
@@ -242,6 +255,21 @@ export async function readFilesWithCache<T>(opts: {
       // revisited this run, so partial passes accumulate monotonic progress).
       saveCache(opts.cachePath, opts.version, { ...cached, ...fresh }, maxCacheBytes);
       return { itemsByFile: null, filesRead, timedOut: true };
+    }
+    if (opts.streamFile) {
+      const streamed = await opts.streamFile(f).catch(() => ({ ok: false as const, reason: "unreadable" }));
+      if (!streamed.ok) {
+        // Preserve completed files for the next pass, but never trust a partial
+        // parse (nor a stale cached row for the changed, incomplete file).
+        const progress = { ...cached, ...fresh };
+        delete progress[f];
+        saveCache(opts.cachePath, opts.version, progress, maxCacheBytes);
+        return { itemsByFile: null, filesRead, timedOut: streamed.reason === "timed-out", incomplete: true };
+      }
+      fresh[f] = { size, mtimeMs, items: streamed.items };
+      itemsByFile.push(streamed.items);
+      filesRead += 1;
+      continue;
     }
     const read = await readTextFileCapped(f, {
       maxBytes: maxFileBytes,

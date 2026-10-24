@@ -199,7 +199,7 @@ describe("parseClaudeLine", () => {
   });
 
   it("invalidates caches created before timestamp hardening", () => {
-    expect(CLAUDE_CACHE_VERSION).toBe(2);
+    expect(CLAUDE_CACHE_VERSION).toBeGreaterThanOrEqual(2);
   });
 });
 

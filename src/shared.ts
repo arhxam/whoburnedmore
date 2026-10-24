@@ -912,6 +912,8 @@ export type OrgWindow = z.infer<typeof OrgWindow>;
 
 /** How members may join an org. */
 export const OrgJoinPolicy = z.object({
+  /** Anyone signed in may join, only when the board is public. */
+  allowOpenJoin: z.boolean().optional(),
   allowCodeJoin: z.boolean().default(true),
   allowDomainJoin: z.boolean().default(false),
   /** Verified email domains that auto-join, e.g. ["acme.com"]. */
@@ -1033,6 +1035,7 @@ export interface OrgPublic {
   logoUrl: string | null;
   accentColor: string | null;
   boardVisibility: OrgBoardVisibility;
+  allowOpenJoin?: boolean;
   allowCodeJoin?: boolean;
   allowDomainJoin?: boolean;
   /**

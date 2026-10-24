@@ -225,7 +225,10 @@ describe("readFilesWithCache — generic cache mechanics", () => {
     }
   });
 
-  it("writes cache files and their directory owner-only even under a permissive umask", async () => {
+  // Node does not implement POSIX owner/group/other mode bits on Windows.
+  // Keep this permission assertion on Linux/macOS; all cache behavior tests
+  // still run on Windows. See https://nodejs.org/api/fs.html#file-modes.
+  it.skipIf(process.platform === "win32")("writes POSIX cache files and their directory owner-only even under a permissive umask", async () => {
     const dir = await mkdtemp(join(tmpdir(), "wbm-fcache-mode-"));
     try {
       await chmod(dir, 0o755);
