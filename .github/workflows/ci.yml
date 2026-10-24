@@ -29,7 +29,7 @@ jobs:
       - run: npm install --ignore-scripts
       - run: npm run lint
       - run: npm run build
-      - run: npx vitest run test/windows-autosync.test.ts test/autosync.test.ts
+      - run: npx vitest run test/windows-autosync.test.ts test/autosync.test.ts test/native-claude-large.test.ts test/native-claude.test.ts test/native-cache.test.ts
       - run: npm run smoke:package
   macos-regression:
     runs-on: macos-latest

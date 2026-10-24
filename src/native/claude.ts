@@ -29,11 +29,10 @@ import { join } from "node:path";
 import type { DailyUsageEntry } from "../shared.js";
 import { estimateCostUSD } from "../pricing.js";
 import {
-  MAX_NATIVE_FILE_BYTES,
   nativeCachePath,
   readFilesWithCache,
-  readTextFileCapped,
 } from "./file-cache.js";
+import { readJsonlStream } from "./jsonl-stream.js";
 import { localUsageDate } from "./usage-date.js";
 
 /** One deduped provider request extracted from a transcript line. */
@@ -150,6 +149,24 @@ export function accumulateClaudeLines(
     const prev = acc.get(r.key);
     if (!prev || reqTokens(r) > reqTokens(prev)) acc.set(r.key, r);
   }
+}
+
+/** Bound retained request data as well as the pending JSONL record. Long tool
+ * output does not consume this budget; only distinct usage records do. */
+const MAX_CLAUDE_REQUEST_BYTES = 64 * 1024 * 1024;
+function boundedLineAccumulator(acc: ClaudeAccumulator, maxBytes = MAX_CLAUDE_REQUEST_BYTES): (line: string) => void {
+  const size = (r: ParsedRequest) => 256 + 2 * (r.key.length + r.model.length + r.date.length);
+  let retainedBytes = [...acc.values()].reduce((total, r) => total + size(r), 0);
+  return (line) => {
+    const r = parseClaudeLine(line);
+    if (!r) return;
+    const previous = acc.get(r.key);
+    if (previous && reqTokens(r) <= reqTokens(previous)) return;
+    const nextBytes = retainedBytes + size(r) - (previous ? size(previous) : 0);
+    if (nextBytes > maxBytes) throw new Error("Claude request memory budget exceeded");
+    acc.set(r.key, r);
+    retainedBytes = nextBytes;
+  };
 }
 
 /** Group a deduped accumulator into per-(date, model) daily entries. */
@@ -287,7 +304,7 @@ export interface NativeCollectResult {
 export const NATIVE_READ_BUDGET_MS = 45_000;
 
 /** Bump when parse/dedup semantics change — invalidates the per-file cache. */
-export const CLAUDE_CACHE_VERSION = 2;
+export const CLAUDE_CACHE_VERSION = 3;
 
 /**
  * Compact per-file cache row: [key, hasRealId, date, model, in, out, cacheCreate,
@@ -334,6 +351,10 @@ function fromCached(t: CachedRequest): ParsedRequest {
 function parseFileToCache(content: string, path: string): CachedRequest[] {
   const acc: ClaudeAccumulator = new Map();
   accumulateClaudeLines(acc, splitLines(content));
+  return accumulatorToCache(acc, path);
+}
+
+function accumulatorToCache(acc: ClaudeAccumulator, path: string): CachedRequest[] {
   let synIndex = 0;
   return [...acc.values()].map((r) =>
     toCached(
@@ -354,9 +375,10 @@ function* splitLines(content: string): Generator<string> {
 }
 
 /**
- * Read every Claude Code transcript on disk and aggregate it. Best effort: an
- * unreadable file is skipped, and a missing config dir yields `found:false` so
- * the caller can fall back to ccusage.
+ * Read every Claude Code transcript on disk and aggregate it. JSONL is streamed
+ * with a per-record memory bound, so long sessions have no total-file ceiling.
+ * An incomplete file or missing config dir yields `found:false` so the caller
+ * can fall back to ccusage without submitting authoritative partial totals.
  *
  * Incremental via the persistent per-file cache: transcripts are append-only,
  * so files whose (size, mtime) are unchanged reuse their cached parse and only
@@ -371,7 +393,7 @@ function* splitLines(content: string): Generator<string> {
  */
 export async function collectClaudeNative(
   env = process.env,
-  opts: { budgetMs?: number; now?: () => number; cachePath?: string } = {},
+  opts: { budgetMs?: number; now?: () => number; cachePath?: string; maxLineBytes?: number; maxRequestBytes?: number } = {},
 ): Promise<NativeCollectResult> {
   const dirs = resolveClaudeProjectDirs(env);
   const files: string[] = [];
@@ -379,12 +401,20 @@ export async function collectClaudeNative(
   if (files.length === 0) return { entries: [], found: false, filesScanned: 0 };
 
   const now = opts.now ?? Date.now;
+  const deadline = now() + (opts.budgetMs ?? NATIVE_READ_BUDGET_MS);
   const res = await readFilesWithCache<CachedRequest>({
     files,
     cachePath: opts.cachePath ?? nativeCachePath("claude", env),
     version: CLAUDE_CACHE_VERSION,
     parseFile: parseFileToCache,
-    deadline: now() + (opts.budgetMs ?? NATIVE_READ_BUDGET_MS),
+    streamFile: async (path) => {
+      const acc: ClaudeAccumulator = new Map();
+      const read = await readJsonlStream(path, boundedLineAccumulator(acc, opts.maxRequestBytes), {
+        deadline, now, maxLineBytes: opts.maxLineBytes,
+      });
+      return read.ok ? { ok: true, items: accumulatorToCache(acc, path) } : read;
+    },
+    deadline,
     now,
   });
   if (!res.itemsByFile) {
@@ -392,6 +422,7 @@ export async function collectClaudeNative(
       entries: [],
       found: false,
       filesScanned: res.filesRead,
+      // Existing callers use timedOut to reject incomplete fingerprints too.
       timedOut: true,
     };
   }
@@ -423,7 +454,7 @@ export async function collectClaudeNative(
  */
 export async function collectClaudeRequests(
   env = process.env,
-  opts: { budgetMs?: number; now?: () => number; maxFileBytes?: number } = {},
+  opts: { budgetMs?: number; now?: () => number; maxFileBytes?: number; maxRequestBytes?: number } = {},
 ): Promise<{ requests: ParsedRequest[]; found: boolean; timedOut?: boolean }> {
   const dirs = resolveClaudeProjectDirs(env);
   const files: string[] = [];
@@ -433,22 +464,20 @@ export async function collectClaudeRequests(
   const now = opts.now ?? Date.now;
   const deadline = now() + (opts.budgetMs ?? NATIVE_READ_BUDGET_MS);
   const acc: ClaudeAccumulator = new Map();
+  const onLine = boundedLineAccumulator(acc, opts.maxRequestBytes);
   for (const f of files) {
     if (now() > deadline) {
-      return { requests: [...acc.values()], found: true, timedOut: true };
+      return { requests: [], found: false, timedOut: true };
     }
-    const read = await readTextFileCapped(f, {
-      maxBytes: opts.maxFileBytes ?? MAX_NATIVE_FILE_BYTES,
+    const read = await readJsonlStream(f, onLine, {
+      maxLineBytes: opts.maxFileBytes,
       deadline,
       now,
     });
     if (!read.ok) {
-      if (read.reason === "timed-out") {
-        return { requests: [...acc.values()], found: true, timedOut: true };
-      }
-      continue;
+      // Never expose a partial verification skeleton as complete.
+      return { requests: [], found: false, timedOut: true };
     }
-    accumulateClaudeLines(acc, splitLines(read.content));
   }
   return { requests: [...acc.values()], found: true };
 }

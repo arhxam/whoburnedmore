@@ -18,11 +18,11 @@ file paths. `--dry-run` prints the exact payload; `--local` uploads nothing at a
   URLs or inject `-`-prefixed flags into `open`. (Use HTTPS; the API host is pinned.)
 - **Subprocess spawns.** `ccusage`, the browser opener, and the auto-sync installers use
   fixed argv where the platform allows it. The scheduled sync command is
-  `npm exec --yes --ignore-scripts --package whoburnedmore@latest -- whoburnedmore sync`:
+  `npm exec --yes --ignore-scripts --package whoburnedmore@<installed-version> -- whoburnedmore sync`:
   launchd values are XML-escaped, cron values are POSIX-quoted, and Windows task commands
   are quoted. The `ccusage` arguments are fixed constants (no server/user data).
 - **Untrusted transcript input.** Malformed/huge transcript stores are bounded (file-count,
-  per-file-size, and time budgets) so a pathological store cannot hang or OOM the CLI;
+  per-record-size (Claude), per-file-size (other readers), and time budgets) so a pathological store cannot hang or OOM the CLI;
   duplicate rows are merged before submit.
 - **Local secret.** The per-machine key lives in `~/.config/whoburnedmore/config.json` at
   mode `0600`, re-asserted on every write.
