@@ -543,6 +543,27 @@ describe("mapCcusageDaily", () => {
     expect(entries[0].costUSD).toBeCloseTo(0.8634);
   });
 
+  it("estimates codex cost when ccusage reports no day-level cost", () => {
+    const entries = mapCcusageDaily("codex", {
+      daily: [
+        {
+          date: "2026-02-05",
+          costUSD: 0,
+          models: {
+            "gpt-5.2-codex": {
+              inputTokens: 1_000_000,
+              outputTokens: 0,
+              cacheCreationTokens: 0,
+              cacheReadTokens: 0,
+            },
+          },
+        },
+      ],
+    });
+    expect(entries).toHaveLength(1);
+    expect(entries[0].costUSD).toBeGreaterThan(0);
+  });
+
   it("splits day-level cost across the models map proportionally to tokens", () => {
     const entries = mapCcusageDaily("codex", {
       daily: [

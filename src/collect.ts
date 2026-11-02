@@ -27,6 +27,7 @@ import { collectCodexNative } from "./native/codex.js";
 import { plausibleUsageDate } from "./native/usage-date.js";
 import { collectVscodeAgent, VSCODE_AGENTS } from "./native/vscode-agents.js";
 import { loadLivePricing } from "./pricing-live.js";
+import { estimateCostUSD } from "./pricing.js";
 import {
   loadProvenanceStore,
   provenanceStorePath,
@@ -231,6 +232,9 @@ export function mapCcusageDaily(
         c.cacheCreationTokens +
         c.cacheReadTokens;
       if (tokens === 0 && c.costUSD === 0) continue;
+      // ccusage omits day-level cost for some sources (codex); price the
+      // tokens we do have instead of reporting a free day.
+      if (c.costUSD === 0) c.costUSD = estimateCostUSD(c.model, c);
       // CLI-collected usage from local ccusage logs: origin "cli", unverified.
       entries.push({ date, tool, ...c, origin: "cli", verified: false });
     }
