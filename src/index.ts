@@ -237,8 +237,8 @@ async function run(flags: Flags): Promise<void> {
     console.log();
     console.log("  Nothing to burn yet — no local usage found from any coding agent.");
     console.log(pc.dim("  Use Claude Code, Codex, Gemini CLI (or friends) and come back."));
-    // Don't leave an Antigravity-only user thinking their agent went unseen — say
-    // plainly why it can't be counted (encrypted, flat-rate, no local token log).
+    // Don't leave an Antigravity-only user on old Node thinking their agent went
+    // unseen — Antigravity writes a SQLite ledger that needs Node 22.5+ to read.
     if (detectAntigravity()) {
       console.log();
       for (const line of antigravityNoticeLines()) console.log(pc.dim(line));
@@ -1031,8 +1031,8 @@ async function main(): Promise<void> {
     case "status":
     case "doctor": {
       for (const line of agentStatusReport()) console.log(line);
-      // Diagnostic aid: surface Antigravity here too, so a user who relies on it
-      // understands why it never appears on their board.
+      // Diagnostic aid: explain why a run on old Node skipped Antigravity's
+      // SQLite ledger. Empty on Node 22.5+, where the reader works.
       if (detectAntigravity()) {
         console.log("");
         for (const line of antigravityNoticeLines()) console.log(line);

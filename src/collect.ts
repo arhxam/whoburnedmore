@@ -15,6 +15,7 @@ import type {
   ToolStat,
 } from "./shared.js";
 import { collectAttribution } from "./attribution.js";
+import { collectAntigravity } from "./antigravity.js";
 import { collectContinue } from "./continue.js";
 import { collectCursor } from "./cursor.js";
 import {
@@ -27,6 +28,7 @@ import { collectCodexNative } from "./native/codex.js";
 import { plausibleUsageDate } from "./native/usage-date.js";
 import { collectVscodeAgent, VSCODE_AGENTS } from "./native/vscode-agents.js";
 import { loadLivePricing } from "./pricing-live.js";
+import { collectZcode } from "./zcode.js";
 import {
   loadProvenanceStore,
   provenanceStorePath,
@@ -652,9 +654,10 @@ export type ProgressFn = (done: number, total: number, label: string) => void;
 /**
  * Total number of collection stages: the ccusage sources, plus the fixed extra
  * ticking tasks — sessions, blocks, cursor, attribution (4), and the native
- * non-ccusage readers cline, roo, continue (VSCODE_AGENTS.length + 1).
+ * non-ccusage readers cline, roo, continue, antigravity, zcode
+ * (VSCODE_AGENTS.length + 3).
  */
-export const COLLECT_STAGES = SOURCES.length + 4 + VSCODE_AGENTS.length + 1;
+export const COLLECT_STAGES = SOURCES.length + 4 + VSCODE_AGENTS.length + 3;
 
 /**
  * A run is AUTHORITATIVE — safe to lower a stored requestCount fingerprint —
@@ -782,10 +785,10 @@ export async function collectAll(
     tick();
     return a;
   });
-  // Non-ccusage native readers for the Cline-lineage VS Code agents (Cline, Roo)
-  // and Continue.dev. Best effort like cursor: a no-op (found:false) when the
-  // agent isn't installed, and they emit the same anti-fraud requestCount the
-  // other native readers do.
+  // Non-ccusage native readers for the Cline-lineage VS Code agents (Cline, Roo),
+  // Continue.dev, Antigravity, and ZCode. Best effort like cursor: a no-op
+  // (found:false) when the agent isn't installed, and they emit the same
+  // anti-fraud requestCount the other native readers do.
   const vscodeTasks = VSCODE_AGENTS.map((a) =>
     collectVscodeAgent({ tool: a.tool, extIds: a.extIds }).then((r) => {
       tick();
@@ -793,6 +796,14 @@ export async function collectAll(
     }),
   );
   const continueTask = collectContinue().then((r) => {
+    tick();
+    return r;
+  });
+  const antigravityTask = collectAntigravity().then((r) => {
+    tick();
+    return r;
+  });
+  const zcodeTask = collectZcode().then((r) => {
     tick();
     return r;
   });
@@ -807,6 +818,8 @@ export async function collectAll(
     nativeCodex,
     vscodeResults,
     continueResult,
+    antigravityResult,
+    zcodeResult,
   ] = await Promise.all([
     sourceTasks,
     sessionTask,
@@ -817,6 +830,8 @@ export async function collectAll(
     nativeCodexTask,
     Promise.all(vscodeTasks),
     continueTask,
+    antigravityTask,
+    zcodeTask,
   ]);
 
   const native = { claude: nativeClaude, codex: nativeCodex };
@@ -862,17 +877,23 @@ export async function collectAll(
     blocks.push(...cursor.blocks);
     toolsFound.push("cursor");
   }
-  // Cline / Roo (VS Code globalStorage tasks) and Continue.dev — additive; each
-  // no-ops when its agent isn't present.
+  // Cline / Roo (VS Code globalStorage tasks), Continue.dev, Antigravity, and
+  // ZCode — additive; each no-ops when its agent isn't present.
   for (const { tool, result } of vscodeResults) {
     if (result.found && result.entries.length > 0) {
       entries.push(...result.entries);
       toolsFound.push(tool);
     }
   }
-  if (continueResult.found && continueResult.entries.length > 0) {
-    entries.push(...continueResult.entries);
-    toolsFound.push("continue");
+  for (const [tool, result] of [
+    ["continue", continueResult],
+    ["antigravity", antigravityResult],
+    ["zcode", zcodeResult],
+  ] as const) {
+    if (result.found && result.entries.length > 0) {
+      entries.push(...result.entries);
+      toolsFound.push(tool);
+    }
   }
 
   const { tools, skills, agent, sessionMessages, complete } = attribution;
@@ -905,6 +926,8 @@ export async function collectAll(
     nativeCodex,
     ...vscodeResults.map(({ result }) => result),
     continueResult,
+    antigravityResult,
+    zcodeResult,
   );
   const storePath = provenanceStorePath();
   const reconciled = reconcileProvenance(
