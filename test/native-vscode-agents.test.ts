@@ -185,7 +185,7 @@ describe("vscodeGlobalStorageRoots", () => {
 
 describe("collectVscodeAgent — reads task dirs on disk", () => {
   it("invalidates caches created before the hardened date semantics", () => {
-    expect(VSCODE_CACHE_VERSION).toBe(2);
+    expect(VSCODE_CACHE_VERSION).toBe(3);
   });
 
   it("reads <root>/<extId>/tasks/*/ui_messages.json and aggregates, or found:false when absent", async () => {
@@ -224,6 +224,33 @@ describe("collectVscodeAgent — reads task dirs on disk", () => {
       });
       expect(empty.found).toBe(false);
       expect(empty.entries).toEqual([]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("marks the scan incomplete when a task file is over the byte cap", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "wbm-vscode-big-"));
+    const extId = "saoudrizwan.claude-dev";
+    const good = join(dir, extId, "tasks", "good");
+    const bad = join(dir, extId, "tasks", "bad");
+    await mkdir(good, { recursive: true });
+    await mkdir(bad, { recursive: true });
+    await writeFile(
+      join(good, "ui_messages.json"),
+      JSON.stringify([apiReq({ ts: TS, tokensIn: 100, tokensOut: 20, cost: 0.3, model: "claude-sonnet-4-5" })]),
+    );
+    await writeFile(join(bad, "ui_messages.json"), "x".repeat(64));
+    try {
+      const res = await collectVscodeAgent({
+        tool: "cline",
+        extIds: [extId],
+        roots: [dir],
+        env: { WHOBURNEDMORE_CONFIG_DIR: dir } as NodeJS.ProcessEnv,
+        cachePath: join(dir, "cache.json"),
+        maxFileBytes: 32,
+      });
+      expect(res).toMatchObject({ entries: [], found: false, timedOut: true });
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

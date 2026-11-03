@@ -278,3 +278,71 @@ describe("resolveClaudeProjectDirs", () => {
     expect(dirs).toEqual([join("/a/one", "projects"), join("/b/two", "projects")]);
   });
 });
+
+describe("timezone-stable Claude cache", () => {
+  const line = (ts: string, id: string) =>
+    JSON.stringify({
+      timestamp: ts,
+      requestId: id,
+      message: {
+        role: "assistant",
+        id,
+        model: "claude-opus-4-8",
+        usage: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+      },
+    });
+
+  async function corpus() {
+    const dir = await mkdtemp(join(tmpdir(), "wbm-tz-"));
+    const proj = join(dir, "projects", "p");
+    await mkdir(proj, { recursive: true });
+    return { dir, proj, env: { CLAUDE_CONFIG_DIR: dir, WHOBURNEDMORE_CONFIG_DIR: dir } as NodeJS.ProcessEnv };
+  }
+
+  it("reassigns a warm cache when the timezone changes", async () => {
+    const previous = process.env.TZ;
+    const { dir, proj, env } = await corpus();
+    try {
+      await writeFile(join(proj, "s.jsonl"), `${line("2026-06-10T20:30:00Z", "r1")}\n`);
+      process.env.TZ = "America/Los_Angeles";
+      const losAngeles = await collectClaudeNative(env, { budgetMs: 5000 });
+      expect(losAngeles.entries[0]?.date).toBe("2026-06-10");
+      process.env.TZ = "Asia/Kolkata";
+      const india = await collectClaudeNative(env, { budgetMs: 5000 });
+      expect(india.filesScanned).toBe(0);
+      expect(india.entries[0]?.date).toBe("2026-06-11");
+      expect(india.entries[0]?.outputTokens).toBe(1);
+    } finally {
+      if (previous === undefined) delete process.env.TZ;
+      else process.env.TZ = previous;
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps both sides of a DST fall-back on the local calendar day", async () => {
+    const previous = process.env.TZ;
+    const { dir, proj, env } = await corpus();
+    try {
+      process.env.TZ = "America/New_York";
+      await writeFile(
+        join(proj, "s.jsonl"),
+        [
+          line("2026-11-01T03:30:00Z", "before"),
+          line("2026-11-01T04:30:00Z", "after-midnight"),
+          line("2026-11-01T06:30:00Z", "after-fallback"),
+        ].join("\n") + "\n",
+      );
+      const cold = await collectClaudeNative(env, { budgetMs: 5000 });
+      const tokens = new Map(cold.entries.map((entry) => [entry.date, entry.outputTokens]));
+      expect(tokens.get("2026-10-31")).toBe(1);
+      expect(tokens.get("2026-11-01")).toBe(2);
+      const warm = await collectClaudeNative(env, { budgetMs: 5000 });
+      expect(warm.filesScanned).toBe(0);
+      expect(new Map(warm.entries.map((entry) => [entry.date, entry.outputTokens]))).toEqual(tokens);
+    } finally {
+      if (previous === undefined) delete process.env.TZ;
+      else process.env.TZ = previous;
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});

@@ -1,5 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { describe, expect, it, vi } from "vitest";
 import {
+  appendFile,
   chmod,
   mkdtemp,
   mkdir,
@@ -11,9 +14,12 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import * as esbuild from "esbuild";
 import { collectClaudeNative } from "../src/native/claude.js";
 import { CODEX_CACHE_VERSION, collectCodexNative } from "../src/native/codex.js";
 import { nativeCachePath, readFilesWithCache } from "../src/native/file-cache.js";
+import { readJsonlStream } from "../src/native/jsonl-stream.js";
 
 /** Build one Claude Code transcript JSONL line with real provider ids. */
 function claudeLine(opts: {
@@ -218,7 +224,9 @@ describe("readFilesWithCache — generic cache mechanics", () => {
         maxFileBytes: 16,
       });
       expect(parsed).toBe(false);
-      expect(result.itemsByFile).toEqual([]);
+      expect(result.itemsByFile).toBeNull();
+      expect(result.incomplete).toBe(true);
+      expect(result.timedOut).toBe(false);
       expect(result.filesRead).toBe(0);
     } finally {
       await rm(dir, { recursive: true, force: true });
@@ -245,6 +253,190 @@ describe("readFilesWithCache — generic cache mechanics", () => {
       });
       expect((await stat(cacheDir)).mode & 0o777).toBe(0o700);
       expect((await stat(cachePath)).mode & 0o777).toBe(0o600);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not rewrite the cache when nothing changed", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "wbm-fcache-"));
+    try {
+      const input = join(dir, "input.txt");
+      const cachePath = join(dir, "cache.json");
+      await writeFile(input, "safe");
+      const parse = (value: string) => [value];
+      await readFilesWithCache({
+        files: [input],
+        cachePath,
+        version: 1,
+        parseFile: parse,
+        deadline: Date.now() + 5_000,
+      });
+      const stale = new Date(Date.now() - 120_000);
+      await utimes(cachePath, stale, stale);
+      await readFilesWithCache({
+        files: [input],
+        cachePath,
+        version: 1,
+        parseFile: parse,
+        deadline: Date.now() + 5_000,
+      });
+      expect(Math.abs((await stat(cachePath)).mtimeMs - stale.getTime())).toBeLessThan(5);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("warns and does not throw when the serialized cache exceeds the byte limit", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "wbm-fcache-"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const input = join(dir, "input.txt");
+      const cachePath = join(dir, "cache.json");
+      await writeFile(input, "safe");
+      const result = await readFilesWithCache({
+        files: [input],
+        cachePath,
+        version: 1,
+        parseFile: () => ["x".repeat(64)],
+        deadline: Date.now() + 5_000,
+        maxCacheBytes: 32,
+      });
+      expect(result.itemsByFile).toEqual([["x".repeat(64)]]);
+      expect(warn.mock.calls.some((call) => String(call[0]).includes("exceeds"))).toBe(true);
+      await expect(readFile(cachePath)).rejects.toThrow();
+    } finally {
+      warn.mockRestore();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("streaming failure policy", () => {
+  it("caches a permanent failure and still returns the other files", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "wbm-fcache-"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const good = join(dir, "good.txt");
+      const bad = join(dir, "bad.txt");
+      const cachePath = join(dir, "cache.json");
+      await writeFile(good, "ok");
+      await writeFile(bad, "nope");
+      let badReads = 0;
+      const run = () =>
+        readFilesWithCache({
+          files: [good, bad],
+          cachePath,
+          version: 1,
+          parseFile: (value: string) => [value],
+          streamFile: async (path) => {
+            if (path === bad) {
+              badReads += 1;
+              return { ok: false as const, reason: "too-large" };
+            }
+            return { ok: true as const, items: ["ok"] };
+          },
+          deadline: Date.now() + 5_000,
+        });
+      const first = await run();
+      expect(first.timedOut).toBe(false);
+      expect(first.incomplete).toBeUndefined();
+      expect(first.itemsByFile).toEqual([["ok"], []]);
+      expect(badReads).toBe(1);
+      expect(warn.mock.calls.some((call) => String(call[0]).includes("skipping transcript"))).toBe(true);
+      const cached = JSON.parse(await readFile(cachePath, "utf8")) as {
+        files: Record<string, { skipped?: boolean; items: string[] }>;
+      };
+      expect(cached.files[bad]).toMatchObject({ skipped: true, items: [] });
+      const second = await run();
+      expect(second.itemsByFile).toEqual([["ok"], []]);
+      expect(second.filesRead).toBe(0);
+      expect(badReads).toBe(1);
+    } finally {
+      warn.mockRestore();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("retries ENOENT instead of failing the scan or caching a skip", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "wbm-fcache-"));
+    try {
+      const kept = join(dir, "kept.txt");
+      const missing = join(dir, "missing.txt");
+      const cachePath = join(dir, "cache.json");
+      await writeFile(kept, "ok");
+      await writeFile(missing, "gone");
+      const first = await readFilesWithCache({
+        files: [kept, missing],
+        cachePath,
+        version: 1,
+        parseFile: (value: string) => [value],
+        streamFile: async (path) => ({ ok: true as const, items: [path === kept ? "ok" : "gone"] }),
+        deadline: Date.now() + 5_000,
+      });
+      expect(first.itemsByFile).toEqual([["ok"], ["gone"]]);
+      await rm(missing);
+      const second = await readFilesWithCache({
+        files: [kept, missing],
+        cachePath,
+        version: 1,
+        parseFile: (value: string) => [value],
+        streamFile: async () => ({ ok: false as const, reason: "unreadable", code: "ENOENT" }),
+        deadline: Date.now() + 5_000,
+      });
+      expect(second.incomplete).toBeUndefined();
+      expect(second.timedOut).toBe(false);
+      expect(second.itemsByFile).toEqual([["ok"]]);
+      const cached = JSON.parse(await readFile(cachePath, "utf8")) as { files: Record<string, unknown> };
+      expect(cached.files[missing]).toBeUndefined();
+      await writeFile(missing, "back");
+      let reads = 0;
+      const third = await readFilesWithCache({
+        files: [kept, missing],
+        cachePath,
+        version: 1,
+        parseFile: (value: string) => [value],
+        streamFile: async () => {
+          reads += 1;
+          return { ok: true as const, items: ["back"] };
+        },
+        deadline: Date.now() + 5_000,
+      });
+      expect(reads).toBe(1);
+      expect(third.itemsByFile).toEqual([["ok"], ["back"]]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not cache a timeout, so the next run reads the file", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "wbm-fcache-"));
+    try {
+      const path = join(dir, "slow.txt");
+      const cachePath = join(dir, "cache.json");
+      await writeFile(path, "later");
+      const timedOut = await readFilesWithCache({
+        files: [path],
+        cachePath,
+        version: 1,
+        parseFile: (value: string) => [value],
+        streamFile: async () => ({ ok: false as const, reason: "timed-out" }),
+        deadline: Date.now() + 5_000,
+      });
+      expect(timedOut).toMatchObject({ itemsByFile: null, timedOut: true });
+      const raw = await readFile(cachePath, "utf8").catch(() => "");
+      expect(raw.includes("skipped")).toBe(false);
+      expect(raw.includes(path)).toBe(false);
+      const again = await readFilesWithCache({
+        files: [path],
+        cachePath,
+        version: 1,
+        parseFile: (value: string) => [value],
+        streamFile: async () => ({ ok: true as const, items: ["later"] }),
+        deadline: Date.now() + 5_000,
+      });
+      expect(again.itemsByFile).toEqual([["later"]]);
+      expect(again.filesRead).toBe(1);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -360,7 +552,7 @@ describe("codex native reader through the cache", () => {
       // Cache file landed in the config dir under the expected name.
       const cachePath = nativeCachePath("codex", env);
       const persisted = JSON.parse(await readFile(cachePath, "utf8")) as { v: number };
-      expect(persisted.v).toBe(7);
+      expect(persisted.v).toBe(8);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -409,6 +601,158 @@ describe("codex native reader through the cache", () => {
       const total = out.entries.reduce((s, e) => s + e.inputTokens + e.outputTokens, 0);
       expect(total).toBe(130);
       expect(new Set(out.entries.map((e) => e.date)).size).toBe(2);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("incremental transcript reads", () => {
+  async function streamLines(
+    path: string,
+    resume?: { offset: number; items: string[] },
+  ) {
+    const lines: string[] = [];
+    const read = await readJsonlStream(path, (line) => lines.push(line), {
+      deadline: Number.POSITIVE_INFINITY,
+      startOffset: resume?.offset ?? 0,
+    });
+    if (!read.ok) return read;
+    return { ok: true as const, items: [...(resume?.items ?? []), ...lines.filter((line) => line !== "")], offset: read.offset };
+  }
+
+  it("tails an append, re-reads a truncate or same-size rewrite, and finishes a file across budgets", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "wbm-tail-"));
+    try {
+      const file = join(dir, "session.jsonl");
+      const cachePath = join(dir, "cache.json");
+      const starts: number[] = [];
+      const read = (files = [file]) =>
+        readFilesWithCache({
+          files,
+          cachePath,
+          version: 1,
+          parseFile: (content) => content.split("\n").filter(Boolean),
+          streamFile: async (path, resume) => {
+            starts.push(resume?.offset ?? 0);
+            return streamLines(path, resume);
+          },
+          deadline: Date.now() + 5_000,
+        });
+      await writeFile(file, "one\n");
+      expect((await read()).itemsByFile).toEqual([["one"]]);
+      expect(starts).toEqual([0]);
+
+      await appendFile(file, "two\n");
+      const appended = await read();
+      expect(starts.at(-1)).toBe(Buffer.byteLength("one\n"));
+      expect(appended.itemsByFile).toEqual([["one", "two"]]);
+
+      await writeFile(file, "one\n");
+      const truncated = await read();
+      expect(starts.at(-1)).toBe(0);
+      expect(truncated.itemsByFile).toEqual([["one"]]);
+
+      await writeFile(file, "zzz\n");
+      const bumped = new Date(Date.now() + 5_000);
+      await utimes(file, bumped, bumped);
+      const rewritten = await read();
+      expect(starts.at(-1)).toBe(0);
+      expect(rewritten.itemsByFile).toEqual([["zzz"]]);
+
+      await writeFile(file, "a\nb\nc\nd\n");
+      const budgetCache = join(dir, "budget.json");
+      let calls = 0;
+      const limited = () =>
+        readFilesWithCache({
+          files: [file],
+          cachePath: budgetCache,
+          version: 1,
+          parseFile: () => [],
+          streamFile: async (path, resume) => {
+            calls += 1;
+            const got: string[] = [];
+            const readPart = await readJsonlStream(path, (line) => got.push(line), {
+              deadline: 0,
+              now: () => got.length,
+              startOffset: resume?.offset ?? 0,
+            });
+            const items = [...(resume?.items ?? []), ...got.filter(Boolean)];
+            if (readPart.ok) return { ok: true as const, items, offset: readPart.offset };
+            return { ok: false as const, reason: readPart.reason, offset: readPart.offset, items, code: readPart.code };
+          },
+          deadline: Date.now() + 5_000,
+        });
+      const firstPass = await limited();
+      expect(firstPass.timedOut).toBe(true);
+      expect(firstPass.itemsByFile).toBeNull();
+      let done = firstPass;
+      for (let i = 0; i < 6 && !done.itemsByFile; i += 1) done = await limited();
+      expect(done.itemsByFile).toEqual([["a", "b", "c", "d"]]);
+      expect(calls).toBeGreaterThan(1);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a valid cache when two processes write it at once", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "wbm-race-"));
+    try {
+      const file = join(dir, "input.txt");
+      const cachePath = join(dir, "cache.json");
+      const outfile = join(dir, "writer.mjs");
+      await writeFile(file, "race");
+      const source = fileURLToPath(new URL("../src/native/file-cache.ts", import.meta.url));
+      await esbuild.build({
+        entryPoints: [source],
+        bundle: true,
+        platform: "node",
+        format: "esm",
+        outfile,
+        plugins: [
+          {
+            name: "js-to-ts",
+            setup(build) {
+              build.onResolve({ filter: /^\./ }, (args) => {
+                const candidate = join(args.resolveDir, args.path);
+                const ts = candidate.endsWith(".js") ? candidate.replace(/\.js$/, ".ts") : candidate;
+                if (existsSync(ts)) return { path: ts };
+                if (existsSync(candidate)) return { path: candidate };
+                return null;
+              });
+            },
+          },
+        ],
+      });
+      const writer = join(dir, "run.mjs");
+      await writeFile(
+        writer,
+        `import { readFilesWithCache } from ${JSON.stringify(outfile)};
+const [, , cachePath, file, marker] = process.argv;
+await readFilesWithCache({
+  files: [file],
+  cachePath,
+  version: 1,
+  parseFile: () => [marker],
+  deadline: Date.now() + 5000,
+});
+`,
+      );
+      const once = (marker: string) =>
+        new Promise<void>((resolve, reject) => {
+          const child = spawn(process.execPath, [writer, cachePath, file, marker], { stdio: "ignore" });
+          child.on("error", reject);
+          child.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`writer ${code}`))));
+        });
+      for (let i = 0; i < 12; i += 1) {
+        await Promise.all([once("left"), once("right")]);
+        const parsed = JSON.parse(await readFile(cachePath, "utf8")) as {
+          v: number;
+          files: Record<string, { items: string[] }>;
+        };
+        expect(parsed.v).toBe(1);
+        expect(["left", "right"]).toContain(parsed.files[file]?.items[0]);
+      }
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

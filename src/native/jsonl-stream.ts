@@ -8,8 +8,11 @@ import { MAX_NATIVE_FILE_BYTES } from "./file-cache.js";
 export async function readJsonlStream(
   path: string,
   onLine: (line: string) => void,
-  opts: { deadline: number; now?: () => number; maxLineBytes?: number },
-): Promise<{ ok: true } | { ok: false; reason: "unreadable" | "too-large" | "timed-out" }> {
+  opts: { deadline: number; now?: () => number; maxLineBytes?: number; startOffset?: number },
+): Promise<
+  | { ok: true; offset: number }
+  | { ok: false; reason: "unreadable" | "too-large" | "timed-out"; code?: string; offset?: number }
+> {
   const now = opts.now ?? Date.now;
   const maxLineBytes = Math.max(1, opts.maxLineBytes ?? MAX_NATIVE_FILE_BYTES);
   let handle: Awaited<ReturnType<typeof open>> | undefined;
@@ -27,33 +30,54 @@ export async function readJsonlStream(
     const chunk = Buffer.allocUnsafe(64 * 1024);
     let parts: Buffer[] = [];
     let pendingBytes = 0;
+    // `committed` is the byte after the last complete line. A timeout keeps the
+    // partial line so the next run can resume there instead of restarting.
+    let position = Math.max(0, opts.startOffset ?? 0);
+    let committed = position;
     while (true) {
-      if (now() > opts.deadline) return { ok: false, reason: "timed-out" };
-      const { bytesRead } = await handle.read(chunk, 0, chunk.length, null);
+      if (now() > opts.deadline) return { ok: false, reason: "timed-out", offset: committed };
+      const { bytesRead } = await handle.read(chunk, 0, chunk.length, position);
       if (bytesRead === 0) break;
       let start = 0;
       while (start < bytesRead) {
         const newline = chunk.indexOf(10, start);
         const end = newline >= 0 && newline < bytesRead ? newline : bytesRead;
         const length = end - start;
-        if (pendingBytes + length > maxLineBytes) return { ok: false, reason: "too-large" };
+        if (pendingBytes + length > maxLineBytes) {
+          return { ok: false, reason: "too-large", offset: committed };
+        }
         // Copy because the I/O buffer is reused on the next read.
         parts.push(Buffer.from(chunk.subarray(start, end)));
         pendingBytes += length;
         if (end < bytesRead) {
-          if (now() > opts.deadline) return { ok: false, reason: "timed-out" };
+          if (now() > opts.deadline) return { ok: false, reason: "timed-out", offset: committed };
           onLine(Buffer.concat(parts, pendingBytes).toString("utf8"));
           parts = [];
           pendingBytes = 0;
+          committed = position + end + 1;
         }
         start = end + 1;
       }
+      position += bytesRead;
     }
-    if (now() > opts.deadline) return { ok: false, reason: "timed-out" };
-    if (pendingBytes > 0) onLine(Buffer.concat(parts, pendingBytes).toString("utf8"));
-    if (now() > opts.deadline) return { ok: false, reason: "timed-out" };
-    return { ok: true };
-  } catch {
+    if (now() > opts.deadline) return { ok: false, reason: "timed-out", offset: committed };
+    if (pendingBytes > 0) {
+      onLine(Buffer.concat(parts, pendingBytes).toString("utf8"));
+      committed = position;
+    }
+    if (now() > opts.deadline) return { ok: false, reason: "timed-out", offset: committed };
+    return { ok: true, offset: committed };
+  } catch (err) {
+    if (err instanceof Error && err.message.includes("memory budget")) {
+      return { ok: false, reason: "too-large" };
+    }
+    const code =
+      typeof err === "object" && err !== null && "code" in err &&
+      typeof (err as { code?: unknown }).code === "string"
+        ? (err as { code: string }).code
+        : undefined;
+    if (code === "ENOENT") return { ok: false, reason: "unreadable", code };
+    if (code === "EACCES" || code === "EPERM") return { ok: false, reason: "unreadable", code: "EACCES" };
     return { ok: false, reason: "unreadable" };
   } finally {
     await handle?.close().catch(() => undefined);

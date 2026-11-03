@@ -304,19 +304,20 @@ export interface NativeCollectResult {
 export const NATIVE_READ_BUDGET_MS = 45_000;
 
 /** Bump when parse/dedup semantics change — invalidates the per-file cache. */
-export const CLAUDE_CACHE_VERSION = 3;
+export const CLAUDE_CACHE_VERSION = 4;
 
 /**
- * Compact per-file cache row: [key, hasRealId, date, model, in, out, cacheCreate,
- * cacheRead]. Tuples (not objects) keep the on-disk cache several times smaller.
+ * Compact per-file cache row: [key, hasRealId, timestamp, model, in, out,
+ * cacheCreate, cacheRead]. The local day is assigned at finalize time so a
+ * timezone change cannot leave a warm cache on the old timezone's dates.
  */
-type CachedRequest = [string, 0 | 1, string, string, number, number, number, number];
+type CachedRequest = [string, 0 | 1, number, string, number, number, number, number];
 
 function toCached(r: ParsedRequest): CachedRequest {
   return [
     r.key,
     r.hasRealId ? 1 : 0,
-    r.date,
+    r.ts,
     r.model,
     r.inputTokens,
     r.outputTokens,
@@ -326,11 +327,12 @@ function toCached(r: ParsedRequest): CachedRequest {
 }
 
 function fromCached(t: CachedRequest): ParsedRequest {
+  const ts = t[2];
   return {
     key: t[0],
     hasRealId: t[1] === 1,
-    date: t[2],
-    ts: 0,
+    date: localUsageDate(ts) ?? "",
+    ts,
     model: t[3],
     inputTokens: t[4],
     outputTokens: t[5],
@@ -377,8 +379,11 @@ function* splitLines(content: string): Generator<string> {
 /**
  * Read every Claude Code transcript on disk and aggregate it. JSONL is streamed
  * with a per-record memory bound, so long sessions have no total-file ceiling.
- * An incomplete file or missing config dir yields `found:false` so the caller
- * can fall back to ccusage without submitting authoritative partial totals.
+ * A missing config dir yields `found:false`. One permanently bad transcript
+ * (permission denied, or a record past the memory bound) is cached as a skip
+ * and does not turn the reader off on later runs. A timeout or an identity
+ * failure still yields `found:false` so the caller can fall back to ccusage
+ * without submitting authoritative partial totals.
  *
  * Incremental via the persistent per-file cache: transcripts are append-only,
  * so files whose (size, mtime) are unchanged reuse their cached parse and only
@@ -407,12 +412,23 @@ export async function collectClaudeNative(
     cachePath: opts.cachePath ?? nativeCachePath("claude", env),
     version: CLAUDE_CACHE_VERSION,
     parseFile: parseFileToCache,
-    streamFile: async (path) => {
+    streamFile: async (path, resume) => {
       const acc: ClaudeAccumulator = new Map();
+      if (resume) {
+        for (const row of resume.items) {
+          const restored = fromCached(row);
+          if (restored.date || restored.ts > 0) acc.set(restored.key, restored);
+        }
+      }
       const read = await readJsonlStream(path, boundedLineAccumulator(acc, opts.maxRequestBytes), {
-        deadline, now, maxLineBytes: opts.maxLineBytes,
+        deadline, now, maxLineBytes: opts.maxLineBytes, startOffset: resume?.offset ?? 0,
       });
-      return read.ok ? { ok: true, items: accumulatorToCache(acc, path) } : read;
+      const items = accumulatorToCache(acc, path);
+      if (read.ok) return { ok: true as const, items, offset: read.offset };
+      if (read.reason === "timed-out" && read.offset !== undefined && read.offset > (resume?.offset ?? 0)) {
+        return { ok: false as const, reason: "timed-out" as const, offset: read.offset, items };
+      }
+      return read;
     },
     deadline,
     now,
@@ -432,6 +448,7 @@ export async function collectClaudeNative(
   for (const items of res.itemsByFile) {
     for (const t of items) {
       const r = fromCached(t);
+      if (!r.date) continue;
       const prev = acc.get(r.key);
       if (!prev || reqTokens(r) > reqTokens(prev)) acc.set(r.key, r);
     }

@@ -1,4 +1,46 @@
-import { describe, expect, it } from "vitest";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, it, vi } from "vitest";
+
+const readerMocks = vi.hoisted(() => ({
+  collectVscodeAgent: vi.fn(),
+  collectContinue: vi.fn(),
+}));
+
+vi.mock("node:child_process", async () => {
+  const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+  function execFile(
+    file: string,
+    args?: unknown,
+    options?: unknown,
+    callback?: unknown,
+  ) {
+    const cb =
+      typeof callback === "function"
+        ? callback
+        : typeof options === "function"
+          ? options
+          : typeof args === "function"
+            ? args
+            : undefined;
+    if (cb) queueMicrotask(() => cb(null, "", ""));
+    return { kill() {}, on() { return this; }, pid: 0 };
+  }
+  return { ...actual, execFile };
+});
+
+vi.mock("../src/native/vscode-agents.js", async () => {
+  const actual = await vi.importActual<typeof import("../src/native/vscode-agents.js")>(
+    "../src/native/vscode-agents.js",
+  );
+  return { ...actual, collectVscodeAgent: readerMocks.collectVscodeAgent };
+});
+
+vi.mock("../src/continue.js", async () => {
+  const actual = await vi.importActual<typeof import("../src/continue.js")>("../src/continue.js");
+  return { ...actual, collectContinue: readerMocks.collectContinue };
+});
 import {
   capByTokens,
   ccusageClaudeEnv,
@@ -10,6 +52,7 @@ import {
   codexReplayTombstoneDates,
   dedupeBlocks,
   dedupeDaily,
+  collectAll,
   dedupeSessions,
   isAuthoritativeScan,
   isRetryableCcusageFailure,
@@ -20,6 +63,12 @@ import {
   NATIVE_COVERED_SOURCES,
   selectSourceEntries,
 } from "../src/collect.js";
+import { localUsageDate } from "../src/native/usage-date.js";
+import {
+  PROVENANCE_STORE_VERSION,
+  provenanceStorePath,
+  saveProvenanceStore,
+} from "../src/provenance-store.js";
 import type { DailyUsageEntry } from "../src/shared.js";
 import {
   NATIVE_READ_BUDGET_MS,
@@ -876,5 +925,68 @@ describe("dedupe before send (prevents API duplicate-key 500s)", () => {
     expect(out).toHaveLength(1);
     expect(out[0].totalTokens).toBe(150);
     expect(out[0].costUSD).toBe(1.5);
+  });
+});
+
+describe("collectAll — one reader throwing", () => {
+  it("keeps the scan and treats Cline/Continue failures as timed out", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "wbm-collect-throw-"));
+    const previous = {
+      HOME: process.env.HOME,
+      CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR,
+      CODEX_HOME: process.env.CODEX_HOME,
+      WHOBURNEDMORE_CONFIG_DIR: process.env.WHOBURNEDMORE_CONFIG_DIR,
+      WHOBURNEDMORE_PRICING_OFFLINE: process.env.WHOBURNEDMORE_PRICING_OFFLINE,
+    };
+    const stamp = "2026-06-10T12:00:00Z";
+    const date = localUsageDate(Date.parse(stamp));
+    expect(date).toBeTruthy();
+    try {
+      const project = join(dir, "projects", "p");
+      await mkdir(project, { recursive: true });
+      await writeFile(
+        join(project, "session.jsonl"),
+        `${JSON.stringify({
+          timestamp: stamp,
+          requestId: "r1",
+          message: {
+            id: "m1",
+            role: "assistant",
+            model: "claude-opus-4-8",
+            usage: {
+              input_tokens: 10,
+              output_tokens: 5,
+              cache_creation_input_tokens: 0,
+              cache_read_input_tokens: 0,
+            },
+          },
+        })}\n`,
+      );
+      process.env.HOME = dir;
+      process.env.CLAUDE_CONFIG_DIR = dir;
+      process.env.CODEX_HOME = join(dir, "codex");
+      process.env.WHOBURNEDMORE_CONFIG_DIR = dir;
+      process.env.WHOBURNEDMORE_PRICING_OFFLINE = "1";
+      saveProvenanceStore(provenanceStorePath(), {
+        v: PROVENANCE_STORE_VERSION,
+        req: { [`${date}|claude`]: 50 },
+      });
+      readerMocks.collectVscodeAgent.mockRejectedValue(new Error("cline exploded"));
+      readerMocks.collectContinue.mockRejectedValue(new Error("continue exploded"));
+      const result = await collectAll(undefined, { offline: true });
+      expect(result.attributionComplete).toBe(true);
+      const claude = result.entries.find((entry) => entry.tool === "claude");
+      expect(claude?.requestCount).toBe(50);
+      expect(result.toolsFound).not.toContain("cline");
+      expect(result.toolsFound).not.toContain("continue");
+    } finally {
+      readerMocks.collectVscodeAgent.mockReset();
+      readerMocks.collectContinue.mockReset();
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

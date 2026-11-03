@@ -172,10 +172,48 @@ async function listJsonl(
 }
 
 /** Bump when the parse/aggregate semantics change — invalidates the per-file cache. */
-export const CONTINUE_CACHE_VERSION = 2;
+export const CONTINUE_CACHE_VERSION = 3;
 
-// Compact per-file cache row: [date, model, in, out, cost, requestCount].
-type CachedRow = [string, string, number, number, number, number];
+// Compact per-record cache row: [timestamp, model, in, out, cost]. The local
+// day is assigned when the rows are merged.
+type CachedRow = [number, string, number, number, number];
+
+function continueCacheRows(content: string): CachedRow[] {
+  const rows: CachedRow[] = [];
+  for (const line of content.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let raw: unknown;
+    try {
+      raw = JSON.parse(trimmed.charCodeAt(0) === 0xfeff ? trimmed.slice(1) : trimmed);
+    } catch {
+      continue;
+    }
+    if (!raw || typeof raw !== "object") continue;
+    const rec = raw as Record<string, unknown>;
+    if (typeof rec.eventName === "string" && rec.eventName !== "tokensGenerated") continue;
+    const model = typeof rec.model === "string" && rec.model ? rec.model : null;
+    if (!model) continue;
+    const ms = toEpochMs(rec.timestamp ?? rec.eventTimestamp);
+    if (ms === null) continue;
+    const inputTokens = num(rec.promptTokens ?? rec.prompt_tokens);
+    const outputTokens = num(rec.generatedTokens ?? rec.generated_tokens);
+    if (inputTokens + outputTokens === 0) continue;
+    rows.push([
+      ms,
+      model,
+      inputTokens,
+      outputTokens,
+      estimateCostUSD(model, {
+        inputTokens,
+        outputTokens,
+        cacheCreationTokens: 0,
+        cacheReadTokens: 0,
+      }),
+    ]);
+  }
+  return rows;
+}
 
 export interface CollectContinueOpts {
   /** Continue home dir (default `~/.continue`); the reader scans `<dir>/dev_data`. */
@@ -185,6 +223,7 @@ export interface CollectContinueOpts {
   now?: () => number;
   cachePath?: string;
   maxFiles?: number;
+  maxFileBytes?: number;
 }
 
 /**
@@ -215,17 +254,10 @@ export async function collectContinue(
     files,
     cachePath: opts.cachePath ?? nativeCachePath("continue", env),
     version: CONTINUE_CACHE_VERSION,
-    parseFile: (content) =>
-      parseContinueJsonl(content).map((e) => [
-        e.date,
-        e.model,
-        e.inputTokens,
-        e.outputTokens,
-        e.costUSD,
-        e.requestCount ?? 0,
-      ]),
+    parseFile: (content) => continueCacheRows(content),
     deadline,
     now,
+    maxFileBytes: opts.maxFileBytes,
   });
   if (!res.itemsByFile) {
     return { entries: [], found: false, filesScanned: res.filesRead, timedOut: true };
@@ -236,16 +268,18 @@ export async function collectContinue(
   const byKey = new Map<string, Bucket>();
   for (const rows of res.itemsByFile) {
     for (const r of rows) {
-      const key = `${r[0]}|${r[1]}`;
+      const date = localUsageDate(r[0]);
+      if (!date) continue;
+      const key = `${date}|${r[1]}`;
       let b = byKey.get(key);
       if (!b) {
-        b = { date: r[0], model: r[1], inputTokens: 0, outputTokens: 0, costUSD: 0, requestCount: 0 };
+        b = { date, model: r[1], inputTokens: 0, outputTokens: 0, costUSD: 0, requestCount: 0 };
         byKey.set(key, b);
       }
       b.inputTokens += r[2];
       b.outputTokens += r[3];
       b.costUSD += r[4];
-      b.requestCount += r[5];
+      b.requestCount += 1;
     }
   }
   const entries: DailyUsageEntry[] = [...byKey.values()].map((b) => ({

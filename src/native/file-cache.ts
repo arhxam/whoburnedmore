@@ -42,7 +42,21 @@ import { defaultConfigDir } from "../config.js";
 interface CachedFile<T> {
   size: number;
   mtimeMs: number;
+  /** Identity. A rewrite that keeps size+mtime can still change the inode or ctime. */
+  ino?: number;
+  ctimeMs?: number;
+  /** Byte offset of the last complete line. Missing means a legacy row covers the whole file. */
+  offset?: number;
   items: T[];
+  /** Permanent failure (permission denied or too large). Retained until the file identity changes. */
+  skipped?: true;
+}
+
+interface FileStamp {
+  size: number;
+  mtimeMs: number;
+  ino: number;
+  ctimeMs: number;
 }
 
 interface CacheShape<T> {
@@ -57,7 +71,31 @@ const READ_CHUNK_BYTES = 64 * 1024;
 
 export type CappedTextRead =
   | { ok: true; content: string }
-  | { ok: false; reason: "unreadable" | "too-large" | "timed-out" };
+  | { ok: false; reason: "unreadable" | "too-large" | "timed-out"; code?: string };
+
+function errorCode(err: unknown): string | undefined {
+  if (typeof err !== "object" || err === null || !("code" in err)) return undefined;
+  const code = (err as { code?: unknown }).code;
+  return typeof code === "string" ? code : undefined;
+}
+
+function warnSkippedTranscript(path: string, reason: string): void {
+  console.warn(
+    `whoburnedmore: skipping transcript ${path} (${reason}). It stays skipped until its size or modification time changes.`,
+  );
+}
+
+function warnIncomplete(path: string, reason: string): void {
+  console.warn(
+    `whoburnedmore: transcript scan incomplete at ${path} (${reason}). This reader's totals are not authoritative.`,
+  );
+}
+
+function warnCacheTooLarge(path: string, bytes: number, maxBytes: number): void {
+  console.warn(
+    `whoburnedmore: not writing native cache ${path} (${bytes} bytes exceeds ${maxBytes} byte limit).`,
+  );
+}
 
 /**
  * Owner-safe, symlink-refusing, bounded text read. Reads in chunks so a file
@@ -101,8 +139,9 @@ export async function readTextFileCapped(
       chunks.push(chunk.subarray(0, bytesRead));
     }
     return { ok: true, content: Buffer.concat(chunks, total).toString("utf8") };
-  } catch {
-    return { ok: false, reason: "unreadable" };
+  } catch (err) {
+    const code = errorCode(err);
+    return code ? { ok: false, reason: "unreadable", code } : { ok: false, reason: "unreadable" };
   } finally {
     await handle?.close().catch(() => undefined);
   }
@@ -124,22 +163,26 @@ export function nativeCachePath(
   return join(dir, `native-cache-${reader}.json`);
 }
 
+function canonicalCache<T>(version: number, files: Record<string, CachedFile<T>>): string {
+  return JSON.stringify({ v: version, files });
+}
+
 async function loadCache<T>(
   path: string,
   version: number,
   maxBytes: number,
-): Promise<Record<string, CachedFile<T>>> {
+): Promise<{ files: Record<string, CachedFile<T>>; canonical: string | null }> {
   try {
     const read = await readTextFileCapped(path, { maxBytes });
-    if (!read.ok) return {};
+    if (!read.ok) return { files: {}, canonical: null };
     const parsed = JSON.parse(read.content) as CacheShape<T>;
     if (parsed && parsed.v === version && parsed.files && typeof parsed.files === "object") {
-      return parsed.files;
+      return { files: parsed.files, canonical: canonicalCache(version, parsed.files) };
     }
   } catch {
     // Missing or corrupt cache: start over. Never fatal.
   }
-  return {};
+  return { files: {}, canonical: null };
 }
 
 function saveCache<T>(
@@ -147,7 +190,17 @@ function saveCache<T>(
   version: number,
   files: Record<string, CachedFile<T>>,
   maxBytes: number,
+  previousCanonical: string | null,
 ): void {
+  const serialized = canonicalCache(version, files);
+  // Steady-state runs rewrite an identical document. Skip the replace so a
+  // warm cache does not bump mtime or race another writer for no change.
+  if (previousCanonical !== null && previousCanonical === serialized) return;
+  const bytes = Buffer.byteLength(serialized, "utf8");
+  if (bytes > maxBytes) {
+    warnCacheTooLarge(path, bytes, maxBytes);
+    return;
+  }
   let tmp: string | null = null;
   try {
     const dir = dirname(path);
@@ -156,8 +209,6 @@ function saveCache<T>(
     // Atomic replace: a crash mid-write must never leave a truncated JSON that
     // a later run would half-trust. rename() is atomic on the same volume.
     tmp = `${path}.tmp-${process.pid}-${randomBytes(8).toString("hex")}`;
-    const serialized = JSON.stringify({ v: version, files });
-    if (Buffer.byteLength(serialized, "utf8") > maxBytes) return;
     writeFileSync(tmp, serialized, { encoding: "utf8", flag: "wx", mode: 0o600 });
     // Explicit chmod also repairs platforms/filesystems that ignored creation mode.
     chmodSync(tmp, 0o600);
@@ -176,14 +227,96 @@ function saveCache<T>(
   }
 }
 
+type StreamRead<T> =
+  | { ok: true; items: T[]; offset?: number }
+  | { ok: false; reason: string; code?: string; offset?: number; items?: T[] };
+
+function fileRow<T>(stamp: FileStamp, items: T[], offset: number, skipped?: true): CachedFile<T> {
+  const row: CachedFile<T> = {
+    size: stamp.size,
+    mtimeMs: stamp.mtimeMs,
+    ino: stamp.ino,
+    ctimeMs: stamp.ctimeMs,
+    offset,
+    items,
+  };
+  if (skipped) row.skipped = true;
+  return row;
+}
+
+function isFullHit<T>(hit: CachedFile<T>, stamp: FileStamp): boolean {
+  if (hit.ino !== stamp.ino || hit.ctimeMs !== stamp.ctimeMs) return false;
+  if (hit.size !== stamp.size || hit.mtimeMs !== stamp.mtimeMs) return false;
+  return (hit.offset ?? hit.size) >= stamp.size;
+}
+
+/** Byte to resume from when the same inode grew, or a previous pass stopped mid-file. */
+function resumeOffset<T>(hit: CachedFile<T> | undefined, stamp: FileStamp): number | null {
+  if (!hit || hit.skipped || hit.ino !== stamp.ino) return null;
+  const offset = hit.offset ?? hit.size;
+  if (stamp.size < hit.size || stamp.size < offset) return null;
+  if (
+    stamp.size === hit.size &&
+    (hit.mtimeMs !== stamp.mtimeMs || hit.ctimeMs !== stamp.ctimeMs)
+  ) {
+    return null;
+  }
+  if (offset >= stamp.size) return null;
+  return offset;
+}
+
+type FailureClass = "timeout" | "missing" | "permanent" | "fatal";
+
+function classifyFailure(failure: { reason: string; code?: string }): FailureClass {
+  if (failure.reason === "timed-out") return "timeout";
+  if (failure.code === "ENOENT") return "missing";
+  if (
+    failure.reason === "too-large" ||
+    failure.code === "EACCES" ||
+    failure.code === "EPERM"
+  ) {
+    return "permanent";
+  }
+  return "fatal";
+}
+
+function failureFromThrow(err: unknown): { ok: false; reason: string; code?: string } {
+  if (err instanceof Error && err.message.includes("memory budget")) {
+    return { ok: false, reason: "too-large" };
+  }
+  const code = errorCode(err);
+  return code ? { ok: false, reason: "unreadable", code } : { ok: false, reason: "unreadable" };
+}
+
+function permanentLabel(failure: { reason: string }): string {
+  return failure.reason === "too-large" ? "too-large" : "permission denied";
+}
+
 export interface FileCacheResult<T> {
-  /** Per-file item lists in input-file order, or null when the budget ran out. */
+  /** Per-file item lists in input-file order, or null when the scan is not authoritative. */
   itemsByFile: T[][] | null;
   /** Files actually READ (parsed) this run — cache hits don't count. */
   filesRead: number;
   timedOut: boolean;
-  /** A streaming reader could not complete a file; never submit partial rows. */
+  /**
+   * The scan must not be treated as complete. A non-streaming file was over the
+   * byte cap or unreadable, or a streaming read hit an identity failure such as
+   * a symlink. A single permanently bad streaming transcript does NOT set this:
+   * it is cached as a skip so later runs keep using the native reader.
+   */
   incomplete?: boolean;
+}
+
+function progressSnapshot<T>(
+  cached: Record<string, CachedFile<T>>,
+  fresh: Record<string, CachedFile<T>>,
+  dropped: ReadonlySet<string>,
+  omit?: string,
+): Record<string, CachedFile<T>> {
+  const progress = { ...cached, ...fresh };
+  for (const key of dropped) delete progress[key];
+  if (omit) delete progress[omit];
+  return progress;
 }
 
 /**
@@ -197,6 +330,11 @@ export interface FileCacheResult<T> {
  * back" semantics (a partial corpus must never be submitted — recent days would
  * be $set to an undercount server-side), but the next run resumes from the
  * persisted progress instead of starting over.
+ *
+ * A streaming reader (Claude) treats one poison file as a cached skip, not as
+ * a failed scan. ENOENT and timeouts are transient and are retried on a later
+ * run. Non-streaming readers mark an oversized or unreadable file incomplete
+ * instead of pretending the scan finished.
  */
 export async function readFilesWithCache<T>(opts: {
   files: string[];
@@ -206,10 +344,9 @@ export async function readFilesWithCache<T>(opts: {
    *  file-scoped identifiers (claude's synthetic request keys must never collide
    *  across files or across runs, or the max-wins dedup would merge them). */
   parseFile: (content: string, path: string) => T[];
-  /** Optional bounded streaming parser for transcripts exceeding the text cap. */
-  streamFile?: (path: string) => Promise<
-    { ok: true; items: T[] } | { ok: false; reason: string }
-  >;
+  /** Optional bounded streaming parser. `resume` is the prior accumulator and
+   *  the byte offset of its last complete line. Return the FULL item list. */
+  streamFile?: (path: string, resume?: { offset: number; items: T[] }) => Promise<StreamRead<T>>;
   deadline: number;
   now?: () => number;
   maxFileBytes?: number;
@@ -218,34 +355,64 @@ export async function readFilesWithCache<T>(opts: {
   const now = opts.now ?? Date.now;
   const maxFileBytes = Math.max(1, opts.maxFileBytes ?? MAX_NATIVE_FILE_BYTES);
   const maxCacheBytes = Math.max(1, opts.maxCacheBytes ?? MAX_NATIVE_CACHE_BYTES);
-  const cached = await loadCache<T>(opts.cachePath, opts.version, maxCacheBytes);
+  const loaded = await loadCache<T>(opts.cachePath, opts.version, maxCacheBytes);
+  const cached = loaded.files;
   const fresh: Record<string, CachedFile<T>> = {};
+  const dropped = new Set<string>();
   const itemsByFile: T[][] = [];
   let filesRead = 0;
+  const streaming = opts.streamFile !== undefined;
+
+  const saveProgress = (files: Record<string, CachedFile<T>>) => {
+    saveCache(opts.cachePath, opts.version, files, maxCacheBytes, loaded.canonical);
+  };
+  const abandon = (timedOut: boolean, omit?: string): FileCacheResult<T> => {
+    saveProgress(progressSnapshot(cached, fresh, dropped, omit));
+    return {
+      itemsByFile: null,
+      filesRead,
+      timedOut,
+      ...(timedOut ? {} : { incomplete: true }),
+    };
+  };
 
   for (const f of opts.files) {
-    let size: number;
-    let mtimeMs: number;
+    let stamp: FileStamp;
     try {
-      const s = opts.streamFile ? await lstat(f) : await stat(f);
-      if (opts.streamFile && !s.isFile()) throw new Error("Not a regular transcript");
-      size = s.size;
-      mtimeMs = s.mtimeMs;
-    } catch {
-      if (opts.streamFile) {
-        const progress = { ...cached, ...fresh };
-        delete progress[f];
-        saveCache(opts.cachePath, opts.version, progress, maxCacheBytes);
-        return { itemsByFile: null, filesRead, timedOut: false, incomplete: true };
+      const readStat = () => (streaming ? lstat(f) : stat(f));
+      let s;
+      try {
+        s = await readStat();
+      } catch (err) {
+        if (errorCode(err) !== "ENOENT") throw err;
+        s = await readStat();
       }
-      continue; // vanished between listing and stat — skip
+      if (streaming && !s.isFile()) throw new Error("Not a regular transcript");
+      stamp = { size: s.size, mtimeMs: s.mtimeMs, ino: s.ino, ctimeMs: s.ctimeMs };
+    } catch (err) {
+      const code = errorCode(err);
+      if (code === "ENOENT") {
+        dropped.add(f);
+        continue;
+      }
+      if (streaming && (code === "EACCES" || code === "EPERM")) {
+        // No size/mtime to key a skip. Leave the reader enabled and try again
+        // next run rather than caching a skip we cannot invalidate.
+        warnSkippedTranscript(f, "permission denied");
+        continue;
+      }
+      if (!streaming) {
+        warnIncomplete(f, code === "EACCES" || code === "EPERM" ? "permission denied" : "unreadable");
+        return abandon(false, f);
+      }
+      return abandon(false, f);
     }
-    if (!opts.streamFile && size > maxFileBytes) {
-      // Never reuse an old cache row for a file that has since become hostile.
-      continue;
+    if (!streaming && stamp.size > maxFileBytes) {
+      warnIncomplete(f, "too-large");
+      return abandon(false, f);
     }
     const hit = cached[f];
-    if (hit && hit.size === size && hit.mtimeMs === mtimeMs) {
+    if (hit && isFullHit(hit, stamp)) {
       fresh[f] = hit;
       itemsByFile.push(hit.items);
       continue;
@@ -253,47 +420,89 @@ export async function readFilesWithCache<T>(opts: {
     if (now() > opts.deadline) {
       // Persist the progress made so far (keep prior entries for files not yet
       // revisited this run, so partial passes accumulate monotonic progress).
-      saveCache(opts.cachePath, opts.version, { ...cached, ...fresh }, maxCacheBytes);
+      saveProgress(progressSnapshot(cached, fresh, dropped));
       return { itemsByFile: null, filesRead, timedOut: true };
     }
+    const resumeAt = resumeOffset(hit, stamp);
     if (opts.streamFile) {
-      const streamed = await opts.streamFile(f).catch(() => ({ ok: false as const, reason: "unreadable" }));
-      if (!streamed.ok) {
-        // Preserve completed files for the next pass, but never trust a partial
-        // parse (nor a stale cached row for the changed, incomplete file).
-        const progress = { ...cached, ...fresh };
-        delete progress[f];
-        saveCache(opts.cachePath, opts.version, progress, maxCacheBytes);
-        return { itemsByFile: null, filesRead, timedOut: streamed.reason === "timed-out", incomplete: true };
+      const resume = resumeAt !== null && hit ? { offset: resumeAt, items: hit.items } : undefined;
+      let streamed: StreamRead<T>;
+      try {
+        streamed = await opts.streamFile(f, resume);
+      } catch (err) {
+        streamed = failureFromThrow(err);
       }
-      fresh[f] = { size, mtimeMs, items: streamed.items };
+      if (!streamed.ok && streamed.code === "ENOENT") {
+        try {
+          streamed = await opts.streamFile(f, resume);
+        } catch (err) {
+          streamed = failureFromThrow(err);
+        }
+      }
+      if (!streamed.ok) {
+        const kind = classifyFailure(streamed);
+        if (kind === "missing") {
+          dropped.add(f);
+          continue;
+        }
+        if (kind === "permanent") {
+          fresh[f] = fileRow(stamp, [], stamp.size, true);
+          itemsByFile.push([]);
+          warnSkippedTranscript(f, permanentLabel(streamed));
+          continue;
+        }
+        if (kind === "timeout") {
+          const progressed =
+            streamed.items !== undefined &&
+            streamed.offset !== undefined &&
+            streamed.offset > (resume?.offset ?? 0);
+          if (progressed) fresh[f] = fileRow(stamp, streamed.items ?? [], streamed.offset ?? 0);
+          saveProgress(progressSnapshot(cached, fresh, dropped, progressed || resume ? undefined : f));
+          return { itemsByFile: null, filesRead, timedOut: true };
+        }
+        return abandon(false, f);
+      }
+      fresh[f] = fileRow(stamp, streamed.items, stamp.size);
       itemsByFile.push(streamed.items);
       filesRead += 1;
       continue;
     }
-    const read = await readTextFileCapped(f, {
+    let read = await readTextFileCapped(f, {
       maxBytes: maxFileBytes,
       deadline: opts.deadline,
       now,
     });
+    if (!read.ok && read.code === "ENOENT") {
+      read = await readTextFileCapped(f, {
+        maxBytes: maxFileBytes,
+        deadline: opts.deadline,
+        now,
+      });
+    }
     if (!read.ok) {
-      if (read.reason === "timed-out") {
-        saveCache(opts.cachePath, opts.version, { ...cached, ...fresh }, maxCacheBytes);
+      const kind = classifyFailure(read);
+      if (kind === "missing") {
+        dropped.add(f);
+        continue;
+      }
+      if (kind === "timeout") {
+        saveProgress(progressSnapshot(cached, fresh, dropped, f));
         return { itemsByFile: null, filesRead, timedOut: true };
       }
-      continue; // unreadable/oversized — skip and drop stale cache entry
+      warnIncomplete(f, kind === "permanent" ? permanentLabel(read) : "unreadable");
+      return abandon(false, f);
     }
     const items = opts.parseFile(read.content, f);
     // Stat was taken BEFORE the read: if the file grew in between, the recorded
     // mtime is older than the content we parsed — the next run simply re-reads
     // it. Never the reverse (a recorded mtime newer than the parsed content).
-    fresh[f] = { size, mtimeMs, items };
+    fresh[f] = fileRow(stamp, items, stamp.size);
     itemsByFile.push(items);
     filesRead += 1;
   }
 
   // Completed pass: persist ONLY files that still exist (deleted transcripts
   // must drop out, or their usage would survive on disk forever).
-  saveCache(opts.cachePath, opts.version, fresh, maxCacheBytes);
+  saveProgress(fresh);
   return { itemsByFile, filesRead, timedOut: false };
 }

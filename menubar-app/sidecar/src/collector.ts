@@ -17,7 +17,7 @@ import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import type { DailyUsageEntry, SessionEntry } from "../../../src/shared.js";
+import type { AgentStat, DailyUsageEntry, SessionEntry } from "../../../src/shared.js";
 
 import {
   mapConcurrent,
@@ -43,6 +43,12 @@ import {
   collectVscodeAgent,
 } from "../../../src/native/vscode-agents.js";
 import { loadLivePricing } from "../../../src/pricing-live.js";
+import {
+  loadProvenanceStore,
+  provenanceStorePath,
+  reconcileProvenance,
+  saveProvenanceStore,
+} from "../../../src/provenance-store.js";
 import { resolveCodexSessionsDirs } from "../../../src/native/codex.js";
 import { transcriptFingerprint } from "./transcript-fingerprint.js";
 
@@ -64,6 +70,19 @@ export function terminateCollectorProcesses(): void {
 }
 
 const EMPTY_NATIVE: NativeCollectResult = { entries: [], found: false, filesScanned: 0 };
+const TIMED_OUT_NATIVE: NativeCollectResult = {
+  entries: [],
+  found: false,
+  filesScanned: 0,
+  timedOut: true,
+};
+const EMPTY_AGENT: AgentStat = {
+  messageCount: 0,
+  subagentMessages: 0,
+  subagentTokens: 0,
+  totalTokens: 0,
+  userMessageCount: 0,
+};
 type FastCodexResult = { result: NativeCollectResult; replayAware: boolean };
 const fastCodexCache = new Map<string, { at: number; fingerprint: string | null; value: FastCodexResult }>();
 const fastCodexInFlight = new Map<string, Promise<FastCodexResult>>();
@@ -116,12 +135,12 @@ export async function collectNativeTier(
   const cache = (name: string) => join(cacheDir, `native-cache-${name}.json`);
 
   const [claude, fastCodex, cont, ...vscode] = await Promise.all([
-    collectFastClaude(env, cache("claude")).catch(() => EMPTY_NATIVE),
+    collectFastClaude(env, cache("claude")).catch(() => TIMED_OUT_NATIVE),
     collectFastCodex(env),
-    collectContinue({ env, cachePath: cache("continue") }).catch(() => EMPTY_NATIVE),
+    collectContinue({ env, cachePath: cache("continue") }).catch(() => TIMED_OUT_NATIVE),
     ...VSCODE_AGENTS.map((a) =>
       collectVscodeAgent({ tool: a.tool, extIds: a.extIds, env, cachePath: cache(`vscode-${a.tool}`) }).catch(
-        () => EMPTY_NATIVE,
+        () => TIMED_OUT_NATIVE,
       ),
     ),
   ]);
@@ -135,13 +154,39 @@ export async function collectNativeTier(
     if (r.found) toolsFound.push(VSCODE_AGENTS[i].tool);
   });
 
+  const partial = [claude, codex, cont, ...vscode].some((r) => r.timedOut === true);
+  const published: DailyUsageEntry[] = [
+    ...claude.entries,
+    ...(codexReplayAware ? codex.entries : []),
+    ...cont.entries,
+    ...vscode.flatMap((r) => r.entries),
+  ];
+  // Same last-good fingerprint guard as the CLI. A thrown reader is timedOut,
+  // so this run cannot lower a requestCount the store already proved.
+  const storePath = provenanceStorePath({ ...env, WHOBURNEDMORE_CONFIG_DIR: cacheDir });
+  const reconciled = reconcileProvenance(
+    dedupeDaily(published),
+    EMPTY_AGENT,
+    !partial,
+    loadProvenanceStore(storePath),
+  );
+  saveProvenanceStore(storePath, reconciled.store);
+  const reconciledClaude = reconciled.entries.filter((entry) => entry.tool === "claude");
+  const reconciledCodex = reconciled.entries.filter((entry) => entry.tool === "codex");
+  const reconciledOthers = reconciled.entries.filter(
+    (entry) => entry.tool !== "claude" && entry.tool !== "codex",
+  );
+
   return {
-    claude,
-    codex,
+    claude: { ...claude, entries: reconciledClaude },
+    codex: {
+      ...codex,
+      entries: codexReplayAware ? reconciledCodex : codex.entries,
+    },
     codexReplayAware,
-    others: [...cont.entries, ...vscode.flatMap((r) => r.entries)],
+    others: reconciledOthers,
     toolsFound,
-    partial: [claude, codex, cont, ...vscode].some((r) => r.timedOut === true),
+    partial,
   };
 }
 

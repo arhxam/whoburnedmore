@@ -1,7 +1,8 @@
 import { chmod, mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { localUsageDate } from "../../../src/native/usage-date.js";
 
 import {
   collectNativeTier,
@@ -10,6 +11,7 @@ import {
   resolveCcusageStandalone,
   terminateCollectorProcesses,
 } from "../src/collector.js";
+import { vscodeGlobalStorageRoots } from "../../../src/native/vscode-agents.js";
 import { watchRoots } from "../src/watch.js";
 
 describe("Codex replay-aware collection", () => {
@@ -101,6 +103,21 @@ describe("Codex replay-aware collection", () => {
     ]);
   });
 
+  it("watches extension task folders instead of the whole globalStorage tree", async () => {
+    const root = await mkdtemp(join(tmpdir(), "burnbar-tasks-watch-"));
+    const env = {
+      HOME: root,
+      CLAUDE_CONFIG_DIR: join(root, "no-claude"),
+      CODEX_HOME: join(root, "no-codex"),
+    } as NodeJS.ProcessEnv;
+    const storage = vscodeGlobalStorageRoots(env)[0]!;
+    const tasks = join(storage, "saoudrizwan.claude-dev", "tasks");
+    await mkdir(tasks, { recursive: true });
+    const roots = watchRoots(env);
+    expect(roots).toContain(tasks);
+    expect(roots).not.toContain(storage);
+  });
+
   it("keeps unchanged Claude aggregates in memory without rewriting the parse cache", async () => {
     const root = await mkdtemp(join(tmpdir(), "burnbar-claude-idle-"));
     const project = join(root, "claude", "projects", "fixture");
@@ -132,6 +149,114 @@ describe("Codex replay-aware collection", () => {
     const updated = await collectNativeTier(env);
     expect(updated.claude.filesScanned).toBe(1);
     expect(updated.claude.entries[0]?.inputTokens).toBe(200);
+  });
+
+  it("records a Claude fingerprint in the BurnBar provenance store", async () => {
+    const root = await mkdtemp(join(tmpdir(), "burnbar-provenance-"));
+    const project = join(root, "claude", "projects", "fixture");
+    await mkdir(project, { recursive: true });
+    await writeFile(
+      join(project, "session.jsonl"),
+      JSON.stringify({
+        timestamp: "2026-08-09T12:00:00Z",
+        requestId: "request",
+        message: {
+          id: "message",
+          role: "assistant",
+          model: "claude-sonnet-4-5",
+          usage: {
+            input_tokens: 100,
+            output_tokens: 10,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+          },
+        },
+      }),
+    );
+    const bin = join(root, "ccusage");
+    await writeFile(bin, "#!/bin/sh\nprintf '{\"daily\":[]}'\n");
+    await chmod(bin, 0o755);
+    const env = {
+      HOME: root,
+      CLAUDE_CONFIG_DIR: join(root, "claude"),
+      CODEX_HOME: join(root, "codex"),
+      BURNBAR_CACHE_DIR: join(root, "cache"),
+      BURNBAR_CCUSAGE: bin,
+      WHOBURNEDMORE_PRICING_OFFLINE: "1",
+    } as NodeJS.ProcessEnv;
+    const tier = await collectNativeTier(env);
+    expect(tier.partial).toBe(false);
+    expect(tier.claude.entries[0]?.requestCount).toBe(1);
+    const store = JSON.parse(
+      await readFile(join(root, "cache", "native-cache-provenance.json"), "utf8"),
+    ) as { req: Record<string, number> };
+    expect(store.req[`${tier.claude.entries[0]?.date}|claude`]).toBe(1);
+  });
+
+  it("marks a thrown Continue reader timed out so a stored fingerprint is kept", async () => {
+    vi.resetModules();
+    vi.doMock("../../../src/continue.js", async () => {
+      const actual = await vi.importActual<typeof import("../../../src/continue.js")>(
+        "../../../src/continue.js",
+      );
+      return {
+        ...actual,
+        collectContinue: async () => {
+          throw new Error("continue down");
+        },
+      };
+    });
+    try {
+      const root = await mkdtemp(join(tmpdir(), "burnbar-throw-"));
+      const stamp = "2026-08-09T12:00:00Z";
+      const date = localUsageDate(Date.parse(stamp));
+      expect(date).toBeTruthy();
+      const project = join(root, "claude", "projects", "fixture");
+      await mkdir(project, { recursive: true });
+      await writeFile(
+        join(project, "session.jsonl"),
+        JSON.stringify({
+          timestamp: stamp,
+          requestId: "request",
+          message: {
+            id: "message",
+            role: "assistant",
+            model: "claude-sonnet-4-5",
+            usage: {
+              input_tokens: 100,
+              output_tokens: 10,
+              cache_creation_input_tokens: 0,
+              cache_read_input_tokens: 0,
+            },
+          },
+        }),
+      );
+      const bin = join(root, "ccusage");
+      await writeFile(bin, "#!/bin/sh\nprintf '{\"daily\":[]}'\n");
+      await chmod(bin, 0o755);
+      const cache = join(root, "cache");
+      await mkdir(cache, { recursive: true });
+      await writeFile(
+        join(cache, "native-cache-provenance.json"),
+        JSON.stringify({ v: 1, req: { [`${date}|claude`]: 50 } }),
+      );
+      const env = {
+        HOME: root,
+        CLAUDE_CONFIG_DIR: join(root, "claude"),
+        CODEX_HOME: join(root, "codex"),
+        BURNBAR_CACHE_DIR: cache,
+        BURNBAR_CCUSAGE: bin,
+        WHOBURNEDMORE_PRICING_OFFLINE: "1",
+      } as NodeJS.ProcessEnv;
+      const { collectNativeTier: collectFresh } = await import("../src/collector.js");
+      const tier = await collectFresh(env);
+      expect(tier.partial).toBe(true);
+      expect(tier.claude.entries[0]?.requestCount).toBe(50);
+      expect(tier.claude.timedOut).not.toBe(true);
+    } finally {
+      vi.doUnmock("../../../src/continue.js");
+      vi.resetModules();
+    }
   });
 
   it("does not publish native Codex fallback rows when ccusage fails", async () => {
