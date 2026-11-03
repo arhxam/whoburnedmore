@@ -17,6 +17,7 @@ import type {
 import { collectAttribution } from "./attribution.js";
 import { collectContinue } from "./continue.js";
 import { collectCursor } from "./cursor.js";
+import { collectDeepseek } from "./deepseek.js";
 import {
   collectClaudeNative,
   resolveClaudeConfigRoots,
@@ -652,9 +653,9 @@ export type ProgressFn = (done: number, total: number, label: string) => void;
 /**
  * Total number of collection stages: the ccusage sources, plus the fixed extra
  * ticking tasks — sessions, blocks, cursor, attribution (4), and the native
- * non-ccusage readers cline, roo, continue (VSCODE_AGENTS.length + 1).
+ * non-ccusage readers cline, roo, continue, deepseek (VSCODE_AGENTS.length + 2).
  */
-export const COLLECT_STAGES = SOURCES.length + 4 + VSCODE_AGENTS.length + 1;
+export const COLLECT_STAGES = SOURCES.length + 4 + VSCODE_AGENTS.length + 2;
 
 /**
  * A run is AUTHORITATIVE — safe to lower a stored requestCount fingerprint —
@@ -796,6 +797,10 @@ export async function collectAll(
     tick();
     return r;
   });
+  const deepseekTask = collectDeepseek().then((r) => {
+    tick();
+    return r;
+  });
 
   const [
     sourceResults,
@@ -807,6 +812,7 @@ export async function collectAll(
     nativeCodex,
     vscodeResults,
     continueResult,
+    deepseekResult,
   ] = await Promise.all([
     sourceTasks,
     sessionTask,
@@ -817,6 +823,7 @@ export async function collectAll(
     nativeCodexTask,
     Promise.all(vscodeTasks),
     continueTask,
+    deepseekTask,
   ]);
 
   const native = { claude: nativeClaude, codex: nativeCodex };
@@ -874,6 +881,10 @@ export async function collectAll(
     entries.push(...continueResult.entries);
     toolsFound.push("continue");
   }
+  if (deepseekResult.found && deepseekResult.entries.length > 0) {
+    entries.push(...deepseekResult.entries);
+    toolsFound.push("deepseek");
+  }
 
   const { tools, skills, agent, sessionMessages, complete } = attribution;
   onProgress?.(COLLECT_STAGES, COLLECT_STAGES, "");
@@ -905,6 +916,7 @@ export async function collectAll(
     nativeCodex,
     ...vscodeResults.map(({ result }) => result),
     continueResult,
+    deepseekResult,
   );
   const storePath = provenanceStorePath();
   const reconciled = reconcileProvenance(
