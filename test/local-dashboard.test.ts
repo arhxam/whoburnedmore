@@ -55,6 +55,18 @@ describe("renderDashboardHtml", () => {
     expect(html).toContain('href="https://whoburnedmore.com"');
   });
 
+  it("points the footer at sign-in instead of a removed Connect button", () => {
+    const connected = renderDashboardHtml([entry()], new Date(), {
+      webBaseUrl: "https://whoburnedmore.com",
+    });
+    const offline = renderDashboardHtml([entry()]);
+    for (const html of [connected, offline]) {
+      expect(html).not.toContain("Connect your account");
+      expect(html).not.toContain("no sign-in");
+      expect(html).toContain("sign in");
+    }
+  });
+
   it("omits the leaderboard CTA when no connect options are given", () => {
     const html = renderDashboardHtml([entry()]);
     expect(html).not.toContain("Claim your spot");

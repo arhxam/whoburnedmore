@@ -698,50 +698,6 @@ export function rotateLogIfLarge(
   }
 }
 
-export function notifyLaunchLive(opts?: {
-  platform?: NodeJS.Platform | string;
-  spawn?: (cmd: string, args: string[]) => { status: number | null };
-}): boolean {
-  const os = opts?.platform ?? platform();
-  const run = opts?.spawn ?? ((cmd, args) => spawnSync(cmd, args, { stdio: "ignore" }));
-  const title = "whoburnedmore is live";
-  const message = "Your dashboard is ready. Go to whoburnedmore.com";
-
-  if (os === "darwin") {
-    return (
-      run("osascript", [
-        "-e",
-        `display notification "${message}" with title "${title}"`,
-      ]).status === 0
-    );
-  }
-  if (os === "linux") {
-    return run("notify-send", [title, message]).status === 0;
-  }
-  if (os === "win32") {
-    const psQuote = (value: string) => `'${value.replaceAll("'", "''")}'`;
-    const script = [
-      "Add-Type -AssemblyName System.Windows.Forms",
-      "$n = New-Object System.Windows.Forms.NotifyIcon",
-      "$n.Icon = [System.Drawing.SystemIcons]::Application",
-      `$n.BalloonTipTitle = ${psQuote(title)}`,
-      `$n.BalloonTipText = ${psQuote(message)}`,
-      "$n.Visible = $true",
-      "$n.ShowBalloonTip(10000)",
-      "Start-Sleep -Seconds 2",
-      "$n.Dispose()",
-    ].join("; ");
-    return (
-      run("powershell", [
-        "-NoProfile",
-        "-Command",
-        script,
-      ]).status === 0
-    );
-  }
-  return false;
-}
-
 /** True if the launchd/cron/schtasks job is currently loaded with the scheduler. */
 export function autoSyncLoaded(): boolean {
   if (platform() === "win32") {

@@ -18,7 +18,6 @@ import {
   plistDrift,
   reconcileAction,
   reconcileAutoSync,
-  notifyLaunchLive,
   resolveNpmPath,
   resolveNodePath,
   syncCommandArgs,
@@ -316,46 +315,6 @@ describe("systemd user-timer fallback (linux without crontab)", () => {
     expect(plistDrift(stale, expected)).toBe("drift");
     expect(plistDrift(expected, expected)).toBe("ok");
     expect(reconcileAction(plistDrift(stale, expected))).toBe("install");
-  });
-});
-
-describe("notifyLaunchLive", () => {
-  it("uses macOS notification center to send the launch message", () => {
-    const calls: Array<{ cmd: string; args: string[] }> = [];
-    const ok = notifyLaunchLive({
-      platform: "darwin",
-      spawn: (cmd, args) => {
-        calls.push({ cmd, args });
-        return { status: 0 };
-      },
-    });
-    expect(ok).toBe(true);
-    expect(calls[0].cmd).toBe("osascript");
-    expect(calls[0].args.join(" ")).toContain("whoburnedmore.com");
-  });
-
-  it("falls back cleanly when no desktop notifier is available", () => {
-    const ok = notifyLaunchLive({
-      platform: "linux",
-      spawn: () => ({ status: 1 }),
-    });
-    expect(ok).toBe(false);
-  });
-
-  it("uses built-in PowerShell APIs on Windows", () => {
-    const calls: Array<{ cmd: string; args: string[] }> = [];
-    const ok = notifyLaunchLive({
-      platform: "win32",
-      spawn: (cmd, args) => {
-        calls.push({ cmd, args });
-        return { status: 0 };
-      },
-    });
-
-    expect(ok).toBe(true);
-    expect(calls[0].cmd).toBe("powershell");
-    expect(calls[0].args.join(" ")).toContain("System.Windows.Forms");
-    expect(calls[0].args.join(" ")).not.toContain("BurntToast");
   });
 });
 

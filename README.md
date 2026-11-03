@@ -34,12 +34,17 @@ dashboard and its data, or use `--local` to stay fully offline.
 ## Commands
 
 ```
-npx whoburnedmore                sign in, submit, land on the leaderboard, open your dashboard
+npx whoburnedmore                sign in and post your rank (a later run stays in the terminal)
+npx whoburnedmore --open         open the dashboard on this run
+npx whoburnedmore --no-open      do not open a browser (also WHOBURNEDMORE_NO_OPEN=1)
 npx whoburnedmore --board=CODE   compare with friends — sign in and join their board
 npx whoburnedmore --org=SLUG     submit to your organization's board (companies/hackathons)
 npx whoburnedmore --local        build the dashboard locally and open it (offline, no upload)
 npx whoburnedmore --dry-run      print exactly what would be sent, send nothing
 npx whoburnedmore --no-submit    collect locally, send nothing
+npx whoburnedmore whoami         show who is signed in on this machine
+npx whoburnedmore login          sign in without submitting usage
+npx whoburnedmore logout         sign out on this machine
 npx whoburnedmore link --token=TOKEN  bind a server/VM to your account (token from your profile)
 npx whoburnedmore daemon         keep syncing in the foreground (containers with no scheduler)
 npx whoburnedmore private        hide your dashboard from the leaderboard
@@ -50,6 +55,9 @@ npx whoburnedmore status         check background-sync health (last sync, stalen
 npx whoburnedmore install-sync     turn on 15-minute background sync
 npx whoburnedmore uninstall-sync   turn off the background sync
 ```
+
+A later run stays in the terminal. Pass `--open` to open the dashboard.
+`--no-open` or `WHOBURNEDMORE_NO_OPEN=1` keeps the browser closed.
 
 After your first run, a background sync keeps your page fresh automatically
 every 15 minutes (`uninstall-sync` to stop). The installed background job runs

@@ -28,8 +28,6 @@ export interface CliConfig {
    *  reporting — a truer signal than the log file's mtime, which moves on any
    *  write (including errors). */
   lastSyncAt?: number;
-  /** Epoch ms after the one-time launch-open desktop notification was delivered. */
-  launchNotificationDeliveredAt?: number;
   /** Epoch ms when this machine's device key got a definitive bind answer from
    *  the server (`/v1/me/devices/bind`). The binding is what lets a dead bearer
    *  token self-heal via `/v1/auth/cli/refresh`, so the CLI binds once after
@@ -76,12 +74,6 @@ export function loadConfig(dir: string = defaultConfigDir()): CliConfig | null {
     if (typeof parsed.handle === "string") config.handle = parsed.handle;
     if (typeof parsed.lastSyncAt === "number" && Number.isFinite(parsed.lastSyncAt))
       config.lastSyncAt = parsed.lastSyncAt;
-    if (
-      typeof parsed.launchNotificationDeliveredAt === "number" &&
-      Number.isFinite(parsed.launchNotificationDeliveredAt)
-    ) {
-      config.launchNotificationDeliveredAt = parsed.launchNotificationDeliveredAt;
-    }
     if (
       typeof parsed.deviceBoundAt === "number" &&
       Number.isFinite(parsed.deviceBoundAt)
@@ -146,14 +138,6 @@ export function recordDeviceBound(
 ): void {
   const config = loadConfig(dir) ?? {};
   saveConfig(dir, { ...config, deviceBoundAt: when });
-}
-
-export function recordLaunchNotificationDelivered(
-  dir: string = defaultConfigDir(),
-  when: number = Date.now(),
-): void {
-  const config = loadConfig(dir) ?? {};
-  saveConfig(dir, { ...config, launchNotificationDeliveredAt: when });
 }
 
 /**

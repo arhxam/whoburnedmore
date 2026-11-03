@@ -1227,17 +1227,22 @@ async function main(): Promise<void> {
   }
 }
 
-function printHelp(): void {
-  console.log(`
+export function cliHelpText(): string {
+  return `
   ${pc.bold(PUBLIC_PRODUCT_NAME)} — who burned more tokens, you or them?
 
   ${pc.bold("usage")}
-    npx ${LEGACY_COMMAND}              sign in, burn + land on the public leaderboard, open your dashboard
+    npx ${LEGACY_COMMAND}              sign in and post your rank (a later run stays in the terminal)
+    npx ${LEGACY_COMMAND} --open       open the dashboard on this run
+    npx ${LEGACY_COMMAND} --no-open    do not open a browser (also WHOBURNEDMORE_NO_OPEN=1)
     npx ${LEGACY_COMMAND} --board=CODE compare with friends — sign in and join their board
     npx ${LEGACY_COMMAND} --org=SLUG --pass=CODE  join your organization's board (companies/hackathons)
     npx ${LEGACY_COMMAND} --local      build the dashboard on your machine and open it (offline)
     npx ${LEGACY_COMMAND} --dry-run    print exactly what would be sent, send nothing
     npx ${LEGACY_COMMAND} --no-submit  collect locally, send nothing (no dashboard)
+    npx ${LEGACY_COMMAND} whoami       show who is signed in on this machine
+    npx ${LEGACY_COMMAND} login        sign in without submitting usage
+    npx ${LEGACY_COMMAND} logout       sign out on this machine
     npx ${LEGACY_COMMAND} link                link this server/VM (prompts for a one-time code)
     npx ${LEGACY_COMMAND} daemon       keep syncing in the foreground (VMs/containers with no cron)
     npx ${LEGACY_COMMAND} private      take yourself off the public leaderboard
@@ -1250,7 +1255,9 @@ function printHelp(): void {
 
   Your first run signs you in (we open a page, you approve a short code) and binds
   this machine to your account — your usage lands on the leaderboard under your
-  handle. Background sync is on by default: your page then refreshes automatically
+  handle. Later runs stay in the terminal; pass --open to open the dashboard, or
+  --no-open / WHOBURNEDMORE_NO_OPEN=1 to keep the browser closed. Background sync
+  is on by default: your page then refreshes automatically
   every 15 min (\`uninstall-sync\` to stop); run \`private\`/\`remove\` to pull it. Only
   daily aggregate numbers (date, tool, model, token counts, est. cost) ever leave
   your machine — never prompts, code, or file names. With --local, nothing leaves
@@ -1263,7 +1270,11 @@ function printHelp(): void {
     or any host without a scheduler, run \`${LEGACY_COMMAND} daemon\` under your process
     manager instead. Set WHOBURNEDMORE_CONFIG_DIR to a persistent path so the
     machine identity survives restarts. See docs/SERVER-VM-SETUP.md.
-`);
+`;
+}
+
+function printHelp(): void {
+  console.log(cliHelpText());
 }
 
 /** True when this file is the process entrypoint (including a symlinked bin). */

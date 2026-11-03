@@ -15,7 +15,6 @@ import {
   recordSync,
   recordVerifyPrompted,
   setAutoSyncOptOut,
-  recordLaunchNotificationDelivered,
   saveAuth,
   saveConfig,
 } from "../src/config.js";
@@ -117,17 +116,6 @@ describe("config", () => {
     expect(loadConfig(dir)).toEqual({
       anonKey: "k".repeat(64),
       lastSyncAt: 1234567890,
-    });
-  });
-
-  it("records launch notification delivery while preserving sync state", () => {
-    const dir = mkdtempSync(join(tmpdir(), "wbm-test-"));
-    saveConfig(dir, { anonKey: "k".repeat(64), lastSyncAt: 123 });
-    recordLaunchNotificationDelivered(dir, 456);
-    expect(loadConfig(dir)).toEqual({
-      anonKey: "k".repeat(64),
-      lastSyncAt: 123,
-      launchNotificationDeliveredAt: 456,
     });
   });
 
