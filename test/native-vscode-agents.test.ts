@@ -185,7 +185,7 @@ describe("vscodeGlobalStorageRoots", () => {
 
 describe("collectVscodeAgent — reads task dirs on disk", () => {
   it("invalidates caches created before the hardened date semantics", () => {
-    expect(VSCODE_CACHE_VERSION).toBe(2);
+    expect(VSCODE_CACHE_VERSION).toBe(3);
   });
 
   it("reads <root>/<extId>/tasks/*/ui_messages.json and aggregates, or found:false when absent", async () => {

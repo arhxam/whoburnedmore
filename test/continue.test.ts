@@ -126,7 +126,7 @@ describe("parseContinueJsonl", () => {
 
 describe("collectContinue — reads dev_data on disk", () => {
   it("invalidates caches created before the hardened file/date semantics", () => {
-    expect(CONTINUE_CACHE_VERSION).toBe(2);
+    expect(CONTINUE_CACHE_VERSION).toBe(3);
   });
 
   it("reads dev_data/**/tokensGenerated.jsonl and aggregates, or found:false when absent", async () => {

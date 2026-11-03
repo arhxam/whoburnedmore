@@ -42,9 +42,21 @@ import { defaultConfigDir } from "../config.js";
 interface CachedFile<T> {
   size: number;
   mtimeMs: number;
+  /** Identity. A rewrite that keeps size+mtime can still change the inode or ctime. */
+  ino?: number;
+  ctimeMs?: number;
+  /** Byte offset of the last complete line. Missing means a legacy row covers the whole file. */
+  offset?: number;
   items: T[];
-  /** Permanent failure (permission denied or too large). Retained until size or mtime changes. */
+  /** Permanent failure (permission denied or too large). Retained until the file identity changes. */
   skipped?: true;
+}
+
+interface FileStamp {
+  size: number;
+  mtimeMs: number;
+  ino: number;
+  ctimeMs: number;
 }
 
 interface CacheShape<T> {
@@ -216,8 +228,42 @@ function saveCache<T>(
 }
 
 type StreamRead<T> =
-  | { ok: true; items: T[] }
-  | { ok: false; reason: string; code?: string };
+  | { ok: true; items: T[]; offset?: number }
+  | { ok: false; reason: string; code?: string; offset?: number; items?: T[] };
+
+function fileRow<T>(stamp: FileStamp, items: T[], offset: number, skipped?: true): CachedFile<T> {
+  const row: CachedFile<T> = {
+    size: stamp.size,
+    mtimeMs: stamp.mtimeMs,
+    ino: stamp.ino,
+    ctimeMs: stamp.ctimeMs,
+    offset,
+    items,
+  };
+  if (skipped) row.skipped = true;
+  return row;
+}
+
+function isFullHit<T>(hit: CachedFile<T>, stamp: FileStamp): boolean {
+  if (hit.ino !== stamp.ino || hit.ctimeMs !== stamp.ctimeMs) return false;
+  if (hit.size !== stamp.size || hit.mtimeMs !== stamp.mtimeMs) return false;
+  return (hit.offset ?? hit.size) >= stamp.size;
+}
+
+/** Byte to resume from when the same inode grew, or a previous pass stopped mid-file. */
+function resumeOffset<T>(hit: CachedFile<T> | undefined, stamp: FileStamp): number | null {
+  if (!hit || hit.skipped || hit.ino !== stamp.ino) return null;
+  const offset = hit.offset ?? hit.size;
+  if (stamp.size < hit.size || stamp.size < offset) return null;
+  if (
+    stamp.size === hit.size &&
+    (hit.mtimeMs !== stamp.mtimeMs || hit.ctimeMs !== stamp.ctimeMs)
+  ) {
+    return null;
+  }
+  if (offset >= stamp.size) return null;
+  return offset;
+}
 
 type FailureClass = "timeout" | "missing" | "permanent" | "fatal";
 
@@ -298,8 +344,9 @@ export async function readFilesWithCache<T>(opts: {
    *  file-scoped identifiers (claude's synthetic request keys must never collide
    *  across files or across runs, or the max-wins dedup would merge them). */
   parseFile: (content: string, path: string) => T[];
-  /** Optional bounded streaming parser for transcripts exceeding the text cap. */
-  streamFile?: (path: string) => Promise<StreamRead<T>>;
+  /** Optional bounded streaming parser. `resume` is the prior accumulator and
+   *  the byte offset of its last complete line. Return the FULL item list. */
+  streamFile?: (path: string, resume?: { offset: number; items: T[] }) => Promise<StreamRead<T>>;
   deadline: number;
   now?: () => number;
   maxFileBytes?: number;
@@ -330,8 +377,7 @@ export async function readFilesWithCache<T>(opts: {
   };
 
   for (const f of opts.files) {
-    let size: number;
-    let mtimeMs: number;
+    let stamp: FileStamp;
     try {
       const readStat = () => (streaming ? lstat(f) : stat(f));
       let s;
@@ -342,8 +388,7 @@ export async function readFilesWithCache<T>(opts: {
         s = await readStat();
       }
       if (streaming && !s.isFile()) throw new Error("Not a regular transcript");
-      size = s.size;
-      mtimeMs = s.mtimeMs;
+      stamp = { size: s.size, mtimeMs: s.mtimeMs, ino: s.ino, ctimeMs: s.ctimeMs };
     } catch (err) {
       const code = errorCode(err);
       if (code === "ENOENT") {
@@ -362,12 +407,12 @@ export async function readFilesWithCache<T>(opts: {
       }
       return abandon(false, f);
     }
-    if (!streaming && size > maxFileBytes) {
+    if (!streaming && stamp.size > maxFileBytes) {
       warnIncomplete(f, "too-large");
       return abandon(false, f);
     }
     const hit = cached[f];
-    if (hit && hit.size === size && hit.mtimeMs === mtimeMs) {
+    if (hit && isFullHit(hit, stamp)) {
       fresh[f] = hit;
       itemsByFile.push(hit.items);
       continue;
@@ -378,16 +423,18 @@ export async function readFilesWithCache<T>(opts: {
       saveProgress(progressSnapshot(cached, fresh, dropped));
       return { itemsByFile: null, filesRead, timedOut: true };
     }
+    const resumeAt = resumeOffset(hit, stamp);
     if (opts.streamFile) {
+      const resume = resumeAt !== null && hit ? { offset: resumeAt, items: hit.items } : undefined;
       let streamed: StreamRead<T>;
       try {
-        streamed = await opts.streamFile(f);
+        streamed = await opts.streamFile(f, resume);
       } catch (err) {
         streamed = failureFromThrow(err);
       }
       if (!streamed.ok && streamed.code === "ENOENT") {
         try {
-          streamed = await opts.streamFile(f);
+          streamed = await opts.streamFile(f, resume);
         } catch (err) {
           streamed = failureFromThrow(err);
         }
@@ -399,18 +446,23 @@ export async function readFilesWithCache<T>(opts: {
           continue;
         }
         if (kind === "permanent") {
-          fresh[f] = { size, mtimeMs, items: [], skipped: true };
+          fresh[f] = fileRow(stamp, [], stamp.size, true);
           itemsByFile.push([]);
           warnSkippedTranscript(f, permanentLabel(streamed));
           continue;
         }
         if (kind === "timeout") {
-          saveProgress(progressSnapshot(cached, fresh, dropped, f));
+          const progressed =
+            streamed.items !== undefined &&
+            streamed.offset !== undefined &&
+            streamed.offset > (resume?.offset ?? 0);
+          if (progressed) fresh[f] = fileRow(stamp, streamed.items ?? [], streamed.offset ?? 0);
+          saveProgress(progressSnapshot(cached, fresh, dropped, progressed || resume ? undefined : f));
           return { itemsByFile: null, filesRead, timedOut: true };
         }
         return abandon(false, f);
       }
-      fresh[f] = { size, mtimeMs, items: streamed.items };
+      fresh[f] = fileRow(stamp, streamed.items, stamp.size);
       itemsByFile.push(streamed.items);
       filesRead += 1;
       continue;
@@ -444,7 +496,7 @@ export async function readFilesWithCache<T>(opts: {
     // Stat was taken BEFORE the read: if the file grew in between, the recorded
     // mtime is older than the content we parsed — the next run simply re-reads
     // it. Never the reverse (a recorded mtime newer than the parsed content).
-    fresh[f] = { size, mtimeMs, items };
+    fresh[f] = fileRow(stamp, items, stamp.size);
     itemsByFile.push(items);
     filesRead += 1;
   }

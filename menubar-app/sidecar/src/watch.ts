@@ -11,7 +11,7 @@ import { createInterface } from "node:readline";
 
 import { resolveClaudeProjectDirs } from "../../../src/native/claude.js";
 import { resolveCodexSessionsDirs } from "../../../src/native/codex.js";
-import { vscodeGlobalStorageRoots } from "../../../src/native/vscode-agents.js";
+import { VSCODE_AGENTS, vscodeGlobalStorageRoots } from "../../../src/native/vscode-agents.js";
 
 import { CodexLimitsReader, reconcileCodexLimits } from "./codex-limits.js";
 import {
@@ -33,11 +33,21 @@ import {
   watchIntervals,
 } from "./watch-policy.js";
 
+function vscodeTaskDirs(env: NodeJS.ProcessEnv): string[] {
+  const dirs: string[] = [];
+  for (const root of vscodeGlobalStorageRoots(env)) {
+    for (const agent of VSCODE_AGENTS) {
+      for (const extId of agent.extIds) dirs.push(join(root, extId, "tasks"));
+    }
+  }
+  return dirs;
+}
+
 export function watchRoots(env: NodeJS.ProcessEnv = process.env): string[] {
   const targets = [
     ...resolveClaudeProjectDirs(env),
     ...resolveCodexSessionsDirs(env),
-    ...vscodeGlobalStorageRoots(env),
+    ...vscodeTaskDirs(env),
     join(env.HOME ?? homedir(), ".continue", "dev_data"),
   ];
   // A provider often creates `projects/`, `sessions/`, or `dev_data/` only

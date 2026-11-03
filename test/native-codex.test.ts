@@ -98,7 +98,7 @@ describe("parseCodexRollout — cumulative handling", () => {
   });
 
   it("invalidates caches created before forked rollouts failed closed", () => {
-    expect(CODEX_CACHE_VERSION).toBe(7);
+    expect(CODEX_CACHE_VERSION).toBe(8);
   });
 
   it("reads the nested info.total_token_usage layout", () => {

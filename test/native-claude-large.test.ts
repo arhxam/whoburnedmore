@@ -111,9 +111,13 @@ describe("bounded JSONL streaming", () => {
     try {
       const path = join(project, "session.jsonl");
       const line = "x".repeat(64 * 1024 - 1) + "🔥";
-      await writeFile(path, line + "\r\n\nlast");
+      const body = line + "\r\n\nlast";
+      await writeFile(path, body);
       const lines: string[] = [];
-      expect(await readJsonlStream(path, (s) => lines.push(s), { deadline: Infinity })).toEqual({ ok: true });
+      expect(await readJsonlStream(path, (s) => lines.push(s), { deadline: Infinity })).toEqual({
+        ok: true,
+        offset: Buffer.byteLength(body),
+      });
       expect(lines).toEqual([line + "\r", "", "last"]);
       expect(MAX_NATIVE_FILE_BYTES).toBe(64 * 1024 * 1024);
     } finally { await rm(dir, { recursive: true, force: true }); }
@@ -130,7 +134,7 @@ describe("bounded JSONL streaming", () => {
       let clock = 0;
       const lines: string[] = [];
       const result = await readJsonlStream(path, (s) => { lines.push(s); clock = 2; }, { deadline: 1, now: () => clock });
-      expect(result).toEqual({ ok: false, reason: "timed-out" });
+      expect(result).toEqual({ ok: false, reason: "timed-out", offset: Buffer.byteLength("first\n") });
       expect(lines).toEqual(["first"]);
     } finally { await rm(dir, { recursive: true, force: true }); }
   });

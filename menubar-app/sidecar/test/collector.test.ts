@@ -11,6 +11,7 @@ import {
   resolveCcusageStandalone,
   terminateCollectorProcesses,
 } from "../src/collector.js";
+import { vscodeGlobalStorageRoots } from "../../../src/native/vscode-agents.js";
 import { watchRoots } from "../src/watch.js";
 
 describe("Codex replay-aware collection", () => {
@@ -100,6 +101,21 @@ describe("Codex replay-aware collection", () => {
     expect(watchRoots(env).filter((path) => path.startsWith(home))).toEqual([
       join(home, "sessions"), join(home, "archived_sessions"),
     ]);
+  });
+
+  it("watches extension task folders instead of the whole globalStorage tree", async () => {
+    const root = await mkdtemp(join(tmpdir(), "burnbar-tasks-watch-"));
+    const env = {
+      HOME: root,
+      CLAUDE_CONFIG_DIR: join(root, "no-claude"),
+      CODEX_HOME: join(root, "no-codex"),
+    } as NodeJS.ProcessEnv;
+    const storage = vscodeGlobalStorageRoots(env)[0]!;
+    const tasks = join(storage, "saoudrizwan.claude-dev", "tasks");
+    await mkdir(tasks, { recursive: true });
+    const roots = watchRoots(env);
+    expect(roots).toContain(tasks);
+    expect(roots).not.toContain(storage);
   });
 
   it("keeps unchanged Claude aggregates in memory without rewriting the parse cache", async () => {

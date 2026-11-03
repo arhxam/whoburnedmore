@@ -56,6 +56,7 @@ function num(n: unknown): number {
 }
 
 interface ParsedRequest {
+  ts: number;
   date: string;
   model: string;
   inputTokens: number;
@@ -76,7 +77,8 @@ function parseApiReqMessage(
   msg: Record<string, unknown>,
 ): ParsedRequest | null {
   if (msg.say !== "api_req_started") return null;
-  const date = localUsageDate(Number(msg.ts));
+  const ts = Number(msg.ts);
+  const date = localUsageDate(ts);
   if (!date) return null;
 
   let payload: Record<string, unknown> | null = null;
@@ -114,6 +116,7 @@ function parseApiReqMessage(
 
   const storedCostRaw = Number(payload.cost);
   return {
+    ts,
     date,
     model: modelFromRow ?? modelFromText ?? tool,
     inputTokens,
@@ -257,22 +260,41 @@ async function listTaskFiles(
 }
 
 /** Bump when the parse/aggregate semantics change — invalidates the per-file cache. */
-export const VSCODE_CACHE_VERSION = 2;
+export const VSCODE_CACHE_VERSION = 3;
 
-// Compact per-file cache row: [date, model, in, out, cacheCreate, cacheRead, cost, requestCount].
-type CachedRow = [string, string, number, number, number, number, number, number];
+// Compact per-request cache row: [timestamp, model, in, out, cacheCreate, cacheRead, cost].
+type CachedRow = [number, string, number, number, number, number, number];
 
-function entryToRow(e: DailyUsageEntry): CachedRow {
-  return [
-    e.date,
-    e.model,
-    e.inputTokens,
-    e.outputTokens,
-    e.cacheCreationTokens,
-    e.cacheReadTokens,
-    e.costUSD,
-    e.requestCount ?? 0,
-  ];
+function vscodeCacheRows(tool: string, raw: string): CachedRow[] {
+  let arr: unknown;
+  try {
+    arr = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(arr)) return [];
+  const rows: CachedRow[] = [];
+  for (const item of arr) {
+    if (!item || typeof item !== "object") continue;
+    const req = parseApiReqMessage(tool, item as Record<string, unknown>);
+    if (!req) continue;
+    rows.push([
+      req.ts,
+      req.model,
+      req.inputTokens,
+      req.outputTokens,
+      req.cacheCreationTokens,
+      req.cacheReadTokens,
+      req.storedCost ??
+        estimateCostUSD(req.model, {
+          inputTokens: req.inputTokens,
+          outputTokens: req.outputTokens,
+          cacheCreationTokens: req.cacheCreationTokens,
+          cacheReadTokens: req.cacheReadTokens,
+        }),
+    ]);
+  }
+  return rows;
 }
 
 export interface CollectVscodeAgentOpts {
@@ -307,7 +329,7 @@ export async function collectVscodeAgent(
     files,
     cachePath: opts.cachePath ?? nativeCachePath(`vscode-${opts.tool}`, env),
     version: VSCODE_CACHE_VERSION,
-    parseFile: (content) => parseVscodeAgentMessages(opts.tool, content).map(entryToRow),
+    parseFile: (content) => vscodeCacheRows(opts.tool, content),
     deadline: now() + (opts.budgetMs ?? NATIVE_READ_BUDGET_MS),
     now,
     maxFileBytes: opts.maxFileBytes,
@@ -320,11 +342,13 @@ export async function collectVscodeAgent(
   const byKey = new Map<string, Bucket>();
   for (const rows of res.itemsByFile) {
     for (const r of rows) {
-      const key = `${r[0]}|${r[1]}`;
+      const date = localUsageDate(r[0]);
+      if (!date) continue;
+      const key = `${date}|${r[1]}`;
       let b = byKey.get(key);
       if (!b) {
         b = {
-          date: r[0],
+          date,
           model: r[1],
           inputTokens: 0,
           outputTokens: 0,
@@ -340,7 +364,7 @@ export async function collectVscodeAgent(
       b.cacheCreationTokens += r[4];
       b.cacheReadTokens += r[5];
       b.costUSD += r[6];
-      b.requestCount += r[7];
+      b.requestCount += 1;
     }
   }
   return {

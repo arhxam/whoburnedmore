@@ -80,47 +80,51 @@ export interface CodexRolloutInspection {
   replayCandidateDates: string[];
 }
 
-export function inspectCodexRollout(lines: Iterable<string>): CodexRolloutInspection {
+interface CodexUsageEvent {
+  /** Epoch ms, or 0 when the line had no parseable timestamp. */
+  ts: number;
+  input: number;
+  cached: number;
+  output: number;
+}
+
+interface CodexExtract {
+  model: string;
+  replayed: boolean;
+  events: CodexUsageEvent[];
+}
+
+function stripLeadingBom(text: string): string {
+  return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+}
+
+function extractCodexRollout(lines: Iterable<string>): CodexExtract {
   let model = "unknown";
   let sawSessionMeta = false;
-  let replayedRollout = false;
-  // Per local day: the LAST cumulative seen that day + turn count that day.
-  // Insertion order follows the (chronological) event stream.
-  const perDay = new Map<
-    string,
-    { cum: { input: number; cached: number; output: number }; turns: number }
-  >();
-  let lastSeenDate: string | null = null;
-
+  let replayed = false;
+  const events: CodexUsageEvent[] = [];
   for (const raw of lines) {
-    const trimmed = raw.trim();
+    const trimmed = stripLeadingBom(raw).trim();
     if (!trimmed) continue;
     let obj: Record<string, unknown>;
     try {
-      obj = JSON.parse(trimmed) as Record<string, unknown>;
+      obj = JSON.parse(stripLeadingBom(trimmed)) as Record<string, unknown>;
     } catch {
       continue;
     }
     const payload = obj.payload as Record<string, unknown> | undefined;
     if (!payload || typeof payload !== "object") continue;
 
-    // The line kind is on the OUTER `type` (session_meta / turn_context /
-    // event_msg); only event_msg carries a payload.type sub-discriminator.
     const kind = obj.type;
     if (kind === "session_meta" && !sawSessionMeta) {
       sawSessionMeta = true;
       const source = payload.source as Record<string, unknown> | undefined;
-      // A child rollout begins with its parent's cumulative history. Removing
-      // that prefix requires a cross-file replay plan, which this deliberately
-      // small fallback parser does not have. Fail closed instead of publishing
-      // a known overcount; the primary ccusage path counts the child's own
-      // advancement precisely.
       if (
         typeof payload.forked_from_id === "string" ||
         typeof payload.parent_thread_id === "string" ||
         (source && typeof source === "object" && source.subagent !== undefined)
       ) {
-        replayedRollout = true;
+        replayed = true;
       }
     }
     if (kind === "session_meta" || kind === "turn_context") {
@@ -129,51 +133,57 @@ export function inspectCodexRollout(lines: Iterable<string>): CodexRolloutInspec
     if (payload.type === "token_count") {
       const fields = readTokenFields(payload);
       if (!fields) continue;
-      // Attribute to the event's own day; if the timestamp is unparseable, carry
-      // forward the most recent known day rather than dropping the usage.
-      const parsed = localUsageDate(Date.parse(String(obj.timestamp ?? "")));
-      const day: string | null = parsed ?? lastSeenDate;
-      if (!day) continue;
-      lastSeenDate = day;
-      const e = perDay.get(day);
-      if (e) {
-        e.cum = fields; // latest cumulative on that day
-        e.turns += 1;
-      } else {
-        perDay.set(day, { cum: fields, turns: 1 });
-      }
+      const ts = Date.parse(String(obj.timestamp ?? ""));
+      events.push({
+        ts: Number.isFinite(ts) ? ts : 0,
+        input: fields.input,
+        cached: fields.cached,
+        output: fields.output,
+      });
     }
   }
+  return { model, replayed, events };
+}
 
-  if (perDay.size === 0)
-    return { sessions: [], replaySessions: [], replayCandidateDates: [] };
+/** Assign local days at call time. A warm cache of raw events rebuckets after a TZ change. */
+function bucketCodexEvents(extracted: CodexExtract): CodexRolloutInspection {
+  const perDay = new Map<
+    string,
+    { cum: { input: number; cached: number; output: number }; turns: number }
+  >();
+  let lastSeenDate: string | null = null;
+  for (const event of extracted.events) {
+    const parsed = event.ts > 0 ? localUsageDate(event.ts) : null;
+    const day: string | null = parsed ?? lastSeenDate;
+    if (!day) continue;
+    lastSeenDate = day;
+    const cum = { input: event.input, cached: event.cached, output: event.output };
+    const existing = perDay.get(day);
+    if (existing) {
+      existing.cum = cum;
+      existing.turns += 1;
+    } else {
+      perDay.set(day, { cum, turns: 1 });
+    }
+  }
+  if (perDay.size === 0) return { sessions: [], replaySessions: [], replayCandidateDates: [] };
 
-  // Walk days oldest→newest and difference the cumulative to get each day's
-  // own usage. Map Codex's cumulative fields onto our four-field schema:
-  //  - cache read  = cached input portion
-  //  - input       = uncached input (input_tokens already includes the cached part)
-  //  - output      = output_tokens, which already INCLUDES reasoning output
-  //  - cache create= Codex doesn't report a separate cache-write count
   const dates = [...perDay.keys()].sort();
   const out: CodexSession[] = [];
   let prev = { input: 0, cached: 0, output: 0 };
   for (const date of dates) {
     const { cum, turns } = perDay.get(date)!;
-    // Per-day deltas (monotonic cumulative ⇒ non-negative; max(0) guards any reset).
     const dInput = Math.max(0, cum.input - prev.input);
     const dCached = Math.max(0, cum.cached - prev.cached);
     const dOutput = Math.max(0, cum.output - prev.output);
     prev = cum;
-    // cached_input_tokens is a subset of input_tokens. A truncated/corrupt
-    // event can momentarily violate that invariant, so cap the cached delta at
-    // the inclusive input delta instead of manufacturing extra total tokens.
     const cacheReadTokens = Math.min(dCached, dInput);
     const inputTokens = dInput - cacheReadTokens;
     const outputTokens = dOutput;
-    if (inputTokens + outputTokens + cacheReadTokens === 0) continue; // idle day
+    if (inputTokens + outputTokens + cacheReadTokens === 0) continue;
     out.push({
       date,
-      model,
+      model: extracted.model,
       inputTokens,
       outputTokens,
       cacheCreationTokens: 0,
@@ -182,10 +192,14 @@ export function inspectCodexRollout(lines: Iterable<string>): CodexRolloutInspec
     });
   }
   return {
-    sessions: replayedRollout ? [] : out,
-    replaySessions: replayedRollout ? out : [],
-    replayCandidateDates: replayedRollout ? dates : [],
+    sessions: extracted.replayed ? [] : out,
+    replaySessions: extracted.replayed ? out : [],
+    replayCandidateDates: extracted.replayed ? dates : [],
   };
+}
+
+export function inspectCodexRollout(lines: Iterable<string>): CodexRolloutInspection {
+  return bucketCodexEvents(extractCodexRollout(lines));
 }
 
 export function parseCodexRollout(lines: Iterable<string>): CodexSession[] {
@@ -340,48 +354,31 @@ export interface NativeCollectResult {
 export const NATIVE_READ_BUDGET_MS = 45_000;
 
 /** Bump when parse semantics change — invalidates the per-file cache. */
-export const CODEX_CACHE_VERSION = 7;
+export const CODEX_CACHE_VERSION = 8;
 
 /**
- * Compact per-file cache row: [date, model, in, out, cacheCreate, cacheRead,
- * turnCount] — one per active day of the session that file holds.
+ * Compact per-file cache row: [kind, timestamp, model, cumInput, cumCached, cumOutput].
+ * Days are assigned when the row is read, not when it is cached.
  */
-type CachedSession = [
+type CachedEvent = [
   "usage" | "duplicate" | "replay" | "replay-duplicate",
-  string,
-  string,
   number,
-  number,
+  string,
   number,
   number,
   number,
 ];
 
-function toCachedSession(
-  s: CodexSession,
-  kind: CachedSession[0] = "usage",
-): CachedSession {
-  return [
-    kind,
-    s.date,
-    s.model,
-    s.inputTokens,
-    s.outputTokens,
-    s.cacheCreationTokens,
-    s.cacheReadTokens,
-    s.turnCount,
-  ];
-}
-
-function fromCachedSession(t: CachedSession): CodexSession {
+function eventsFromCache(items: CachedEvent[]): CodexExtract {
   return {
-    date: t[1],
-    model: t[2],
-    inputTokens: t[3],
-    outputTokens: t[4],
-    cacheCreationTokens: t[5],
-    cacheReadTokens: t[6],
-    turnCount: t[7],
+    model: items[0]?.[2] || "unknown",
+    replayed: items[0]?.[0] === "replay" || items[0]?.[0] === "replay-duplicate",
+    events: items.map((row) => ({
+      ts: row[1],
+      input: row[3],
+      cached: row[4],
+      output: row[5],
+    })),
   };
 }
 
@@ -419,26 +416,30 @@ export async function collectCodexNative(
   }
   if (files.length === 0) return { entries: [], found: false, filesScanned: 0 };
   const now = opts.now ?? Date.now;
-  const res = await readFilesWithCache<CachedSession>({
+  const res = await readFilesWithCache<CachedEvent>({
     files,
     cachePath: opts.cachePath ?? nativeCachePath("codex", env),
     version: CODEX_CACHE_VERSION,
     parseFile: (content, path) => {
-      const inspected = inspectCodexRollout(splitLines(content));
+      const extracted = extractCodexRollout(splitLines(content));
       const primary = primaryFiles.has(path);
-      return [
-        // Do not pass toCachedSession directly to map: Array.map's numeric
-        // index would be supplied as the optional `kind` argument.
-        ...inspected.sessions.map((session) =>
-          toCachedSession(session, primary ? "usage" : "duplicate"),
-        ),
-        ...inspected.replaySessions.map((session) =>
-          toCachedSession(
-            session,
-            primary ? "replay" : "replay-duplicate",
-          ),
-        ),
-      ];
+      const kind: CachedEvent[0] = extracted.replayed
+        ? primary
+          ? "replay"
+          : "replay-duplicate"
+        : primary
+          ? "usage"
+          : "duplicate";
+      return extracted.events.map(
+        (event): CachedEvent => [
+          kind,
+          event.ts,
+          extracted.model,
+          event.input,
+          event.cached,
+          event.output,
+        ],
+      );
     },
     deadline: now() + (opts.budgetMs ?? NATIVE_READ_BUDGET_MS),
     now,
@@ -456,17 +457,15 @@ export async function collectCodexNative(
   const legacyAcc: CodexAccumulator = new Map();
   const replayCandidateDates = new Set<string>();
   for (const items of res.itemsByFile) {
-    const usage = items.filter((item) => item[0] === "usage").map(fromCachedSession);
-    const legacy = items.map(fromCachedSession);
-    const replay = items
-      .filter(
-        (item) =>
-          item[0] === "replay" || item[0] === "replay-duplicate",
-      )
-      .map(fromCachedSession);
-    foldCodexSessions(acc, usage);
-    foldCodexSessions(legacyAcc, legacy);
-    for (const session of replay) replayCandidateDates.add(session.date);
+    if (items.length === 0) continue;
+    const kind = items[0][0];
+    const inspection = bucketCodexEvents(eventsFromCache(items));
+    const records = [...inspection.sessions, ...inspection.replaySessions];
+    if (kind === "usage") foldCodexSessions(acc, inspection.sessions);
+    foldCodexSessions(legacyAcc, records);
+    if (kind === "replay" || kind === "replay-duplicate") {
+      for (const date of inspection.replayCandidateDates) replayCandidateDates.add(date);
+    }
   }
   return {
     entries: finalizeCodexEntries(acc),
