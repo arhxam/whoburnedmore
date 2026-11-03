@@ -9,7 +9,10 @@ export async function readJsonlStream(
   path: string,
   onLine: (line: string) => void,
   opts: { deadline: number; now?: () => number; maxLineBytes?: number },
-): Promise<{ ok: true } | { ok: false; reason: "unreadable" | "too-large" | "timed-out" }> {
+): Promise<
+  | { ok: true }
+  | { ok: false; reason: "unreadable" | "too-large" | "timed-out"; code?: string }
+> {
   const now = opts.now ?? Date.now;
   const maxLineBytes = Math.max(1, opts.maxLineBytes ?? MAX_NATIVE_FILE_BYTES);
   let handle: Awaited<ReturnType<typeof open>> | undefined;
@@ -53,7 +56,17 @@ export async function readJsonlStream(
     if (pendingBytes > 0) onLine(Buffer.concat(parts, pendingBytes).toString("utf8"));
     if (now() > opts.deadline) return { ok: false, reason: "timed-out" };
     return { ok: true };
-  } catch {
+  } catch (err) {
+    if (err instanceof Error && err.message.includes("memory budget")) {
+      return { ok: false, reason: "too-large" };
+    }
+    const code =
+      typeof err === "object" && err !== null && "code" in err &&
+      typeof (err as { code?: unknown }).code === "string"
+        ? (err as { code: string }).code
+        : undefined;
+    if (code === "ENOENT") return { ok: false, reason: "unreadable", code };
+    if (code === "EACCES" || code === "EPERM") return { ok: false, reason: "unreadable", code: "EACCES" };
     return { ok: false, reason: "unreadable" };
   } finally {
     await handle?.close().catch(() => undefined);

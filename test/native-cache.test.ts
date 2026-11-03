@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   chmod,
   mkdtemp,
@@ -218,7 +218,9 @@ describe("readFilesWithCache — generic cache mechanics", () => {
         maxFileBytes: 16,
       });
       expect(parsed).toBe(false);
-      expect(result.itemsByFile).toEqual([]);
+      expect(result.itemsByFile).toBeNull();
+      expect(result.incomplete).toBe(true);
+      expect(result.timedOut).toBe(false);
       expect(result.filesRead).toBe(0);
     } finally {
       await rm(dir, { recursive: true, force: true });
@@ -245,6 +247,190 @@ describe("readFilesWithCache — generic cache mechanics", () => {
       });
       expect((await stat(cacheDir)).mode & 0o777).toBe(0o700);
       expect((await stat(cachePath)).mode & 0o777).toBe(0o600);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not rewrite the cache when nothing changed", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "wbm-fcache-"));
+    try {
+      const input = join(dir, "input.txt");
+      const cachePath = join(dir, "cache.json");
+      await writeFile(input, "safe");
+      const parse = (value: string) => [value];
+      await readFilesWithCache({
+        files: [input],
+        cachePath,
+        version: 1,
+        parseFile: parse,
+        deadline: Date.now() + 5_000,
+      });
+      const stale = new Date(Date.now() - 120_000);
+      await utimes(cachePath, stale, stale);
+      await readFilesWithCache({
+        files: [input],
+        cachePath,
+        version: 1,
+        parseFile: parse,
+        deadline: Date.now() + 5_000,
+      });
+      expect(Math.abs((await stat(cachePath)).mtimeMs - stale.getTime())).toBeLessThan(5);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("warns and does not throw when the serialized cache exceeds the byte limit", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "wbm-fcache-"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const input = join(dir, "input.txt");
+      const cachePath = join(dir, "cache.json");
+      await writeFile(input, "safe");
+      const result = await readFilesWithCache({
+        files: [input],
+        cachePath,
+        version: 1,
+        parseFile: () => ["x".repeat(64)],
+        deadline: Date.now() + 5_000,
+        maxCacheBytes: 32,
+      });
+      expect(result.itemsByFile).toEqual([["x".repeat(64)]]);
+      expect(warn.mock.calls.some((call) => String(call[0]).includes("exceeds"))).toBe(true);
+      await expect(readFile(cachePath)).rejects.toThrow();
+    } finally {
+      warn.mockRestore();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("streaming failure policy", () => {
+  it("caches a permanent failure and still returns the other files", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "wbm-fcache-"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const good = join(dir, "good.txt");
+      const bad = join(dir, "bad.txt");
+      const cachePath = join(dir, "cache.json");
+      await writeFile(good, "ok");
+      await writeFile(bad, "nope");
+      let badReads = 0;
+      const run = () =>
+        readFilesWithCache({
+          files: [good, bad],
+          cachePath,
+          version: 1,
+          parseFile: (value: string) => [value],
+          streamFile: async (path) => {
+            if (path === bad) {
+              badReads += 1;
+              return { ok: false as const, reason: "too-large" };
+            }
+            return { ok: true as const, items: ["ok"] };
+          },
+          deadline: Date.now() + 5_000,
+        });
+      const first = await run();
+      expect(first.timedOut).toBe(false);
+      expect(first.incomplete).toBeUndefined();
+      expect(first.itemsByFile).toEqual([["ok"], []]);
+      expect(badReads).toBe(1);
+      expect(warn.mock.calls.some((call) => String(call[0]).includes("skipping transcript"))).toBe(true);
+      const cached = JSON.parse(await readFile(cachePath, "utf8")) as {
+        files: Record<string, { skipped?: boolean; items: string[] }>;
+      };
+      expect(cached.files[bad]).toMatchObject({ skipped: true, items: [] });
+      const second = await run();
+      expect(second.itemsByFile).toEqual([["ok"], []]);
+      expect(second.filesRead).toBe(0);
+      expect(badReads).toBe(1);
+    } finally {
+      warn.mockRestore();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("retries ENOENT instead of failing the scan or caching a skip", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "wbm-fcache-"));
+    try {
+      const kept = join(dir, "kept.txt");
+      const missing = join(dir, "missing.txt");
+      const cachePath = join(dir, "cache.json");
+      await writeFile(kept, "ok");
+      await writeFile(missing, "gone");
+      const first = await readFilesWithCache({
+        files: [kept, missing],
+        cachePath,
+        version: 1,
+        parseFile: (value: string) => [value],
+        streamFile: async (path) => ({ ok: true as const, items: [path === kept ? "ok" : "gone"] }),
+        deadline: Date.now() + 5_000,
+      });
+      expect(first.itemsByFile).toEqual([["ok"], ["gone"]]);
+      await rm(missing);
+      const second = await readFilesWithCache({
+        files: [kept, missing],
+        cachePath,
+        version: 1,
+        parseFile: (value: string) => [value],
+        streamFile: async () => ({ ok: false as const, reason: "unreadable", code: "ENOENT" }),
+        deadline: Date.now() + 5_000,
+      });
+      expect(second.incomplete).toBeUndefined();
+      expect(second.timedOut).toBe(false);
+      expect(second.itemsByFile).toEqual([["ok"]]);
+      const cached = JSON.parse(await readFile(cachePath, "utf8")) as { files: Record<string, unknown> };
+      expect(cached.files[missing]).toBeUndefined();
+      await writeFile(missing, "back");
+      let reads = 0;
+      const third = await readFilesWithCache({
+        files: [kept, missing],
+        cachePath,
+        version: 1,
+        parseFile: (value: string) => [value],
+        streamFile: async () => {
+          reads += 1;
+          return { ok: true as const, items: ["back"] };
+        },
+        deadline: Date.now() + 5_000,
+      });
+      expect(reads).toBe(1);
+      expect(third.itemsByFile).toEqual([["ok"], ["back"]]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not cache a timeout, so the next run reads the file", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "wbm-fcache-"));
+    try {
+      const path = join(dir, "slow.txt");
+      const cachePath = join(dir, "cache.json");
+      await writeFile(path, "later");
+      const timedOut = await readFilesWithCache({
+        files: [path],
+        cachePath,
+        version: 1,
+        parseFile: (value: string) => [value],
+        streamFile: async () => ({ ok: false as const, reason: "timed-out" }),
+        deadline: Date.now() + 5_000,
+      });
+      expect(timedOut).toMatchObject({ itemsByFile: null, timedOut: true });
+      const raw = await readFile(cachePath, "utf8").catch(() => "");
+      expect(raw.includes("skipped")).toBe(false);
+      expect(raw.includes(path)).toBe(false);
+      const again = await readFilesWithCache({
+        files: [path],
+        cachePath,
+        version: 1,
+        parseFile: (value: string) => [value],
+        streamFile: async () => ({ ok: true as const, items: ["later"] }),
+        deadline: Date.now() + 5_000,
+      });
+      expect(again.itemsByFile).toEqual([["later"]]);
+      expect(again.filesRead).toBe(1);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

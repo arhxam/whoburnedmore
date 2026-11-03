@@ -1,8 +1,8 @@
 import { readdirSync, statSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import type { AgentStat, SkillStat, ToolStat } from "./shared.js";
-import { NATIVE_READ_BUDGET_MS } from "./native/claude.js";
+import { NATIVE_READ_BUDGET_MS, resolveClaudeProjectDirs } from "./native/claude.js";
+import { resolveCodexSessionsDirs } from "./native/codex.js";
 import { nativeCachePath, readFilesWithCache } from "./native/file-cache.js";
 
 // ccusage gives tokens by tool/model, but not which tools/skills/MCP servers you
@@ -14,8 +14,6 @@ import { nativeCachePath, readFilesWithCache } from "./native/file-cache.js";
 // tokens — never arguments, content, project/repo names, or conversation titles.
 // Best-effort and bounded so a huge ~/.claude never makes the CLI hang.
 
-const CLAUDE_PROJECTS = join(homedir(), ".claude", "projects");
-const CODEX_SESSIONS = join(homedir(), ".codex", "sessions");
 const MAX_FILES = 5000;
 /**
  * Wall-clock budget for the whole attribution scan. It used to be 12s and re-read
@@ -482,18 +480,58 @@ function mergeAgg(acc: Accumulator, agg: AttrFileAgg): void {
   }
 }
 
-/** Parse ONE Claude Code transcript file into its cacheable rollup (single-element
- *  array so it fits the generic per-file cache's `T[]` item contract). */
+function stripBom(text: string): string {
+  return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+}
+
+/** Identity of one Claude provider request. Lines without either id are not duplicates. */
+function claudeRequestKey(rec: unknown): string | null {
+  if (!rec || typeof rec !== "object") return null;
+  const row = rec as { requestId?: unknown; message?: { id?: unknown } };
+  const messageId = typeof row.message?.id === "string" ? row.message.id : "";
+  const requestId = typeof row.requestId === "string" ? row.requestId : "";
+  if (messageId === "" && requestId === "") return null;
+  return `${messageId}\u0000${requestId}`;
+}
+
+/**
+ * Parse ONE Claude Code transcript file into its cacheable rollup (single-element
+ * array so it fits the generic per-file cache's `T[]` item contract).
+ * Streamed turns repeat `(message.id, requestId)` with partial token counts;
+ * keep the occurrence with the largest token count.
+ */
 export function parseClaudeAttrFile(content: string): AttrFileAgg[] {
-  const acc = createAccumulator();
-  const ctx = createFileContext();
+  const parsed: unknown[] = [];
   for (const line of splitLines(content)) {
-    if (!line) continue;
+    const trimmed = stripBom(line).trim();
+    if (!trimmed) continue;
     try {
-      processRecord(JSON.parse(line), acc, ctx);
+      parsed.push(JSON.parse(stripBom(trimmed)));
     } catch {
       /* malformed line — skip */
     }
+  }
+  const drop = new Set<number>();
+  const best = new Map<string, { index: number; tokens: number }>();
+  for (let i = 0; i < parsed.length; i++) {
+    const rec = parsed[i];
+    const key = claudeRequestKey(rec);
+    if (!key) continue;
+    const usage = (rec as { message?: { usage?: unknown } }).message?.usage;
+    const tokens = recordTokens(usage);
+    const prev = best.get(key);
+    if (!prev || tokens > prev.tokens) {
+      if (prev) drop.add(prev.index);
+      best.set(key, { index: i, tokens });
+    } else {
+      drop.add(i);
+    }
+  }
+  const acc = createAccumulator();
+  const ctx = createFileContext();
+  for (let i = 0; i < parsed.length; i++) {
+    if (drop.has(i)) continue;
+    processRecord(parsed[i], acc, ctx);
   }
   return [serializeAcc(acc)];
 }
@@ -503,9 +541,10 @@ export function parseCodexAttrFile(content: string): AttrFileAgg[] {
   const acc = createAccumulator();
   const ctx = createCodexContext();
   for (const line of splitLines(content)) {
-    if (!line) continue;
+    const trimmed = stripBom(line).trim();
+    if (!trimmed) continue;
     try {
-      processCodexRecord(JSON.parse(line), acc, ctx);
+      processCodexRecord(JSON.parse(stripBom(trimmed)), acc, ctx);
     } catch {
       /* malformed line — skip */
     }
@@ -513,44 +552,53 @@ export function parseCodexAttrFile(content: string): AttrFileAgg[] {
   return [serializeAcc(acc)];
 }
 
-/** Claude Code transcript roots, including config-dir overrides (best-effort). */
-function claudeProjectDirs(): string[] {
-  const dirs = [CLAUDE_PROJECTS];
-  const cfg = process.env.CLAUDE_CONFIG_DIR;
-  if (cfg) dirs.push(join(cfg, "projects"));
-  dirs.push(join(homedir(), ".config", "claude", "projects"));
-  return [...new Set(dirs)];
-}
-
-/** Recursively list *.jsonl files under a dir, newest first, bounded. */
-function listTranscripts(dir: string): string[] {
+/** Recursively list *.jsonl files under a dir, newest first, bounded.
+ * `incomplete` is true when the walk hit `maxFiles` or could not stat a file,
+ * so the caller must not treat the snapshot as complete. */
+function listTranscripts(
+  dir: string,
+  maxFiles: number,
+): { files: string[]; incomplete: boolean } {
   const out: Array<{ path: string; mtime: number }> = [];
+  let incomplete = false;
   const walk = (d: string) => {
-    if (out.length >= MAX_FILES) return;
+    if (out.length >= maxFiles) {
+      incomplete = true;
+      return;
+    }
     let entries: import("node:fs").Dirent[];
     try {
       entries = readdirSync(d, { withFileTypes: true });
-    } catch {
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") incomplete = true;
       return;
     }
     for (const e of entries) {
-      if (out.length >= MAX_FILES) return;
+      if (out.length >= maxFiles) {
+        incomplete = true;
+        return;
+      }
       const p = join(d, e.name);
       if (e.isDirectory()) walk(p);
       else if (e.isFile() && e.name.endsWith(".jsonl")) {
         try {
           out.push({ path: p, mtime: statSync(p).mtimeMs });
-        } catch {
-          /* unreadable — skip */
+        } catch (err) {
+          const code = (err as NodeJS.ErrnoException).code;
+          if (code !== "ENOENT") incomplete = true;
         }
       }
     }
   };
   walk(dir);
-  return out
-    .sort((a, b) => b.mtime - a.mtime)
-    .slice(0, MAX_FILES)
-    .map((f) => f.path);
+  return {
+    files: out
+      .sort((a, b) => b.mtime - a.mtime)
+      .slice(0, maxFiles)
+      .map((f) => f.path),
+    incomplete,
+  };
 }
 
 /**
@@ -565,6 +613,7 @@ function listTranscripts(dir: string): string[] {
  */
 export async function collectAttribution(
   env: NodeJS.ProcessEnv = process.env,
+  opts: { maxFileBytes?: number; maxFiles?: number } = {},
 ): Promise<AttributionResult> {
   const acc = createAccumulator();
   // ONE shared deadline for the whole scan (Claude + Codex), so raising the
@@ -575,20 +624,32 @@ export async function collectAttribution(
   // and the next tick resumes (mirrors the native readers). `complete` still
   // means "full snapshot" for the server's no-shrink guard — unchanged.
   const deadline = Date.now() + TIME_BUDGET_MS;
+  const maxFiles = Math.max(1, opts.maxFiles ?? MAX_FILES);
   let complete = true;
 
   const mergeInto = (items: AttrFileAgg[][] | null): void => {
     if (!items) {
-      complete = false; // timed out — progress persisted, resume next tick
+      complete = false; // timed out or an unreadable file — not a full snapshot
       return;
     }
     for (const perFile of items) for (const agg of perFile) mergeAgg(acc, agg);
   };
 
+  const gather = (dirs: string[]): string[] => {
+    const files: string[] = [];
+    for (const dir of dirs) {
+      const listed = listTranscripts(dir, maxFiles);
+      if (listed.incomplete) complete = false;
+      files.push(...listed.files);
+    }
+    return files;
+  };
+
   try {
     // Claude Code — rich format (tool_use, attributionSkill, isSidechain).
-    const claudeFiles: string[] = [];
-    for (const dir of claudeProjectDirs()) claudeFiles.push(...listTranscripts(dir));
+    // Same roots as the usage reader: comma-separated CLAUDE_CONFIG_DIR, or both
+    // ~/.claude and ~/.config/claude.
+    const claudeFiles = gather(resolveClaudeProjectDirs(env));
     if (claudeFiles.length > 0) {
       const res = await readFilesWithCache<AttrFileAgg>({
         files: claudeFiles,
@@ -596,11 +657,13 @@ export async function collectAttribution(
         version: ATTRIBUTION_CACHE_VERSION,
         parseFile: parseClaudeAttrFile,
         deadline,
+        maxFileBytes: opts.maxFileBytes,
       });
       mergeInto(res.itemsByFile);
     }
-    // Codex — rollout format (function_call, token_count).
-    const codexFiles = listTranscripts(CODEX_SESSIONS);
+    // Codex — rollout format (function_call, token_count). Honor CODEX_HOME and
+    // archived_sessions, same as the usage reader.
+    const codexFiles = gather(resolveCodexSessionsDirs(env));
     if (codexFiles.length > 0) {
       const res = await readFilesWithCache<AttrFileAgg>({
         files: codexFiles,
@@ -608,6 +671,7 @@ export async function collectAttribution(
         version: ATTRIBUTION_CACHE_VERSION,
         parseFile: parseCodexAttrFile,
         deadline,
+        maxFileBytes: opts.maxFileBytes,
       });
       mergeInto(res.itemsByFile);
     }

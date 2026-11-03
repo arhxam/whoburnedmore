@@ -1,10 +1,16 @@
 import { describe, it, expect } from "vitest";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   accumulatorToResult,
+  collectAttribution,
   countRecord,
   createAccumulator,
   createCodexContext,
   createFileContext,
+  parseClaudeAttrFile,
+  parseCodexAttrFile,
   processCodexRecord,
   processRecord,
 } from "../src/attribution.js";
@@ -283,5 +289,109 @@ describe("processRecord — per-tool / per-skill token burn", () => {
       count: 1,
       tokens: 200,
     });
+  });
+});
+
+describe("parseClaudeAttrFile — duplicate requests and BOM", () => {
+  const line = (tokens: number) =>
+    JSON.stringify({
+      type: "assistant",
+      requestId: "r1",
+      sessionId: "s",
+      message: {
+        id: "m1",
+        role: "assistant",
+        usage: {
+          input_tokens: tokens,
+          output_tokens: 0,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0,
+        },
+        content: [{ type: "tool_use", id: "t1", name: "Bash" }],
+      },
+    });
+
+  it("keeps the largest token count for one (message.id, requestId)", () => {
+    const agg = parseClaudeAttrFile(`${line(10)}\n${line(50)}\n`);
+    expect(agg[0].agent).toEqual([1, 0, 0, 50, 0]);
+    expect(agg[0].tools).toEqual([["Bash", 1, 0, 50]]);
+    expect(agg[0].sessions).toEqual([["s", 1]]);
+  });
+
+  it("strips a leading BOM before parsing", () => {
+    const claude = parseClaudeAttrFile(`\uFEFF${line(4)}`);
+    expect(claude[0].tools[0]?.[0]).toBe("Bash");
+    const codex = parseCodexAttrFile(
+      `\uFEFF${JSON.stringify({
+        type: "response_item",
+        payload: { type: "function_call", name: "exec_command", call_id: "c1" },
+      })}`,
+    );
+    expect(codex[0].tools[0]?.[0]).toBe("exec_command");
+  });
+});
+
+describe("collectAttribution — roots, cap, and unreadable files", () => {
+  const claudeLine = (tool: string) =>
+    JSON.stringify({
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [{ type: "tool_use", name: tool }],
+      },
+    });
+
+  it("honors a comma-separated CLAUDE_CONFIG_DIR and CODEX_HOME archived sessions", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "wbm-attr-dirs-"));
+    try {
+      const first = join(dir, "claude-a");
+      const second = join(dir, "claude-b", "projects", "p");
+      const codex = join(dir, "codex", "archived_sessions");
+      await mkdir(second, { recursive: true });
+      await mkdir(codex, { recursive: true });
+      await writeFile(join(second, "s.jsonl"), `${claudeLine("Bash")}\n`);
+      await writeFile(
+        join(codex, "rollout.jsonl"),
+        `${JSON.stringify({
+          type: "response_item",
+          payload: { type: "function_call", name: "exec_command", call_id: "c1" },
+        })}\n`,
+      );
+      const result = await collectAttribution({
+        CLAUDE_CONFIG_DIR: `${first},${join(dir, "claude-b")}`,
+        CODEX_HOME: join(dir, "codex"),
+        WHOBURNEDMORE_CONFIG_DIR: dir,
+      } as NodeJS.ProcessEnv);
+      expect(result.complete).toBe(true);
+      expect(result.tools.find((tool) => tool.name === "Bash")?.count).toBe(1);
+      expect(result.tools.find((tool) => tool.name === "exec_command")?.count).toBe(1);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("is incomplete when the transcript cap is hit or a file is over the byte cap", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "wbm-attr-cap-"));
+    try {
+      const project = join(dir, "projects", "p");
+      await mkdir(project, { recursive: true });
+      await writeFile(join(project, "one.jsonl"), `${claudeLine("Bash")}\n`);
+      await writeFile(join(project, "two.jsonl"), `${claudeLine("Read")}\n`);
+      const env = {
+        CLAUDE_CONFIG_DIR: dir,
+        CODEX_HOME: join(dir, "no-codex"),
+        WHOBURNEDMORE_CONFIG_DIR: dir,
+      } as NodeJS.ProcessEnv;
+      const capped = await collectAttribution(env, { maxFiles: 1 });
+      expect(capped.complete).toBe(false);
+      await writeFile(join(project, "big.jsonl"), "x".repeat(64));
+      const oversized = await collectAttribution(
+        { ...env, WHOBURNEDMORE_CONFIG_DIR: join(dir, "other-cache") },
+        { maxFileBytes: 16 },
+      );
+      expect(oversized.complete).toBe(false);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

@@ -188,4 +188,24 @@ describe("collectContinue — reads dev_data on disk", () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  it("marks the scan incomplete when a ledger is over the byte cap", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "wbm-continue-big-"));
+    try {
+      const dev = join(dir, "dev_data", "schema");
+      await mkdir(dev, { recursive: true });
+      await writeFile(
+        join(dev, "tokensGenerated.jsonl"),
+        JSON.stringify({ model: "gpt-5", promptTokens: 4, generatedTokens: 6, timestamp: ISO }) + "\n" + "x".repeat(64),
+      );
+      const result = await collectContinue({
+        continueDir: dir,
+        cachePath: join(dir, "cache.json"),
+        maxFileBytes: 32,
+      });
+      expect(result).toMatchObject({ entries: [], found: false, timedOut: true });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });

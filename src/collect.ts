@@ -786,16 +786,34 @@ export async function collectAll(
   // and Continue.dev. Best effort like cursor: a no-op (found:false) when the
   // agent isn't installed, and they emit the same anti-fraud requestCount the
   // other native readers do.
+  const timedOutNative: NativeCollectResult = {
+    entries: [],
+    found: false,
+    filesScanned: 0,
+    timedOut: true,
+  };
+  // A throw inside one of these readers used to reject Promise.all and drop
+  // every other source. Map it to the same non-authoritative result as a timeout.
   const vscodeTasks = VSCODE_AGENTS.map((a) =>
-    collectVscodeAgent({ tool: a.tool, extIds: a.extIds }).then((r) => {
-      tick();
-      return { tool: a.tool, result: r };
-    }),
+    collectVscodeAgent({ tool: a.tool, extIds: a.extIds })
+      .then((r) => {
+        tick();
+        return { tool: a.tool, result: r };
+      })
+      .catch(() => {
+        tick();
+        return { tool: a.tool, result: timedOutNative };
+      }),
   );
-  const continueTask = collectContinue().then((r) => {
-    tick();
-    return r;
-  });
+  const continueTask = collectContinue()
+    .then((r) => {
+      tick();
+      return r;
+    })
+    .catch(() => {
+      tick();
+      return timedOutNative;
+    });
 
   const [
     sourceResults,

@@ -185,6 +185,7 @@ export interface CollectContinueOpts {
   now?: () => number;
   cachePath?: string;
   maxFiles?: number;
+  maxFileBytes?: number;
 }
 
 /**
@@ -226,6 +227,7 @@ export async function collectContinue(
       ]),
     deadline,
     now,
+    maxFileBytes: opts.maxFileBytes,
   });
   if (!res.itemsByFile) {
     return { entries: [], found: false, filesScanned: res.filesRead, timedOut: true };
