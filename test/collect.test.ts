@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   capByTokens,
@@ -25,6 +28,31 @@ import {
   NATIVE_READ_BUDGET_MS,
   type NativeCollectResult,
 } from "../src/native/claude.js";
+
+// Captured from the installed ccusage 20.0.48 CLI with TZ=UTC.
+// Codex: `codex daily --json --offline` on the forked rollout store in
+// ccusage-codex-replay.test.ts. OpenCode: `opencode daily --json --offline`
+// on a synthetic v2 SQLite store (session_message + session_v2 fork boundary).
+// ccusage 20.0.19 returns an empty daily array for that OpenCode store.
+const fixtureDir = join(dirname(fileURLToPath(import.meta.url)), "fixtures");
+const codexDailyFixture = JSON.parse(
+  readFileSync(join(fixtureDir, "ccusage-20.0.48-codex-daily.json"), "utf8"),
+) as unknown;
+const opencodeDailyFixture = JSON.parse(
+  readFileSync(join(fixtureDir, "ccusage-20.0.48-opencode-daily.json"), "utf8"),
+) as unknown;
+
+function mappedTokenTotal(entries: DailyUsageEntry[]): number {
+  return entries.reduce(
+    (sum, entry) =>
+      sum +
+      entry.inputTokens +
+      entry.outputTokens +
+      entry.cacheCreationTokens +
+      entry.cacheReadTokens,
+    0,
+  );
+}
 
 const nativeEntry = (tool: string, requestCount: number): DailyUsageEntry => ({
   date: "2026-06-10",
@@ -509,6 +537,22 @@ describe("mapCcusageDaily", () => {
     expect(entries).toHaveLength(0);
   });
 
+  // Shape captured from `ccusage codex daily --json --offline` (20.0.48): a
+  // `models` object map and a day-level `costUSD`. Parent prefix replay is
+  // counted once: 60 uncached input + 240 cache read + 30 output = 330.
+  it("maps the ccusage 20.0.48 codex daily fixture without hiding the token split", () => {
+    const entries = mapCcusageDaily("codex", codexDailyFixture);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].model).toBe("gpt-5-codex");
+    expect(entries[0].date).toBe("2026-08-09");
+    expect(entries[0].inputTokens).toBe(60);
+    expect(entries[0].outputTokens).toBe(30);
+    expect(entries[0].cacheReadTokens).toBe(240);
+    expect(entries[0].cacheCreationTokens).toBe(0);
+    expect(entries[0].costUSD).toBeCloseTo(0.000405);
+    expect(mappedTokenTotal(entries)).toBe(330);
+  });
+
   // Shape captured from `ccusage codex daily --json` (v20): a `models` object
   // map instead of modelBreakdowns, and day-level `costUSD`.
   it("maps the codex per-source format with a models object map", () => {
@@ -717,6 +761,28 @@ describe("opencode source (ccusage-only, no native reader)", () => {
     expect(result).toHaveLength(1);
     expect(result[0].model).toBe("fallback-model");
     expect(result[0].requestCount).toBeUndefined();
+  });
+
+  // ccusage 20.0.48 reads OpenCode v2 (`session_message` + `session_v2`) and
+  // emits modelBreakdowns. Parent input is 100+200+300+400 and the fork's own
+  // turn adds 40, for 1040 input and 44 output.
+  it("maps the ccusage 20.0.48 opencode v2 daily fixture", () => {
+    const entries = mapCcusageDaily("opencode", opencodeDailyFixture);
+    expect(entries).toEqual([
+      {
+        date: "2026-01-02",
+        tool: "opencode",
+        model: "gpt-test",
+        inputTokens: 1040,
+        outputTokens: 44,
+        cacheCreationTokens: 0,
+        cacheReadTokens: 0,
+        costUSD: 0.06,
+        origin: "cli",
+        verified: false,
+      },
+    ]);
+    expect(mappedTokenTotal(entries)).toBe(1084);
   });
 
   it("maps opencode daily output with a single model via modelsUsed", () => {

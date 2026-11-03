@@ -6,15 +6,38 @@ on:
 jobs:
   build-test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
-      - run: npm install
+          node-version: ${{ matrix.node }}
+      - run: npm ci
       - run: npm run build
       - run: npm run lint
       - run: npm test
+  menubar-sidecar:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - run: npm ci
+      - run: npm ci
+        working-directory: menubar-app
+      - run: npm test
+        working-directory: menubar-app
   windows-sync:
     runs-on: windows-latest
     strategy:
@@ -26,7 +49,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
-      - run: npm install --ignore-scripts
+      - run: npm ci --ignore-scripts
       - run: npm run lint
       - run: npm run build
       - run: npx vitest run test/windows-autosync.test.ts test/autosync.test.ts test/native-claude-large.test.ts test/native-claude.test.ts test/native-cache.test.ts
@@ -38,7 +61,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - run: npm install --ignore-scripts
+      - run: npm ci --ignore-scripts
       - run: npm run lint
       - run: npm test
       - run: npm run build
