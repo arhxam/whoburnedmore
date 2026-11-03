@@ -15,6 +15,7 @@ import type {
   ToolStat,
 } from "./shared.js";
 import { collectAttribution } from "./attribution.js";
+import { collectAutoclaw, AUTOCLAW_TOOL } from "./autoclaw.js";
 import { collectContinue } from "./continue.js";
 import { collectCursor } from "./cursor.js";
 import {
@@ -652,9 +653,9 @@ export type ProgressFn = (done: number, total: number, label: string) => void;
 /**
  * Total number of collection stages: the ccusage sources, plus the fixed extra
  * ticking tasks — sessions, blocks, cursor, attribution (4), and the native
- * non-ccusage readers cline, roo, continue (VSCODE_AGENTS.length + 1).
+ * non-ccusage readers cline, roo, continue, autoclaw (VSCODE_AGENTS.length + 2).
  */
-export const COLLECT_STAGES = SOURCES.length + 4 + VSCODE_AGENTS.length + 1;
+export const COLLECT_STAGES = SOURCES.length + 4 + VSCODE_AGENTS.length + 2;
 
 /**
  * A run is AUTHORITATIVE — safe to lower a stored requestCount fingerprint —
@@ -796,6 +797,25 @@ export async function collectAll(
     tick();
     return r;
   });
+  // AutoClaw (Z.ai's desktop agent) — a native reader over its OpenClaw session
+  // transcripts under `~/.openclaw-autoclaw/agents/*/sessions`. Best effort like
+  // cursor: a no-op (found:false) when AutoClaw isn't installed. A THROW is a
+  // bailed scan (like the Claude/Codex readers above), so it is marked timedOut
+  // rather than treated as "no data".
+  const autoclawTask = collectAutoclaw()
+    .catch(
+      () =>
+        ({
+          entries: [],
+          found: false,
+          filesScanned: 0,
+          timedOut: true,
+        }) as NativeCollectResult,
+    )
+    .then((r) => {
+      tick();
+      return r;
+    });
 
   const [
     sourceResults,
@@ -807,6 +827,7 @@ export async function collectAll(
     nativeCodex,
     vscodeResults,
     continueResult,
+    autoclawResult,
   ] = await Promise.all([
     sourceTasks,
     sessionTask,
@@ -817,6 +838,7 @@ export async function collectAll(
     nativeCodexTask,
     Promise.all(vscodeTasks),
     continueTask,
+    autoclawTask,
   ]);
 
   const native = { claude: nativeClaude, codex: nativeCodex };
@@ -874,6 +896,11 @@ export async function collectAll(
     entries.push(...continueResult.entries);
     toolsFound.push("continue");
   }
+  // AutoClaw (Z.ai) — additive; a clean no-op when it isn't installed.
+  if (autoclawResult.found && autoclawResult.entries.length > 0) {
+    entries.push(...autoclawResult.entries);
+    toolsFound.push(AUTOCLAW_TOOL);
+  }
 
   const { tools, skills, agent, sessionMessages, complete } = attribution;
   onProgress?.(COLLECT_STAGES, COLLECT_STAGES, "");
@@ -905,6 +932,7 @@ export async function collectAll(
     nativeCodex,
     ...vscodeResults.map(({ result }) => result),
     continueResult,
+    autoclawResult,
   );
   const storePath = provenanceStorePath();
   const reconciled = reconcileProvenance(
