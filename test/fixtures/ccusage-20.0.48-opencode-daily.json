@@ -1,0 +1,35 @@
+{
+  "daily": [
+    {
+      "cacheCreationTokens": 0,
+      "cacheReadTokens": 0,
+      "date": "2026-01-02",
+      "inputTokens": 1040,
+      "modelBreakdowns": [
+        {
+          "cacheCreationTokens": 0,
+          "cacheReadTokens": 0,
+          "cost": 0.06,
+          "inputTokens": 1040,
+          "modelName": "gpt-test",
+          "outputTokens": 44,
+          "storedCost": 0.06
+        }
+      ],
+      "modelsUsed": [
+        "gpt-test"
+      ],
+      "outputTokens": 44,
+      "totalCost": 0.06,
+      "totalTokens": 1084
+    }
+  ],
+  "totals": {
+    "cacheCreationTokens": 0,
+    "cacheReadTokens": 0,
+    "inputTokens": 1040,
+    "outputTokens": 44,
+    "totalCost": 0.06,
+    "totalTokens": 1084
+  }
+}
