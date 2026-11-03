@@ -397,7 +397,7 @@ function fromCachedSession(t: CachedSession): CodexSession {
  */
 export async function collectCodexNative(
   env = process.env,
-  opts: { budgetMs?: number; now?: () => number; cachePath?: string } = {},
+  opts: { budgetMs?: number; now?: () => number; cachePath?: string; maxFileBytes?: number } = {},
 ): Promise<NativeCollectResult> {
   const dirs = resolveCodexSessionsDirs(env);
   // Read every physical file so `legacyEntries` can reconstruct the exact old
@@ -442,6 +442,7 @@ export async function collectCodexNative(
     },
     deadline: now() + (opts.budgetMs ?? NATIVE_READ_BUDGET_MS),
     now,
+    maxFileBytes: opts.maxFileBytes,
   });
   if (!res.itemsByFile) {
     return {

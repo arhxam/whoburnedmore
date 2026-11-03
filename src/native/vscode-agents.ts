@@ -283,6 +283,7 @@ export interface CollectVscodeAgentOpts {
   budgetMs?: number;
   now?: () => number;
   cachePath?: string;
+  maxFileBytes?: number;
 }
 
 /**
@@ -309,6 +310,7 @@ export async function collectVscodeAgent(
     parseFile: (content) => parseVscodeAgentMessages(opts.tool, content).map(entryToRow),
     deadline: now() + (opts.budgetMs ?? NATIVE_READ_BUDGET_MS),
     now,
+    maxFileBytes: opts.maxFileBytes,
   });
   if (!res.itemsByFile) {
     return { entries: [], found: false, filesScanned: res.filesRead, timedOut: true };

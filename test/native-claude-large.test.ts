@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { appendFile, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -43,34 +43,65 @@ describe("large Claude transcripts", () => {
     } finally { await rm(dir, { recursive: true, force: true }); }
   }, 30_000);
 
-  it("rejects excessive retained request data without persisting or returning a partial corpus", async () => {
+  it("skips a transcript that exceeds the request budget without disabling the reader", async () => {
     const { dir, project, env } = await corpus();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const session = join(project, "session.jsonl");
+      const sibling = join(project, "sibling.jsonl");
       await writeFile(session, usage("first", 20) + "\n" + usage("second", 30));
+      await writeFile(sibling, usage("third", 7));
       // One small usage record fits, but retaining both crosses this test budget.
       const result = await collectClaudeNative(env, { maxRequestBytes: 400 });
-      expect(result).toMatchObject({ found: false, entries: [], timedOut: true });
-      expect(JSON.parse(await readFile(nativeCachePath("claude", env), "utf8")).files[session]).toBeUndefined();
+      expect(result.timedOut).not.toBe(true);
+      expect(result.found).toBe(true);
+      expect(result.entries.reduce((sum, entry) => sum + entry.outputTokens, 0)).toBe(7);
+      const cached = JSON.parse(await readFile(nativeCachePath("claude", env), "utf8")) as {
+        files: Record<string, { skipped?: boolean; items: unknown[] }>;
+      };
+      expect(cached.files[session]).toMatchObject({ skipped: true, items: [] });
+      expect(cached.files[sibling]?.skipped).not.toBe(true);
+      expect(warn.mock.calls.some((call) => String(call[0]).includes("skipping transcript"))).toBe(true);
+      const again = await collectClaudeNative(env, { maxRequestBytes: 400 });
+      expect(again.filesScanned).toBe(0);
+      expect(again.timedOut).not.toBe(true);
+      expect(again.entries).toEqual(result.entries);
       expect(await collectClaudeRequests(env, { maxRequestBytes: 400 }))
         .toEqual({ found: false, requests: [], timedOut: true });
-    } finally { await rm(dir, { recursive: true, force: true }); }
+    } finally {
+      warn.mockRestore();
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
-  it("rejects partial totals and stale cached usage when a single record exceeds the memory bound", async () => {
+  it("does not keep stale usage or disable later runs when one record is too large", async () => {
     const { dir, project, env } = await corpus();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const session = join(project, "session.jsonl");
+      const sibling = join(project, "sibling.jsonl");
       await writeFile(session, usage("request", 20) + "\n");
+      await writeFile(sibling, usage("other", 8));
       await collectClaudeNative(env);
       await appendFile(session, "x".repeat(1025));
       const result = await collectClaudeNative(env, { maxLineBytes: 1024 });
-      expect(result).toMatchObject({ found: false, entries: [], timedOut: true });
-      const cached = JSON.parse(await readFile(nativeCachePath("claude", env), "utf8"));
-      expect(cached.files[session]).toBeUndefined();
+      expect(result.found).toBe(true);
+      expect(result.timedOut).not.toBe(true);
+      expect(result.entries.reduce((sum, entry) => sum + entry.outputTokens, 0)).toBe(8);
+      const cached = JSON.parse(await readFile(nativeCachePath("claude", env), "utf8")) as {
+        files: Record<string, { skipped?: boolean; items: unknown[] }>;
+      };
+      expect(cached.files[session]).toMatchObject({ skipped: true, items: [] });
+      const warm = await collectClaudeNative(env, { maxLineBytes: 1024 });
+      expect(warm.filesScanned).toBe(0);
+      expect(warm.timedOut).not.toBe(true);
+      expect(warm.entries).toEqual(result.entries);
       const verify = await collectClaudeRequests(env, { maxFileBytes: 1024 });
       expect(verify).toEqual({ found: false, requests: [], timedOut: true });
-    } finally { await rm(dir, { recursive: true, force: true }); }
+    } finally {
+      warn.mockRestore();
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -123,7 +154,10 @@ describe("streaming cache completeness", () => {
       await symlink(target, path, "file");
       expect(await readFilesWithCache(options)).toMatchObject({ itemsByFile: null, incomplete: true });
       await rm(path);
-      expect(await readFilesWithCache(options)).toMatchObject({ itemsByFile: null, incomplete: true });
+      const gone = await readFilesWithCache(options);
+      expect(gone.itemsByFile).toEqual([]);
+      expect(gone.incomplete).toBeUndefined();
+      expect(gone.timedOut).toBe(false);
       await writeFile(path, "usage");
       expect(await readFilesWithCache({ ...options, streamFile: async () => { throw new Error("read failed"); } }))
         .toMatchObject({ itemsByFile: null, incomplete: true });

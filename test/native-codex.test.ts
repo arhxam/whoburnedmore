@@ -233,4 +233,20 @@ describe("resolveCodexSessionsDir", () => {
     expect(result.entries.reduce((sum, e) => sum + total(e), 0)).toBe(400);
     expect(result.legacyEntries!.reduce((sum, e) => sum + total(e), 0)).toBe(550);
   });
+
+  it("marks diagnostics incomplete when a rollout is over the byte cap", async () => {
+    const home = await mkdtemp(join(tmpdir(), "wbm-codex-cap-"));
+    const sessions = join(home, "sessions", "2026", "06", "10");
+    await mkdir(sessions, { recursive: true });
+    await writeFile(join(sessions, "rollout-small.jsonl"), [meta("gpt-5-codex"), tokenCount("2026-06-10T12:00:00Z", { input: 10, output: 5 })].join("\n"));
+    await writeFile(join(sessions, "rollout-big.jsonl"), "x".repeat(64));
+    const result = await collectCodexNative(
+      { CODEX_HOME: home, WHOBURNEDMORE_CONFIG_DIR: home } as NodeJS.ProcessEnv,
+      { cachePath: join(home, "cache.json"), maxFileBytes: 32, budgetMs: 5_000 },
+    );
+    expect(result.found).toBe(false);
+    expect(result.timedOut).toBe(true);
+    expect(result.entries).toEqual([]);
+    expect(result.legacyEntries).toBeUndefined();
+  });
 });

@@ -377,8 +377,11 @@ function* splitLines(content: string): Generator<string> {
 /**
  * Read every Claude Code transcript on disk and aggregate it. JSONL is streamed
  * with a per-record memory bound, so long sessions have no total-file ceiling.
- * An incomplete file or missing config dir yields `found:false` so the caller
- * can fall back to ccusage without submitting authoritative partial totals.
+ * A missing config dir yields `found:false`. One permanently bad transcript
+ * (permission denied, or a record past the memory bound) is cached as a skip
+ * and does not turn the reader off on later runs. A timeout or an identity
+ * failure still yields `found:false` so the caller can fall back to ccusage
+ * without submitting authoritative partial totals.
  *
  * Incremental via the persistent per-file cache: transcripts are append-only,
  * so files whose (size, mtime) are unchanged reuse their cached parse and only
