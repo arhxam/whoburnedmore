@@ -49,6 +49,8 @@ import { collectClaudeRequests } from "./native/claude.js";
 import { prepareVerifyUpload } from "./verify-upload.js";
 import {
   clearAuth,
+  clearStoredSession,
+  clearVerifyPrompted,
   defaultConfigDir,
   deviceKeyHash,
   ensureAnonKey,
@@ -56,11 +58,21 @@ import {
   needsDeviceBind,
   recordDeviceBound,
   recordSync,
+  recordVerifyPrompted,
   saveAuth,
 } from "./config.js";
 import { agentStatusReport } from "./status.js";
 import { renderDashboardHtml, writeLocalDashboard } from "./local-dashboard.js";
-import { sanitizeServerText, signedInNextStepLines } from "./output.js";
+import {
+  acceptedConfirm,
+  envDisablesDashboardOpen,
+  runIntroLines,
+  sanitizeServerText,
+  shouldOpenDashboard,
+  signedInNextStepLines,
+  suppressionSignature,
+  whoamiLine,
+} from "./output.js";
 import { publishLocal } from "./publish.js";
 
 const require = createRequire(import.meta.url);
@@ -158,12 +170,24 @@ function openBrowser(url: string): void {
   spawn(cmd, args, { stdio: "ignore", detached: true }).unref();
 }
 
-async function confirm(question: string): Promise<boolean> {
+async function confirm(question: string, defaultYes = true): Promise<boolean> {
   if (!process.stdin.isTTY) return false;
   const rl = createInterface({ input: process.stdin, output: process.stdout });
-  const answer = (await rl.question(`${question} ${pc.dim("[Y/n]")} `)).trim();
+  const hint = defaultYes ? "[Y/n]" : "[y/N]";
+  const answer = await rl.question(`${question} ${pc.dim(hint)} `);
   rl.close();
-  return answer === "" || /^y(es)?$/i.test(answer);
+  return acceptedConfirm(answer, defaultYes);
+}
+
+function dashboardShouldOpen(flags: Flags, signedInThisRun: boolean): boolean {
+  return shouldOpenDashboard({
+    stdoutIsTTY: Boolean(process.stdout.isTTY),
+    noOpen:
+      flags.noOpen === true ||
+      envDisablesDashboardOpen(process.env.WHOBURNEDMORE_NO_OPEN),
+    signedInThisRun,
+    open: flags.open === true,
+  });
 }
 
 interface Flags {
@@ -171,6 +195,10 @@ interface Flags {
   noSubmit: boolean;
   local: boolean;
   quiet: boolean;
+  /** Open the web dashboard even when this run did not sign in. */
+  open?: boolean;
+  /** Never open a browser for the web dashboard. */
+  noOpen?: boolean;
   /** Friends-board code from `--board=<code>`: join it on submit and compare. */
   board?: string;
   /** Organization slug from `--org=<slug>`: join it on submit. */
@@ -197,19 +225,23 @@ function showLocalDashboard(payload: SubmitPayload): void {
 }
 
 async function run(flags: Flags): Promise<void> {
+  // Set when device sign-in completes during this process. A stored token does
+  // not count: returning runs stay in the terminal unless `--open` is set.
+  let signedInThisRun = false;
   if (!flags.quiet) {
     printBanner();
     console.log(pc.dim(`  ${PUBLIC_PRODUCT_NAME} v${VERSION} · ${flags.local ? "local mode" : apiBase()}`));
-    // No prompt — just a one-line heads-up of exactly what's about to happen and
-    // how to undo it. The dashboard is claimable/private/removable after the
-    // fact, so we don't block the happy path on a confirmation.
+    // The two privacy lines are a first-run explanation. A returning session
+    // already accepted them, so it gets one "Signed in as" line instead.
     if (!flags.dryRun && !flags.noSubmit && !flags.local) {
-      console.log(
-        pc.dim("  Counting your token usage and posting your rank — only daily totals leave your machine, never your prompts or code."),
-      );
-      console.log(
-        pc.dim("  (`--local` keeps it fully offline · `private`/`remove` pull it anytime · details: whoburnedmore.com/trust)"),
-      );
+      const known = loadConfig();
+      const intro = runIntroLines({
+        handle: known?.handle,
+        signedIn: Boolean(known?.cliToken || known?.handle),
+      });
+      for (const line of intro.lines) {
+        console.log(intro.dim ? pc.dim(line) : line);
+      }
     }
     console.log();
   }
@@ -290,9 +322,18 @@ async function run(flags: Flags): Promise<void> {
     if (!flags.quiet && process.stdin.isTTY) {
       await publishLocal(payload, {
         confirm,
-        signIn: ensureSignedIn,
-        submit: (token, p) => submitLocalPublish(token, p),
-        openBrowser,
+        signIn: async () => {
+          const auth = await ensureSignedIn();
+          if (auth?.fresh) signedInThisRun = true;
+          return auth;
+        },
+        submit: (token, p) =>
+          submitLocalPublish(token, p, () => {
+            signedInThisRun = true;
+          }),
+        openBrowser: (url) => {
+          if (dashboardShouldOpen(flags, signedInThisRun)) openBrowser(url);
+        },
         log: (line) => console.log(pc.dim(line)),
       });
     }
@@ -320,7 +361,7 @@ async function run(flags: Flags): Promise<void> {
   const canSignIn = !flags.quiet && Boolean(process.stdout.isTTY);
 
   if (cfg?.cliToken) {
-    await submitSignedIn(cfg.cliToken, payload, flags, canSignIn);
+    await submitSignedIn(cfg.cliToken, payload, flags, canSignIn, signedInThisRun);
     return;
   }
 
@@ -333,11 +374,11 @@ async function run(flags: Flags): Promise<void> {
   const healed = cfg?.refreshToken ? await refreshCliToken(cfg.refreshToken) : null;
   if (healed) {
     saveAuth(undefined, { cliToken: healed.token, handle: healed.handle });
-    await submitSignedIn(healed.token, payload, flags, canSignIn);
+    await submitSignedIn(healed.token, payload, flags, canSignIn, false);
   } else if (canSignIn) {
     const auth = await ensureSignedIn();
     if (!auth) return; // sign-in aborted/timed out — nothing submitted
-    await submitSignedIn(auth.token, payload, flags, canSignIn);
+    await submitSignedIn(auth.token, payload, flags, canSignIn, auth.fresh);
   } else if (!flags.quiet) {
     // Foreground but no usable terminal (CI/piped) and no signed-in token — we
     // can't run the browser sign-in here. The anonymous / device-key submit path
@@ -379,9 +420,14 @@ async function refreshCliTokenFromConfig(): Promise<{
  * returns the token. Returns null if it times out or the user never approves.
  * Only call this with a TTY; background runs must never reach it.
  */
-async function ensureSignedIn(): Promise<{ token: string; handle: string } | null> {
+async function ensureSignedIn(): Promise<{
+  token: string;
+  handle: string;
+  /** True only when this call completed the device flow. A stored token is not fresh. */
+  fresh: boolean;
+} | null> {
   const cfg = loadConfig();
-  if (cfg?.cliToken) return { token: cfg.cliToken, handle: cfg.handle ?? "" };
+  if (cfg?.cliToken) return { token: cfg.cliToken, handle: cfg.handle ?? "", fresh: false };
 
   let dev;
   try {
@@ -417,7 +463,7 @@ async function ensureSignedIn(): Promise<{ token: string; handle: string } | nul
         refreshToken: res.refreshToken,
       });
       console.log(pc.green(`  ✓ Signed in as @${sanitizeServerText(res.handle)}.`));
-      return { token: res.token, handle: res.handle };
+      return { token: res.token, handle: res.handle, fresh: true };
     }
     if (res.status === "expired") break;
   }
@@ -438,7 +484,7 @@ async function withAuthRetry<T>(
   token: string,
   call: (token: string) => Promise<T>,
   opts: { interactive: boolean },
-): Promise<{ value: T; token: string } | null> {
+): Promise<{ value: T; token: string; signedInThisRun: boolean } | null> {
   const attempt = async (
     next: string,
   ): Promise<{ ok: true; value: T } | { ok: false }> => {
@@ -451,13 +497,13 @@ async function withAuthRetry<T>(
   };
 
   const first = await attempt(token);
-  if (first.ok) return { value: first.value, token };
+  if (first.ok) return { value: first.value, token, signedInThisRun: false };
 
   const healed = await refreshCliTokenFromConfig();
   if (healed) {
     saveAuth(undefined, { cliToken: healed.token, handle: healed.handle });
     const retried = await attempt(healed.token);
-    if (retried.ok) return { value: retried.value, token: healed.token };
+    if (retried.ok) return { value: retried.value, token: healed.token, signedInThisRun: false };
   }
 
   clearAuth();
@@ -465,7 +511,7 @@ async function withAuthRetry<T>(
   console.log(pc.yellow("  Your session expired — signing you in again."));
   const auth = await ensureSignedIn();
   if (!auth) return null;
-  return { value: await call(auth.token), token: auth.token };
+  return { value: await call(auth.token), token: auth.token, signedInThisRun: auth.fresh };
 }
 
 /**
@@ -477,6 +523,7 @@ async function withAuthRetry<T>(
 export async function submitLocalPublish(
   token: string,
   payload: SubmitPayload,
+  onSignedIn?: () => void,
 ): Promise<SubmitResponse | null> {
   const authed = await withAuthRetry(
     token,
@@ -484,6 +531,7 @@ export async function submitLocalPublish(
     { interactive: Boolean(process.stdout.isTTY) },
   );
   if (!authed) return null;
+  if (authed.signedInThisRun) onSignedIn?.();
   try {
     recordSync();
   } catch {
@@ -503,6 +551,7 @@ export async function submitSignedIn(
   payload: SubmitPayload,
   flags: Flags,
   interactive: boolean,
+  signedInThisRun = false,
 ): Promise<void> {
   const authed = await withAuthRetry(
     token,
@@ -526,9 +575,8 @@ export async function submitSignedIn(
       pc.green("  ✓ Synced securely.") +
         pc.dim(" Only your daily totals left this machine — never your prompts, code, or file names."),
     );
-    // Delisted? Surface it right here and offer the one-step fix in the same
-    // session — the user is already signed in and at the keyboard, so this turns
-    // "discover you're gone → hunt for the fix → open a terminal" into one prompt.
+    // Delisted? Surface it right here. "Verify now?" defaults to No and is asked
+    // once per suppression event, so a returning run doesn't nag every time.
     if (result.suppressed) {
       console.log();
       console.log(
@@ -541,16 +589,25 @@ export async function submitSignedIn(
           "  Verify your usage to get back on — this sends a detailed per-request breakdown (timestamps + token counts, never your prompts or code).",
         ),
       );
-      if (process.stdin.isTTY && (await confirm("  Verify now?"))) {
-        await runVerify();
-        afterSubmitChores(flags);
-        return;
+      const signature = suppressionSignature(result);
+      const alreadyAsked =
+        signature !== null && loadConfig()?.verifyPromptedFor === signature;
+      if (!alreadyAsked && signature && process.stdin.isTTY) {
+        const verifyNow = await confirm("  Verify now?", false);
+        recordVerifyPrompted(signature);
+        if (verifyNow) {
+          await runVerify();
+          afterSubmitChores(flags);
+          return;
+        }
       }
       console.log(
         pc.dim(
           "  Run `npx whoburnedmore verify` anytime, or appeal at whoburnedmore.com/appeal.",
         ),
       );
+    } else {
+      clearVerifyPrompted();
     }
     // Name any days the anomaly screen pulled off the board on this run. The rows
     // are kept (recoverable) — this makes the removal visible instead of silent,
@@ -571,18 +628,27 @@ export async function submitSignedIn(
         ),
       );
     }
-    if (isTrustedWebUrl(baseUrl)) {
+    const openDashboard = dashboardShouldOpen(
+      flags,
+      signedInThisRun || authed.signedInThisRun,
+    );
+    if (openDashboard && isTrustedWebUrl(baseUrl)) {
       console.log(pc.dim("  Opening your dashboard in your browser…"));
       openBrowser(baseUrl);
-    } else {
+    } else if (openDashboard) {
       console.log(
         pc.dim("  The server returned an unexpected dashboard address, so it was NOT auto-opened. Open it yourself only if you trust it:"),
       );
       console.log(`  ${sanitizeServerText(baseUrl)}`);
     }
-    for (const line of signedInNextStepLines(result)) {
-      if (line.includes("→")) console.log(pc.bold(line));
-      else console.log(line);
+    for (const line of signedInNextStepLines({
+      handle: loadConfig()?.handle,
+      rank: result.rank,
+      profileUrl: result.profileUrl,
+      boardUrl: result.boardUrl,
+      orgBoardUrl: result.orgBoardUrl,
+    })) {
+      console.log(line);
     }
   }
   afterSubmitChores(flags);
@@ -629,6 +695,9 @@ async function submitFromBoundDevice(
  * background-sync status footer. Best-effort — never fails an already-good submit.
  */
 function afterSubmitChores(flags: Flags): void {
+  // `uninstall-sync` sets autoSyncOptOut. Honor it here as well as inside
+  // reconcileAutoSync, so a later submit neither reinstalls nor claims sync is on.
+  const optedOut = loadConfig()?.autoSyncOptOut === true;
   if (flags.quiet) {
     // Background ticks must self-heal drift too (stale node path, changed
     // interval) — a machine that only ever runs via launchd would otherwise
@@ -636,20 +705,20 @@ function afterSubmitChores(flags: Flags): void {
     // INSTALL from a quiet run: cron/daemon-driven syncs on machines that
     // never opted into the launchd agent must not sprout one.
     try {
-      if (autoSyncInstalled()) reconcileAutoSync();
+      if (!optedOut && autoSyncInstalled()) reconcileAutoSync();
     } catch {
       // ignore — best-effort, the submit already succeeded.
     }
     return;
   }
   try {
-    reconcileAutoSync();
+    if (!optedOut) reconcileAutoSync();
   } catch {
     // ignore — the submit already succeeded; user can `install-sync` manually.
   }
   console.log();
   console.log(
-    autoSyncInstalled()
+    !optedOut && autoSyncInstalled()
       ? pc.dim("  Background sync is on — your page updates automatically every 15 min (`npx whoburnedmore uninstall-sync` to stop).")
       : pc.dim("  Re-run anytime to update your page."),
   );
@@ -711,13 +780,19 @@ async function linkServerInstall(token: string | undefined): Promise<void> {
   });
 
   try {
-    const action = reconcileAutoSync();
-    if (action === "installed") {
-      console.log(pc.dim("  Background sync installed; this machine will refresh every 15 min."));
-    } else if (action === "reinstalled") {
-      console.log(pc.dim("  Background sync repaired; this machine will refresh every 15 min."));
+    if (loadConfig()?.autoSyncOptOut) {
+      console.log(
+        pc.dim("  Background sync stays off (`npx whoburnedmore install-sync` to turn it on)."),
+      );
     } else {
-      console.log(pc.dim("  Background sync is already configured."));
+      const action = reconcileAutoSync();
+      if (action === "installed") {
+        console.log(pc.dim("  Background sync installed; this machine will refresh every 15 min."));
+      } else if (action === "reinstalled") {
+        console.log(pc.dim("  Background sync repaired; this machine will refresh every 15 min."));
+      } else {
+        console.log(pc.dim("  Background sync is already configured."));
+      }
     }
   } catch {
     console.log(pc.dim("  Linked, but background sync could not be installed automatically. Run `npx whoburnedmore install-sync` to retry."));
@@ -1007,6 +1082,51 @@ export async function runRemove(): Promise<void> {
   console.log(pc.dim("  Run `npx whoburnedmore` anytime to start fresh."));
 }
 
+export async function runWhoami(): Promise<void> {
+  let cfg = loadConfig();
+  if (!cfg?.cliToken) {
+    const healed = await refreshCliTokenFromConfig();
+    if (healed) {
+      saveAuth(undefined, { cliToken: healed.token, handle: healed.handle });
+      cfg = loadConfig();
+    }
+  }
+  console.log(whoamiLine(cfg?.handle, Boolean(cfg?.cliToken)));
+}
+
+export async function runLogin(): Promise<void> {
+  const cfg = loadConfig();
+  if (cfg?.cliToken) {
+    const who = cfg.handle ? `@${sanitizeServerText(cfg.handle)}` : "this machine";
+    console.log(`  Already signed in as ${who}.`);
+    return;
+  }
+  const healed = await refreshCliTokenFromConfig();
+  if (healed) {
+    saveAuth(undefined, { cliToken: healed.token, handle: healed.handle });
+    const who = healed.handle ? `@${sanitizeServerText(healed.handle)}` : "this machine";
+    console.log(`  Signed in as ${who}.`);
+    return;
+  }
+  if (!process.stdout.isTTY) {
+    console.log(
+      pc.yellow("  Sign in from an interactive terminal: `npx whoburnedmore login`."),
+    );
+    return;
+  }
+  await ensureSignedIn();
+}
+
+export async function runLogout(): Promise<void> {
+  const cfg = loadConfig();
+  if (!cfg?.cliToken && !cfg?.handle && !cfg?.refreshToken) {
+    console.log("  Not signed in.");
+    return;
+  }
+  clearStoredSession();
+  console.log("  Signed out on this machine. Your leaderboard data is unchanged.");
+}
+
 async function main(): Promise<void> {
   const major = Number(process.versions.node.split(".")[0]);
   if (major < 20) {
@@ -1027,6 +1147,10 @@ async function main(): Promise<void> {
     noSubmit: args.includes("--no-submit"),
     local: args.includes("--local"),
     quiet: command === "sync",
+    open: args.includes("--open"),
+    noOpen:
+      args.includes("--no-open") ||
+      envDisablesDashboardOpen(process.env.WHOBURNEDMORE_NO_OPEN),
     board: parseBoard(args),
     org: parseOrg(args),
     orgCode: parsePass(args),
@@ -1074,6 +1198,15 @@ async function main(): Promise<void> {
       break;
     case "remove":
       await runRemove();
+      break;
+    case "whoami":
+      await runWhoami();
+      break;
+    case "login":
+      await runLogin();
+      break;
+    case "logout":
+      await runLogout();
       break;
     case "install-sync":
       console.log(`  ${installAutoSync()}`);

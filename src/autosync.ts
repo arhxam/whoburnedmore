@@ -11,7 +11,7 @@ import {
 } from "node:fs";
 import { homedir, platform } from "node:os";
 import { dirname, join, posix, resolve, win32 } from "node:path";
-import { defaultConfigDir } from "./config.js";
+import { defaultConfigDir, loadConfig, setAutoSyncOptOut } from "./config.js";
 import {
   installWindowsSync, readWindowsLauncher, readWindowsTask, resolveWindowsNpmCli,
   uninstallWindowsSync, windowsTaskDrift, windowsTaskEnabled,
@@ -349,6 +349,8 @@ export function reconcileAction(state: DriftState): "install" | "noop" {
 
 /** Install the background sync for the current platform. Returns a human description. */
 export function installAutoSync(): string {
+  // An explicit install is the way back on after `uninstall-sync`.
+  setAutoSyncOptOut(false);
   const os = platform();
   mkdirSync(defaultConfigDir(), { recursive: true });
   if (os === "darwin") {
@@ -543,6 +545,9 @@ function tryInstallSystemd(): string | null {
 }
 
 export function uninstallAutoSync(): string {
+  // Record the opt-out before touching the scheduler, so a failed uninstall
+  // still keeps the next submit from installing sync again.
+  setAutoSyncOptOut(true);
   const os = platform();
   if (os === "darwin") {
     const plistPath = launchAgentPath();
@@ -665,6 +670,9 @@ export function autoSyncDrift(): DriftState {
  * reconcile failure must never fail a submit.
  */
 export function reconcileAutoSync(): "installed" | "reinstalled" | "noop" {
+  // `uninstall-sync` must stay off. Heal-on-run would otherwise see an absent
+  // agent and install it again on the next submit.
+  if (loadConfig()?.autoSyncOptOut === true) return "noop";
   const state = autoSyncDrift();
   if (reconcileAction(state) === "noop") return "noop";
   installAutoSync();

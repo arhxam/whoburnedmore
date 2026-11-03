@@ -35,6 +35,11 @@ export interface CliConfig {
    *  token self-heal via `/v1/auth/cli/refresh`, so the CLI binds once after
    *  sign-in / on the first signed-in submit and stamps this to stop re-asking. */
   deviceBoundAt?: number;
+  /** Set by `uninstall-sync`. While true, heal-on-run must not turn background
+   *  sync back on. `install-sync` clears it. */
+  autoSyncOptOut?: boolean;
+  /** Suppression signature we already asked "Verify now?" about. */
+  verifyPromptedFor?: string;
 }
 
 /** Stable, non-secret identity the API compares with its bound-device hashes. */
@@ -83,6 +88,9 @@ export function loadConfig(dir: string = defaultConfigDir()): CliConfig | null {
     ) {
       config.deviceBoundAt = parsed.deviceBoundAt;
     }
+    if (parsed.autoSyncOptOut === true) config.autoSyncOptOut = true;
+    if (typeof parsed.verifyPromptedFor === "string" && parsed.verifyPromptedFor)
+      config.verifyPromptedFor = parsed.verifyPromptedFor;
     return Object.keys(config).length > 0 ? config : null;
   } catch {
     return null;
@@ -169,10 +177,54 @@ export function saveAuth(
 /**
  * Drop the stored CLI token + handle (e.g. after the server rejects it as
  * expired/invalid), preserving everything else so the machine can re-sign-in.
+ * The refresh credential stays: a 401 can still heal without a browser.
  */
 export function clearAuth(dir: string = defaultConfigDir()): void {
   const config = loadConfig(dir);
   if (!config?.cliToken && !config?.handle) return;
   const { cliToken: _t, handle: _h, ...rest } = config;
+  saveConfig(dir, rest);
+}
+
+/**
+ * Sign out on this machine. Unlike `clearAuth`, this also drops the refresh
+ * credential so the next run cannot silently mint a new bearer token.
+ */
+export function clearStoredSession(dir: string = defaultConfigDir()): void {
+  const config = loadConfig(dir);
+  if (!config?.cliToken && !config?.handle && !config?.refreshToken) return;
+  const { cliToken: _t, handle: _h, refreshToken: _r, ...rest } = config;
+  saveConfig(dir, rest);
+}
+
+/** Remember that `uninstall-sync` should stay off, or clear that choice. */
+export function setAutoSyncOptOut(
+  optOut: boolean,
+  dir: string = defaultConfigDir(),
+): void {
+  const config = loadConfig(dir) ?? {};
+  if (optOut) {
+    saveConfig(dir, { ...config, autoSyncOptOut: true });
+    return;
+  }
+  if (config.autoSyncOptOut !== true) return;
+  const { autoSyncOptOut: _dropped, ...rest } = config;
+  saveConfig(dir, rest);
+}
+
+/** Remember which suppression event already got a "Verify now?" prompt. */
+export function recordVerifyPrompted(
+  signature: string,
+  dir: string = defaultConfigDir(),
+): void {
+  const config = loadConfig(dir) ?? {};
+  saveConfig(dir, { ...config, verifyPromptedFor: signature });
+}
+
+/** Forget the prompt once the account is no longer suppressed. */
+export function clearVerifyPrompted(dir: string = defaultConfigDir()): void {
+  const config = loadConfig(dir);
+  if (!config?.verifyPromptedFor) return;
+  const { verifyPromptedFor: _dropped, ...rest } = config;
   saveConfig(dir, rest);
 }

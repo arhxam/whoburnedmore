@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   clearAuth,
+  clearStoredSession,
+  clearVerifyPrompted,
   defaultConfigDir,
   deviceKeyHash,
   ensureAnonKey,
@@ -11,6 +13,8 @@ import {
   needsDeviceBind,
   recordDeviceBound,
   recordSync,
+  recordVerifyPrompted,
+  setAutoSyncOptOut,
   recordLaunchNotificationDelivered,
   saveAuth,
   saveConfig,
@@ -203,6 +207,37 @@ describe("config", () => {
       JSON.stringify({ anonKey: "a".repeat(64), deviceBoundAt: "nope" }),
     );
     expect(loadConfig(dir)).toEqual({ anonKey: "a".repeat(64) });
+  });
+});
+
+describe("session and sync choices", () => {
+  it("logout drops the refresh credential that clearAuth keeps", () => {
+    const dir = mkdtempSync(join(tmpdir(), "wbm-test-"));
+    saveConfig(dir, {
+      anonKey: "k".repeat(64),
+      cliToken: "tok",
+      handle: "ada",
+      refreshToken: "refresh",
+      deviceBoundAt: 5,
+    });
+    clearStoredSession(dir);
+    expect(loadConfig(dir)).toEqual({
+      anonKey: "k".repeat(64),
+      deviceBoundAt: 5,
+    });
+  });
+
+  it("round-trips the background-sync opt-out and the verify prompt marker", () => {
+    const dir = mkdtempSync(join(tmpdir(), "wbm-test-"));
+    setAutoSyncOptOut(true, dir);
+    recordVerifyPrompted("suppressed:2026-06-01", dir);
+    expect(loadConfig(dir)).toEqual({
+      autoSyncOptOut: true,
+      verifyPromptedFor: "suppressed:2026-06-01",
+    });
+    setAutoSyncOptOut(false, dir);
+    clearVerifyPrompted(dir);
+    expect(loadConfig(dir)).toBeNull();
   });
 });
 
