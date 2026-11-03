@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { platform } from "node:os";
-import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createInterface } from "node:readline/promises";
 import pc from "picocolors";
-import type { SubmitPayload } from "./shared.js";
+import type { SubmitPayload, SubmitResponse } from "./shared.js";
 import {
   applyScope,
   hasUnsafeInstallTokenArg,
@@ -291,19 +291,7 @@ async function run(flags: Flags): Promise<void> {
       await publishLocal(payload, {
         confirm,
         signIn: ensureSignedIn,
-        submit: async (token, p) => {
-          // Use the same bind-before-submit path as a normal signed-in run. This
-          // also attaches the just-created device hash to first-run Codex proof
-          // metadata; binding after the write made a valid first correction fail
-          // closed and left the inflated total in place.
-          const result = await submitFromBoundDevice(token, p);
-          try {
-            recordSync();
-          } catch {
-            /* best-effort */
-          }
-          return result;
-        },
+        submit: (token, p) => submitLocalPublish(token, p),
         openBrowser,
         log: (line) => console.log(pc.dim(line)),
       });
@@ -440,39 +428,89 @@ async function ensureSignedIn(): Promise<{ token: string; handle: string } | nul
 }
 
 /**
- * Submit as a signed-in user via the authenticated /v1/submit path. On a 401 the
- * stored token is expired/invalid: first try the SILENT recovery (mint a fresh
- * token from this machine's bound device key — survives server-side JWT secret
- * rotations with zero human involvement), then, if interactive, re-sign-in once
- * and retry; unattended and unhealable, give up quietly (the next interactive
+ * On a 401, refresh the stored CLI token and retry the call once. If the refresh
+ * fails — or the refreshed token is rejected too — drop the dead sign-in and,
+ * when someone is at the terminal, run device sign-in and retry with that token.
+ * Returns null when recovery stops (unattended, or the person never approves).
+ * A successful refresh does not ask the person to sign in again.
+ */
+async function withAuthRetry<T>(
+  token: string,
+  call: (token: string) => Promise<T>,
+  opts: { interactive: boolean },
+): Promise<{ value: T; token: string } | null> {
+  const attempt = async (
+    next: string,
+  ): Promise<{ ok: true; value: T } | { ok: false }> => {
+    try {
+      return { ok: true, value: await call(next) };
+    } catch (err) {
+      if (err instanceof UnauthorizedError) return { ok: false };
+      throw err;
+    }
+  };
+
+  const first = await attempt(token);
+  if (first.ok) return { value: first.value, token };
+
+  const healed = await refreshCliTokenFromConfig();
+  if (healed) {
+    saveAuth(undefined, { cliToken: healed.token, handle: healed.handle });
+    const retried = await attempt(healed.token);
+    if (retried.ok) return { value: retried.value, token: healed.token };
+  }
+
+  clearAuth();
+  if (!opts.interactive) return null;
+  console.log(pc.yellow("  Your session expired — signing you in again."));
+  const auth = await ensureSignedIn();
+  if (!auth) return null;
+  return { value: await call(auth.token), token: auth.token };
+}
+
+/**
+ * `--local` publish uses the same bind-before-submit path and 401 recovery as a
+ * normal signed-in run. Binding before the write attaches the device hash to
+ * first-run Codex proof metadata; binding after the write made a valid first
+ * correction fail closed and left the inflated total in place.
+ */
+export async function submitLocalPublish(
+  token: string,
+  payload: SubmitPayload,
+): Promise<SubmitResponse | null> {
+  const authed = await withAuthRetry(
+    token,
+    (next) => submitFromBoundDevice(next, payload),
+    { interactive: Boolean(process.stdout.isTTY) },
+  );
+  if (!authed) return null;
+  try {
+    recordSync();
+  } catch {
+    /* best-effort — never fail a submit over a freshness stamp */
+  }
+  return authed.value;
+}
+
+/**
+ * Submit as a signed-in user via the authenticated /v1/submit path. On a 401,
+ * `withAuthRetry` refreshes once and otherwise re-signs-in when this run is
+ * interactive. Unattended and unhealable, give up quietly (the next interactive
  * run re-auths).
  */
-async function submitSignedIn(
+export async function submitSignedIn(
   token: string,
   payload: SubmitPayload,
   flags: Flags,
   interactive: boolean,
 ): Promise<void> {
-  let result;
-  try {
-    result = await submitFromBoundDevice(token, payload);
-  } catch (err) {
-    if (err instanceof UnauthorizedError) {
-      const healed = await refreshCliTokenFromConfig();
-      if (healed) {
-        saveAuth(undefined, { cliToken: healed.token, handle: healed.handle });
-        result = await submitFromBoundDevice(healed.token, payload);
-      } else {
-        clearAuth();
-        if (!interactive) return; // background can't re-auth — stay silent
-        const auth = await ensureSignedIn();
-        if (!auth) return;
-        result = await submitFromBoundDevice(auth.token, payload);
-      }
-    } else {
-      throw err;
-    }
-  }
+  const authed = await withAuthRetry(
+    token,
+    (next) => submitFromBoundDevice(next, payload),
+    { interactive },
+  );
+  if (!authed) return;
+  const result = authed.value;
 
   try {
     recordSync();
@@ -768,7 +806,7 @@ async function runDaemon(): Promise<void> {
  * operator review. Local logs are unsigned, so this evidence never auto-relists
  * an account by itself. Requires sign-in (it's tied to the moderated account).
  */
-async function runVerify(): Promise<void> {
+export async function runVerify(): Promise<void> {
   printBanner();
   console.log();
   console.log(pc.bold("  Verify your usage to get back on the leaderboard."));
@@ -779,21 +817,9 @@ async function runVerify(): Promise<void> {
   );
 
   // Verify is tied to the delisted account, so it requires sign-in.
-  const cfg = loadConfig();
-  let token = cfg?.cliToken;
-  if (!token) {
-    if (!process.stdout.isTTY) {
-      console.log(
-        pc.yellow(
-          "  Sign in first — run `npx whoburnedmore verify` in an interactive terminal.",
-        ),
-      );
-      return;
-    }
-    const auth = await ensureSignedIn();
-    if (!auth) return;
-    token = auth.token;
-  }
+  const auth = await requireSignedIn("verify");
+  if (!auth) return;
+  const token = auth.token;
 
   if (process.stdin.isTTY) {
     const ok = await confirm("\n  Send this breakdown to verify your usage?");
@@ -829,25 +855,27 @@ async function runVerify(): Promise<void> {
       `  Sending ${records.length} request records for analysis${truncated ? " (most recent, sampled)" : ""}…`,
     ),
   );
-  let result;
-  try {
-    result = await verifyUsage(token, {
-      cliVersion: VERSION,
-      requests: records,
-      ...(truncated ? { truncated: true } : {}),
-    });
-  } catch (err) {
-    if (err instanceof UnauthorizedError) {
-      clearAuth();
+  const authed = await withAuthRetry(
+    token,
+    (next) =>
+      verifyUsage(next, {
+        cliVersion: VERSION,
+        requests: records,
+        ...(truncated ? { truncated: true } : {}),
+      }),
+    { interactive: Boolean(process.stdout.isTTY) },
+  );
+  if (!authed) {
+    if (!process.stdout.isTTY) {
       console.log(
         pc.yellow(
           "  Your sign-in expired — run `npx whoburnedmore verify` again to retry.",
         ),
       );
-      return;
     }
-    throw err;
+    return;
   }
+  const result = authed.value;
 
   console.log();
   const line = `  ${sanitizeServerText(result.message)}`;
@@ -888,24 +916,26 @@ async function requireSignedIn(
 }
 
 /** `npx whoburnedmore private` / `public`: flip the leaderboard listing. */
-async function runVisibility(listed: boolean): Promise<void> {
-  const auth = await requireSignedIn(listed ? "public" : "private");
+export async function runVisibility(listed: boolean): Promise<void> {
+  const commandName = listed ? "public" : "private";
+  const auth = await requireSignedIn(commandName);
   if (!auth) return;
-  let res;
-  try {
-    res = await setVisibility(auth.token, listed);
-  } catch (err) {
-    if (err instanceof UnauthorizedError) {
-      clearAuth();
+  const authed = await withAuthRetry(
+    auth.token,
+    (next) => setVisibility(next, listed),
+    { interactive: Boolean(process.stdout.isTTY) },
+  );
+  if (!authed) {
+    if (!process.stdout.isTTY) {
       console.log(
         pc.yellow(
-          `  Your sign-in expired — run \`npx whoburnedmore ${listed ? "public" : "private"}\` again to retry.`,
+          `  Your sign-in expired — run \`npx whoburnedmore ${commandName}\` again to retry.`,
         ),
       );
-      return;
     }
-    throw err;
+    return;
   }
+  const res = authed.value;
   if (!listed) {
     console.log("  ✓ You're off the public leaderboard. `npx whoburnedmore public` puts you back.");
     return;
@@ -931,7 +961,7 @@ async function runVisibility(listed: boolean): Promise<void> {
  * full local snapshot) and drops the local sign-in. Account deletion itself
  * lives on the web dashboard — a machine token can't destroy the account.
  */
-async function runRemove(): Promise<void> {
+export async function runRemove(): Promise<void> {
   if (!process.stdin.isTTY) {
     console.log(
       pc.yellow("  `remove` deletes data, so it needs an interactive terminal to confirm."),
@@ -953,19 +983,18 @@ async function runRemove(): Promise<void> {
     console.log(pc.dim("  Cancelled — nothing was deleted."));
     return;
   }
-  let res;
-  try {
-    res = await removeUsage(auth.token);
-  } catch (err) {
-    if (err instanceof UnauthorizedError) {
-      clearAuth();
+  const authed = await withAuthRetry(auth.token, (next) => removeUsage(next), {
+    interactive: Boolean(process.stdout.isTTY),
+  });
+  if (!authed) {
+    if (!process.stdout.isTTY) {
       console.log(
         pc.yellow("  Your sign-in expired — run `npx whoburnedmore remove` again to retry."),
       );
-      return;
     }
-    throw err;
+    return;
   }
+  const res = authed.value;
   try {
     uninstallAutoSync();
   } catch {
@@ -1104,7 +1133,22 @@ function printHelp(): void {
 `);
 }
 
-main().catch((err: Error) => {
-  console.error(pc.red(`\n  ${err.message}\n`));
-  process.exitCode = 1;
-});
+/** True when this file is the process entrypoint (including a symlinked bin). */
+function invokedAsCli(): boolean {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  try {
+    return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(entry);
+  } catch {
+    return false;
+  }
+}
+
+// Importing this module from tests must not collect or submit usage. Vitest sets
+// VITEST; the path check covers every other importer.
+if (process.env.VITEST !== "true" && invokedAsCli()) {
+  main().catch((err: Error) => {
+    console.error(pc.red(`\n  ${err.message}\n`));
+    process.exitCode = 1;
+  });
+}
