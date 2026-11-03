@@ -3,9 +3,10 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, platform, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -16,6 +17,7 @@ import {
   expectedLinuxCronLine,
   plistDrift,
   reconcileAction,
+  reconcileAutoSync,
   notifyLaunchLive,
   resolveNpmPath,
   resolveNodePath,
@@ -30,6 +32,7 @@ import {
   SYNC_INTERVAL_MINUTES,
   syncIntervalLabel,
 } from "../src/autosync.js";
+import { loadConfig, setAutoSyncOptOut } from "../src/config.js";
 
 const packageVersion = JSON.parse(
   readFileSync(new URL("../package.json", import.meta.url), "utf8"),
@@ -487,5 +490,32 @@ describe("rotateLogIfLarge (log rotation)", () => {
 
   it("is a no-op (no throw) when the log does not exist", () => {
     expect(rotateLogIfLarge(join(dir, "nope.log"), 1024)).toBe(false);
+  });
+});
+
+describe("autoSyncOptOut", () => {
+  let dir = "";
+  let prev: string | undefined;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "wbm-optout-"));
+    prev = process.env.WHOBURNEDMORE_CONFIG_DIR;
+    process.env.WHOBURNEDMORE_CONFIG_DIR = dir;
+  });
+
+  afterEach(() => {
+    if (prev === undefined) delete process.env.WHOBURNEDMORE_CONFIG_DIR;
+    else process.env.WHOBURNEDMORE_CONFIG_DIR = prev;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("leaves background sync off after uninstall-sync", () => {
+    setAutoSyncOptOut(true, dir);
+    expect(loadConfig(dir)?.autoSyncOptOut).toBe(true);
+    const plist = join(homedir(), "Library", "LaunchAgents", "com.whoburnedmore.sync.plist");
+    const before = platform() === "darwin" && existsSync(plist) ? statSync(plist).mtimeMs : null;
+    expect(reconcileAutoSync()).toBe("noop");
+    const after = platform() === "darwin" && existsSync(plist) ? statSync(plist).mtimeMs : null;
+    expect(after).toBe(before);
   });
 });

@@ -6,8 +6,9 @@ export interface PublishDeps {
   confirm: (question: string) => Promise<boolean>;
   /** Interactive device sign-in; resolves null when aborted/timed out. */
   signIn: () => Promise<{ token: string; handle: string } | null>;
-  /** Authenticated submit (the same /v1/submit path a normal run uses). */
-  submit: (token: string, payload: SubmitPayload) => Promise<SubmitResponse>;
+  /** Authenticated submit (the same /v1/submit path a normal run uses).
+   *  Null means the sign-in could not be recovered — nothing was published. */
+  submit: (token: string, payload: SubmitPayload) => Promise<SubmitResponse | null>;
   openBrowser: (url: string) => void;
   log: (line: string) => void;
 }
@@ -33,6 +34,10 @@ export async function publishLocal(
     return false;
   }
   const res = await deps.submit(auth.token, payload);
+  if (!res) {
+    deps.log("  Sign-in didn't complete — kept local. Nothing left your machine.");
+    return false;
+  }
   deps.log(`  Published — you're on the board: ${sanitizeServerText(res.profileUrl)}`);
   // The profile URL comes BACK from the server. Only auto-open it when it's a real
   // https URL on our own web host (same gate the core submit path uses) — a malicious

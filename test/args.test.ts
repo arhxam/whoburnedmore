@@ -160,6 +160,15 @@ describe("resolveCommand", () => {
     expect(resolveCommand(["sync"])).toBe("sync");
     expect(resolveCommand(["link", "--token=abc.def"])).toBe("link");
     expect(resolveCommand(["remove"])).toBe("remove");
+    expect(resolveCommand(["whoami"])).toBe("whoami");
+    expect(resolveCommand(["login"])).toBe("login");
+    expect(resolveCommand(["logout"])).toBe("logout");
     expect(resolveCommand(["bogus"])).toBe("bogus");
+  });
+
+  it("treats --open and --no-open as flags on a run", () => {
+    expect(resolveCommand(["--open"])).toBe("run");
+    expect(resolveCommand(["--no-open"])).toBe("run");
+    expect(resolveCommand(["--no-open", "--open"])).toBe("run");
   });
 });
