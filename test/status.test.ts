@@ -15,6 +15,7 @@ function base(overrides: Partial<StatusInput> = {}): StatusInput {
     nodePath: "/opt/homebrew/bin/node",
     nodePathStable: true,
     logPath: "/home/u/.config/whoburnedmore/sync.log",
+    signedInAs: null,
     ...overrides,
   };
 }
@@ -50,6 +51,15 @@ describe("buildStatusReport (status command)", () => {
   it("flags a drifted config as self-repairing on next run", () => {
     const out = buildStatusReport(base({ drift: "drift" })).join("\n");
     expect(out).toMatch(/out of date/);
+  });
+
+  it("names the signed-in handle, and says so when signed out", () => {
+    expect(buildStatusReport(base({ signedInAs: "ada" })).join("\n")).toContain(
+      "Signed in as @ada",
+    );
+    expect(buildStatusReport(base({ signedInAs: null })).join("\n")).toContain(
+      "Signed in as: not signed in",
+    );
   });
 
   it("warns about a version-pinned (unstable) node path", () => {

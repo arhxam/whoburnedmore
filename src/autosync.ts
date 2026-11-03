@@ -11,7 +11,7 @@ import {
 } from "node:fs";
 import { homedir, platform } from "node:os";
 import { dirname, join, posix, resolve, win32 } from "node:path";
-import { defaultConfigDir } from "./config.js";
+import { defaultConfigDir, loadConfig, setAutoSyncOptOut } from "./config.js";
 import {
   installWindowsSync, readWindowsLauncher, readWindowsTask, resolveWindowsNpmCli,
   uninstallWindowsSync, windowsTaskDrift, windowsTaskEnabled,
@@ -349,6 +349,8 @@ export function reconcileAction(state: DriftState): "install" | "noop" {
 
 /** Install the background sync for the current platform. Returns a human description. */
 export function installAutoSync(): string {
+  // An explicit install is the way back on after `uninstall-sync`.
+  setAutoSyncOptOut(false);
   const os = platform();
   mkdirSync(defaultConfigDir(), { recursive: true });
   if (os === "darwin") {
@@ -543,6 +545,9 @@ function tryInstallSystemd(): string | null {
 }
 
 export function uninstallAutoSync(): string {
+  // Record the opt-out before touching the scheduler, so a failed uninstall
+  // still keeps the next submit from installing sync again.
+  setAutoSyncOptOut(true);
   const os = platform();
   if (os === "darwin") {
     const plistPath = launchAgentPath();
@@ -665,6 +670,9 @@ export function autoSyncDrift(): DriftState {
  * reconcile failure must never fail a submit.
  */
 export function reconcileAutoSync(): "installed" | "reinstalled" | "noop" {
+  // `uninstall-sync` must stay off. Heal-on-run would otherwise see an absent
+  // agent and install it again on the next submit.
+  if (loadConfig()?.autoSyncOptOut === true) return "noop";
   const state = autoSyncDrift();
   if (reconcileAction(state) === "noop") return "noop";
   installAutoSync();
@@ -688,50 +696,6 @@ export function rotateLogIfLarge(
   } catch {
     return false;
   }
-}
-
-export function notifyLaunchLive(opts?: {
-  platform?: NodeJS.Platform | string;
-  spawn?: (cmd: string, args: string[]) => { status: number | null };
-}): boolean {
-  const os = opts?.platform ?? platform();
-  const run = opts?.spawn ?? ((cmd, args) => spawnSync(cmd, args, { stdio: "ignore" }));
-  const title = "whoburnedmore is live";
-  const message = "Your dashboard is ready. Go to whoburnedmore.com";
-
-  if (os === "darwin") {
-    return (
-      run("osascript", [
-        "-e",
-        `display notification "${message}" with title "${title}"`,
-      ]).status === 0
-    );
-  }
-  if (os === "linux") {
-    return run("notify-send", [title, message]).status === 0;
-  }
-  if (os === "win32") {
-    const psQuote = (value: string) => `'${value.replaceAll("'", "''")}'`;
-    const script = [
-      "Add-Type -AssemblyName System.Windows.Forms",
-      "$n = New-Object System.Windows.Forms.NotifyIcon",
-      "$n.Icon = [System.Drawing.SystemIcons]::Application",
-      `$n.BalloonTipTitle = ${psQuote(title)}`,
-      `$n.BalloonTipText = ${psQuote(message)}`,
-      "$n.Visible = $true",
-      "$n.ShowBalloonTip(10000)",
-      "Start-Sleep -Seconds 2",
-      "$n.Dispose()",
-    ].join("; ");
-    return (
-      run("powershell", [
-        "-NoProfile",
-        "-Command",
-        script,
-      ]).status === 0
-    );
-  }
-  return false;
 }
 
 /** True if the launchd/cron/schtasks job is currently loaded with the scheduler. */

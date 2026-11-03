@@ -46,9 +46,8 @@ export function apiBase(): string {
 }
 
 /**
- * The web app origin (whoburnedmore.com). The local dashboard bakes this into
- * its "Connect your account" form so the file:// page can hand its data off to
- * the website. Overridable for local dev / tests.
+ * The web app origin (whoburnedmore.com). The local dashboard links its
+ * leaderboard call-to-action here. Overridable for local dev / tests.
  */
 export function webBase(): string {
   return process.env.WHOBURNEDMORE_WEB ?? "https://whoburnedmore.com";

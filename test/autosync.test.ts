@@ -3,9 +3,10 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, platform, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -16,7 +17,7 @@ import {
   expectedLinuxCronLine,
   plistDrift,
   reconcileAction,
-  notifyLaunchLive,
+  reconcileAutoSync,
   resolveNpmPath,
   resolveNodePath,
   syncCommandArgs,
@@ -30,6 +31,7 @@ import {
   SYNC_INTERVAL_MINUTES,
   syncIntervalLabel,
 } from "../src/autosync.js";
+import { loadConfig, setAutoSyncOptOut } from "../src/config.js";
 
 const packageVersion = JSON.parse(
   readFileSync(new URL("../package.json", import.meta.url), "utf8"),
@@ -316,46 +318,6 @@ describe("systemd user-timer fallback (linux without crontab)", () => {
   });
 });
 
-describe("notifyLaunchLive", () => {
-  it("uses macOS notification center to send the launch message", () => {
-    const calls: Array<{ cmd: string; args: string[] }> = [];
-    const ok = notifyLaunchLive({
-      platform: "darwin",
-      spawn: (cmd, args) => {
-        calls.push({ cmd, args });
-        return { status: 0 };
-      },
-    });
-    expect(ok).toBe(true);
-    expect(calls[0].cmd).toBe("osascript");
-    expect(calls[0].args.join(" ")).toContain("whoburnedmore.com");
-  });
-
-  it("falls back cleanly when no desktop notifier is available", () => {
-    const ok = notifyLaunchLive({
-      platform: "linux",
-      spawn: () => ({ status: 1 }),
-    });
-    expect(ok).toBe(false);
-  });
-
-  it("uses built-in PowerShell APIs on Windows", () => {
-    const calls: Array<{ cmd: string; args: string[] }> = [];
-    const ok = notifyLaunchLive({
-      platform: "win32",
-      spawn: (cmd, args) => {
-        calls.push({ cmd, args });
-        return { status: 0 };
-      },
-    });
-
-    expect(ok).toBe(true);
-    expect(calls[0].cmd).toBe("powershell");
-    expect(calls[0].args.join(" ")).toContain("System.Windows.Forms");
-    expect(calls[0].args.join(" ")).not.toContain("BurntToast");
-  });
-});
-
 describe("resolveNodePath (stable node path)", () => {
   it("prefers a stable symlink over a version-pinned Cellar execPath", () => {
     const got = resolveNodePath({
@@ -487,5 +449,32 @@ describe("rotateLogIfLarge (log rotation)", () => {
 
   it("is a no-op (no throw) when the log does not exist", () => {
     expect(rotateLogIfLarge(join(dir, "nope.log"), 1024)).toBe(false);
+  });
+});
+
+describe("autoSyncOptOut", () => {
+  let dir = "";
+  let prev: string | undefined;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "wbm-optout-"));
+    prev = process.env.WHOBURNEDMORE_CONFIG_DIR;
+    process.env.WHOBURNEDMORE_CONFIG_DIR = dir;
+  });
+
+  afterEach(() => {
+    if (prev === undefined) delete process.env.WHOBURNEDMORE_CONFIG_DIR;
+    else process.env.WHOBURNEDMORE_CONFIG_DIR = prev;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("leaves background sync off after uninstall-sync", () => {
+    setAutoSyncOptOut(true, dir);
+    expect(loadConfig(dir)?.autoSyncOptOut).toBe(true);
+    const plist = join(homedir(), "Library", "LaunchAgents", "com.whoburnedmore.sync.plist");
+    const before = platform() === "darwin" && existsSync(plist) ? statSync(plist).mtimeMs : null;
+    expect(reconcileAutoSync()).toBe("noop");
+    const after = platform() === "darwin" && existsSync(plist) ? statSync(plist).mtimeMs : null;
+    expect(after).toBe(before);
   });
 });

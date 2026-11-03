@@ -28,13 +28,16 @@ export interface CliConfig {
    *  reporting — a truer signal than the log file's mtime, which moves on any
    *  write (including errors). */
   lastSyncAt?: number;
-  /** Epoch ms after the one-time launch-open desktop notification was delivered. */
-  launchNotificationDeliveredAt?: number;
   /** Epoch ms when this machine's device key got a definitive bind answer from
    *  the server (`/v1/me/devices/bind`). The binding is what lets a dead bearer
    *  token self-heal via `/v1/auth/cli/refresh`, so the CLI binds once after
    *  sign-in / on the first signed-in submit and stamps this to stop re-asking. */
   deviceBoundAt?: number;
+  /** Set by `uninstall-sync`. While true, heal-on-run must not turn background
+   *  sync back on. `install-sync` clears it. */
+  autoSyncOptOut?: boolean;
+  /** Suppression signature we already asked "Verify now?" about. */
+  verifyPromptedFor?: string;
 }
 
 /** Stable, non-secret identity the API compares with its bound-device hashes. */
@@ -72,17 +75,14 @@ export function loadConfig(dir: string = defaultConfigDir()): CliConfig | null {
     if (typeof parsed.lastSyncAt === "number" && Number.isFinite(parsed.lastSyncAt))
       config.lastSyncAt = parsed.lastSyncAt;
     if (
-      typeof parsed.launchNotificationDeliveredAt === "number" &&
-      Number.isFinite(parsed.launchNotificationDeliveredAt)
-    ) {
-      config.launchNotificationDeliveredAt = parsed.launchNotificationDeliveredAt;
-    }
-    if (
       typeof parsed.deviceBoundAt === "number" &&
       Number.isFinite(parsed.deviceBoundAt)
     ) {
       config.deviceBoundAt = parsed.deviceBoundAt;
     }
+    if (parsed.autoSyncOptOut === true) config.autoSyncOptOut = true;
+    if (typeof parsed.verifyPromptedFor === "string" && parsed.verifyPromptedFor)
+      config.verifyPromptedFor = parsed.verifyPromptedFor;
     return Object.keys(config).length > 0 ? config : null;
   } catch {
     return null;
@@ -140,14 +140,6 @@ export function recordDeviceBound(
   saveConfig(dir, { ...config, deviceBoundAt: when });
 }
 
-export function recordLaunchNotificationDelivered(
-  dir: string = defaultConfigDir(),
-  when: number = Date.now(),
-): void {
-  const config = loadConfig(dir) ?? {};
-  saveConfig(dir, { ...config, launchNotificationDeliveredAt: when });
-}
-
 /**
  * Persist the signed-in CLI bearer token (and handle), preserving the rest of
  * the config. Written owner-only via saveConfig's atomic 0600 rename — this is a
@@ -169,10 +161,54 @@ export function saveAuth(
 /**
  * Drop the stored CLI token + handle (e.g. after the server rejects it as
  * expired/invalid), preserving everything else so the machine can re-sign-in.
+ * The refresh credential stays: a 401 can still heal without a browser.
  */
 export function clearAuth(dir: string = defaultConfigDir()): void {
   const config = loadConfig(dir);
   if (!config?.cliToken && !config?.handle) return;
   const { cliToken: _t, handle: _h, ...rest } = config;
+  saveConfig(dir, rest);
+}
+
+/**
+ * Sign out on this machine. Unlike `clearAuth`, this also drops the refresh
+ * credential so the next run cannot silently mint a new bearer token.
+ */
+export function clearStoredSession(dir: string = defaultConfigDir()): void {
+  const config = loadConfig(dir);
+  if (!config?.cliToken && !config?.handle && !config?.refreshToken) return;
+  const { cliToken: _t, handle: _h, refreshToken: _r, ...rest } = config;
+  saveConfig(dir, rest);
+}
+
+/** Remember that `uninstall-sync` should stay off, or clear that choice. */
+export function setAutoSyncOptOut(
+  optOut: boolean,
+  dir: string = defaultConfigDir(),
+): void {
+  const config = loadConfig(dir) ?? {};
+  if (optOut) {
+    saveConfig(dir, { ...config, autoSyncOptOut: true });
+    return;
+  }
+  if (config.autoSyncOptOut !== true) return;
+  const { autoSyncOptOut: _dropped, ...rest } = config;
+  saveConfig(dir, rest);
+}
+
+/** Remember which suppression event already got a "Verify now?" prompt. */
+export function recordVerifyPrompted(
+  signature: string,
+  dir: string = defaultConfigDir(),
+): void {
+  const config = loadConfig(dir) ?? {};
+  saveConfig(dir, { ...config, verifyPromptedFor: signature });
+}
+
+/** Forget the prompt once the account is no longer suppressed. */
+export function clearVerifyPrompted(dir: string = defaultConfigDir()): void {
+  const config = loadConfig(dir);
+  if (!config?.verifyPromptedFor) return;
+  const { verifyPromptedFor: _dropped, ...rest } = config;
   saveConfig(dir, rest);
 }

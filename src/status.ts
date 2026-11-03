@@ -9,6 +9,7 @@ import {
   type DriftState,
 } from "./autosync.js";
 import { loadConfig } from "./config.js";
+import { statusSignedInLine } from "./output.js";
 
 export interface StatusInput {
   installed: boolean;
@@ -21,6 +22,9 @@ export interface StatusInput {
   /** Stable (survives `brew upgrade node`) vs a version-pinned Cellar path. */
   nodePathStable: boolean;
   logPath: string;
+  /** Handle when a CLI token is stored. Null when this machine is signed out.
+   *  Empty string means signed in with no handle on file. */
+  signedInAs: string | null;
 }
 
 function ago(ms: number): string {
@@ -41,6 +45,7 @@ export function buildStatusReport(s: StatusInput): string[] {
   const lines: string[] = [];
   lines.push("  whoburnedmore — background sync status");
   lines.push("");
+  lines.push(statusSignedInLine(s.signedInAs));
 
   lines.push(
     s.installed
@@ -94,5 +99,6 @@ export function agentStatusReport(now: number = Date.now()): string[] {
     nodePath,
     nodePathStable: !nodePath.includes("/Cellar/"),
     logPath: syncLogPath(),
+    signedInAs: cfg?.cliToken ? (cfg.handle ?? "") : null,
   });
 }
