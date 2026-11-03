@@ -379,8 +379,25 @@ struct WbmZone: View {
                 Text("Your burn vs every AI coder on whoburnedmore.com — optional, one click.")
                     .font(.caption).foregroundStyle(.secondary)
                 HStack {
-                    Button("Join the leaderboard") { SettingsWindow.show(model: model, settings: settings) }
+                    Button("Join the leaderboard") { SettingsWindow.show(model: model, settings: settings, pane: .account) }
                         .buttonStyle(.borderedProminent).tint(.orange).controlSize(.small)
+                    Button("Hide") { settings.showWbm = false }
+                        .buttonStyle(.plain).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        case .signedInSyncOff(let handle):
+            VStack(alignment: .leading, spacing: 6) {
+                Label { Text(WbmClient.signedInTitle(handle)).font(.callout.weight(.semibold)) }
+                icon: { Image(systemName: "person.crop.circle.badge.checkmark").foregroundStyle(.orange) }
+                Text(settings.syncEnabled
+                     ? "Leaderboard sync is on."
+                     : "Turn on leaderboard sync to show your daily rank.")
+                    .font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    if !settings.syncEnabled {
+                        Button("Turn on leaderboard sync") { model.setLeaderboardSyncEnabled(true) }
+                            .buttonStyle(.borderedProminent).tint(.orange).controlSize(.small)
+                    }
                     Button("Hide") { settings.showWbm = false }
                         .buttonStyle(.plain).font(.caption).foregroundStyle(.secondary)
                 }
