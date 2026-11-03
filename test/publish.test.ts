@@ -90,6 +90,16 @@ describe("publishLocal (signed-in — anonymous publish is retired)", () => {
     expect(d.openBrowser).not.toHaveBeenCalled();
   });
 
+  it("stays offline when the signed-in submit cannot be recovered", async () => {
+    const d = deps(true);
+    d.submit.mockResolvedValueOnce(null);
+    const published = await publishLocal(payload, d);
+    expect(published).toBe(false);
+    expect(d.openBrowser).not.toHaveBeenCalled();
+    const printed = d.log.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(printed).toContain("Nothing left your machine");
+  });
+
   it("strips terminal control bytes from the server profile URL before printing", async () => {
     const d = deps(true, {
       profileUrl: "https://whoburnedmore.com/u/\u001b]0;pwned\u0007x",
