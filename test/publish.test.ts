@@ -82,6 +82,18 @@ describe("publishLocal (signed-in — anonymous publish is retired)", () => {
     expect(printed).toContain("Nothing left your machine");
   });
 
+  it("keeps the run local when an expired sign-in can't be renewed", async () => {
+    const d = deps(true);
+    d.submit.mockResolvedValueOnce(null);
+    const published = await publishLocal(payload, d);
+    expect(published).toBe(false);
+    expect(d.submit).toHaveBeenCalledTimes(1);
+    expect(d.openBrowser).not.toHaveBeenCalled();
+    const printed = d.log.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(printed).toContain("kept local");
+    expect(printed).not.toContain("Published");
+  });
+
   it("never auto-opens a profile URL on an untrusted host (hostile/MITM'd server)", async () => {
     const d = deps(true, { profileUrl: "https://evil.example.com/u/alice" });
     const published = await publishLocal(payload, d);

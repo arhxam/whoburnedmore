@@ -47,6 +47,8 @@ interface CachedFile<T> {
 
 interface CacheShape<T> {
   v: number;
+  /** IANA zone the cached rows' local days were computed in (absent before 0.9.25). */
+  tz?: string;
   files: Record<string, CachedFile<T>>;
 }
 
@@ -124,6 +126,20 @@ export function nativeCachePath(
   return join(dir, `native-cache-${reader}.json`);
 }
 
+/**
+ * The timezone cached rows were bucketed in. Readers assign each request to a
+ * LOCAL calendar day before caching, so rows built under another timezone
+ * would keep finished sessions on the old zone's days forever (their size and
+ * mtime never change again). A zone change therefore invalidates the cache.
+ */
+export function cacheTimeZone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
 async function loadCache<T>(
   path: string,
   version: number,
@@ -133,7 +149,10 @@ async function loadCache<T>(
     const read = await readTextFileCapped(path, { maxBytes });
     if (!read.ok) return {};
     const parsed = JSON.parse(read.content) as CacheShape<T>;
-    if (parsed && parsed.v === version && parsed.files && typeof parsed.files === "object") {
+    // Caches written before the zone was recorded are assumed to match, so an
+    // upgrade doesn't force every machine through a cold re-read.
+    const sameZone = parsed?.tz === undefined || parsed.tz === cacheTimeZone();
+    if (parsed && parsed.v === version && sameZone && parsed.files && typeof parsed.files === "object") {
       return parsed.files;
     }
   } catch {
@@ -156,7 +175,7 @@ function saveCache<T>(
     // Atomic replace: a crash mid-write must never leave a truncated JSON that
     // a later run would half-trust. rename() is atomic on the same volume.
     tmp = `${path}.tmp-${process.pid}-${randomBytes(8).toString("hex")}`;
-    const serialized = JSON.stringify({ v: version, files });
+    const serialized = JSON.stringify({ v: version, tz: cacheTimeZone(), files });
     if (Buffer.byteLength(serialized, "utf8") > maxBytes) return;
     writeFileSync(tmp, serialized, { encoding: "utf8", flag: "wx", mode: 0o600 });
     // Explicit chmod also repairs platforms/filesystems that ignored creation mode.
@@ -184,6 +203,9 @@ export interface FileCacheResult<T> {
   timedOut: boolean;
   /** A streaming reader could not complete a file; never submit partial rows. */
   incomplete?: boolean;
+  /** Files skipped because the OS denied read access. Their usage is missing
+   *  from `itemsByFile`, so the scan must not be treated as authoritative. */
+  permissionDenied?: string[];
 }
 
 /**
@@ -221,6 +243,7 @@ export async function readFilesWithCache<T>(opts: {
   const cached = await loadCache<T>(opts.cachePath, opts.version, maxCacheBytes);
   const fresh: Record<string, CachedFile<T>> = {};
   const itemsByFile: T[][] = [];
+  const permissionDenied: string[] = [];
   let filesRead = 0;
 
   for (const f of opts.files) {
@@ -258,6 +281,13 @@ export async function readFilesWithCache<T>(opts: {
     }
     if (opts.streamFile) {
       const streamed = await opts.streamFile(f).catch(() => ({ ok: false as const, reason: "unreadable" }));
+      if (!streamed.ok && streamed.reason === "permission-denied") {
+        // One unreadable transcript must not disable the whole reader. Skip it
+        // WITHOUT caching anything, so a later chmod/chown (which changes
+        // neither size nor mtime) is picked up on the very next run.
+        permissionDenied.push(f);
+        continue;
+      }
       if (!streamed.ok) {
         // Preserve completed files for the next pass, but never trust a partial
         // parse (nor a stale cached row for the changed, incomplete file).
@@ -295,5 +325,10 @@ export async function readFilesWithCache<T>(opts: {
   // Completed pass: persist ONLY files that still exist (deleted transcripts
   // must drop out, or their usage would survive on disk forever).
   saveCache(opts.cachePath, opts.version, fresh, maxCacheBytes);
-  return { itemsByFile, filesRead, timedOut: false };
+  return {
+    itemsByFile,
+    filesRead,
+    timedOut: false,
+    ...(permissionDenied.length > 0 ? { permissionDenied } : {}),
+  };
 }

@@ -288,6 +288,8 @@ export interface NativeCollectResult {
   filesScanned: number;
   /** True when the read abandoned early on its time budget (caller should fall back). */
   timedOut?: boolean;
+  /** Transcripts the OS refused to let us read; their usage is not included. */
+  permissionDenied?: string[];
 }
 
 /**
@@ -440,6 +442,11 @@ export async function collectClaudeNative(
     entries: finalizeClaudeEntries(acc),
     found: true,
     filesScanned: res.filesRead,
+    // Skipped files mean this scan is partial: keep its rows, but flag it the
+    // way a timeout is flagged so request fingerprints are never lowered.
+    ...(res.permissionDenied
+      ? { timedOut: true, permissionDenied: res.permissionDenied }
+      : {}),
   };
 }
 

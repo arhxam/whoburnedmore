@@ -283,7 +283,7 @@ ${connectCta}
 
     <div class="foot">
       Re-run <code>npx whoburnedmore --local</code> to refresh this page.<br>
-      ${connect ? "Use “Connect your account” above to save it to whoburnedmore.com and join the leaderboard." : "Run <code>npx whoburnedmore</code> (no flag) to get a shareable dashboard at whoburnedmore.com — no sign-in."}
+      ${connect ? "Run the command above to sign in and put this burn on whoburnedmore.com." : "Run <code>npx whoburnedmore</code> to sign in and publish a shareable dashboard."}
     </div>
   </div>
 </body>

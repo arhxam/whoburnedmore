@@ -31,6 +31,31 @@ dashboard and its data, or use `--local` to stay fully offline.
 > Want a 100%-local report that makes **no** network calls at all? Use `npx whoburnedmore
 > --local`, which builds an HTML dashboard on your machine and uploads nothing.
 
+## Supported sources
+
+Usage is read only from logs and databases the agents keep **on this machine**.
+
+| Source | How it's read |
+|---|---|
+| Claude Code | Native reader for `~/.claude/projects` and `~/.config/claude/projects` (or comma-separated `CLAUDE_CONFIG_DIR`) |
+| Codex CLI | ccusage's replay-aware reader for `sessions` and `archived_sessions` under `CODEX_HOME` (default `~/.codex`) |
+| Gemini CLI, GitHub Copilot CLI, OpenCode, Amp, Droid, Goose, Kimi, Qwen, Kilo, OpenClaw, Hermes, pi, Codebuff | [ccusage](https://github.com/ccusage/ccusage) |
+| Google Antigravity (desktop, CLI, IDE), Grok Build CLI, ZCode | ccusage |
+| Cursor | Your local Cursor sign-in, used to fetch your own usage events from Cursor's dashboard API (the session token goes only to Cursor, never to whoburnedmore) |
+| Cline, Roo Code | Native reader for VS Code / Cursor extension task logs |
+| Continue | Native reader for `~/.continue` |
+
+**Not supported:** usage that only exists in a provider's cloud — ChatGPT or Claude on the
+web or in apps, cloud agents, and Grok on the web or in X. There is no local record to read,
+and the CLI never estimates usage it can't read. Older Antigravity builds that kept only
+encrypted conversation logs can't be counted either.
+
+**Something missing?** Run `npx whoburnedmore --dry-run` to see exactly which tools and
+days were found on this machine (nothing is sent). If a source you use isn't listed, its data
+isn't readable locally yet. If it's listed but empty, run the CLI on the machine where you
+use that agent. If the numbers are right locally but your page is stale, run
+`npx whoburnedmore status` to check background sync.
+
 ## Commands
 
 ```

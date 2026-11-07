@@ -414,3 +414,69 @@ describe("codex native reader through the cache", () => {
     }
   });
 });
+
+const canDenyRead =
+  process.platform !== "win32" && typeof process.getuid === "function" && process.getuid() !== 0;
+
+describe("claude native reader resilience", () => {
+  it.skipIf(!canDenyRead)(
+    "skips a permission-denied transcript, keeps the rest, and re-reads it once fixed",
+    async () => {
+      const { dir, env, proj } = await makeClaudeCorpus();
+      const locked = join(proj, "root-owned.jsonl");
+      try {
+        await writeFile(
+          join(proj, "ok.jsonl"),
+          claudeLine({ ts: "2026-06-10T12:00:00Z", reqId: "r1", msgId: "m1", output: 40 }) + "\n",
+        );
+        await writeFile(
+          locked,
+          claudeLine({ ts: "2026-06-10T13:00:00Z", reqId: "r2", msgId: "m2", output: 7 }) + "\n",
+        );
+        await chmod(locked, 0o000);
+        // 0.9.24 returned found:false here on every run, disabling the reader.
+        const first = await collectClaudeNative(env, { budgetMs: 5000 });
+        expect(first.found).toBe(true);
+        expect(first.entries[0].outputTokens).toBe(40);
+        expect(first.permissionDenied).toEqual([locked]);
+        // Partial scan: fingerprints must not be treated as authoritative.
+        expect(first.timedOut).toBe(true);
+
+        // chmod changes neither size nor mtime, so a cached "skip" would stick.
+        await chmod(locked, 0o644);
+        const fixed = await collectClaudeNative(env, { budgetMs: 5000 });
+        expect(fixed.permissionDenied).toBeUndefined();
+        expect(fixed.timedOut).toBeUndefined();
+        expect(fixed.entries[0].outputTokens).toBe(47);
+      } finally {
+        await chmod(locked, 0o644).catch(() => undefined);
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("re-buckets warm cached days after a timezone change", async () => {
+    const { dir, env, proj } = await makeClaudeCorpus();
+    const prevTz = process.env.TZ;
+    try {
+      await writeFile(
+        join(proj, "late.jsonl"),
+        claudeLine({ ts: "2026-10-20T23:30:00Z", reqId: "r1", msgId: "m1", output: 5 }) + "\n",
+      );
+      process.env.TZ = "UTC";
+      const utc = await collectClaudeNative(env, { budgetMs: 5000 });
+      expect(utc.entries.map((e) => e.date)).toEqual(["2026-10-20"]);
+      process.env.TZ = "Asia/Tokyo";
+      const tokyo = await collectClaudeNative(env, { budgetMs: 5000 });
+      // 0.9.24 reused the UTC-bucketed cache row and still said 2026-10-20.
+      expect(tokyo.entries.map((e) => e.date)).toEqual(["2026-10-21"]);
+      const again = await collectClaudeNative(env, { budgetMs: 5000 });
+      expect(again.filesScanned).toBe(0);
+      expect(again.entries).toEqual(tokyo.entries);
+    } finally {
+      if (prevTz === undefined) delete process.env.TZ;
+      else process.env.TZ = prevTz;
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
