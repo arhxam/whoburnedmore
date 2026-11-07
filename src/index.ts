@@ -9,6 +9,8 @@ import pc from "picocolors";
 import type { SubmitPayload, SubmitResponse } from "./shared.js";
 import {
   applyScope,
+  argumentProblem,
+  confirmAnswer,
   hasUnsafeInstallTokenArg,
   parseBoard,
   parseOrg,
@@ -160,14 +162,22 @@ function openBrowser(url: string): void {
   spawn(cmd, args, { stdio: "ignore", detached: true }).unref();
 }
 
+/**
+ * Ask a yes/no question. Pressing Enter takes `defaultYes`, so anything that
+ * publishes or deletes must pass `false`: an accidental Enter then does nothing.
+ */
 async function confirm(question: string, defaultYes = true): Promise<boolean> {
   if (!process.stdin.isTTY) return false;
   const rl = createInterface({ input: process.stdin, output: process.stdout });
-  const hint = defaultYes ? "[Y/n]" : "[y/N]";
-  const answer = (await rl.question(`${question} ${pc.dim(hint)} `)).trim();
+  const answer = (
+    await rl.question(`${question} ${pc.dim(defaultYes ? "[Y/n]" : "[y/N]")} `)
+  ).trim();
   rl.close();
-  return answer === "" ? defaultYes : /^y(es)?$/i.test(answer);
+  return confirmAnswer(answer, defaultYes);
 }
+
+/** Confirmation for irreversible or public actions: Enter means no. */
+const confirmDefaultNo = (question: string) => confirm(question, false);
 
 interface Flags {
   dryRun: boolean;
@@ -304,7 +314,7 @@ async function run(flags: Flags): Promise<void> {
     // bookkeeping, so this machine self-heals like any signed-in one).
     if (!flags.quiet && process.stdin.isTTY) {
       await publishLocal(payload, {
-        confirm,
+        confirm: confirmDefaultNo,
         // Stored token, then a silent refresh, then device sign-in — the same
         // order as every other signed-in command.
         signIn: () => requireSignedIn("--local"),
@@ -828,8 +838,26 @@ async function runVerify(): Promise<void> {
     }
   }
 
-  console.log(pc.dim("  Reading your local Claude Code logs…"));
-  const { requests, found, timedOut } = await collectClaudeRequests();
+  console.log(pc.dim("  Reading your local Claude Code logs (large histories can take a few minutes)…"));
+  // `verify` is an interactive, user-initiated command, so it gets a longer read
+  // budget than background collection: heavy users are exactly the ones most
+  // likely to need verification.
+  const { requests, found, timedOut } = await collectClaudeRequests(process.env, {
+    budgetMs: VERIFY_READ_BUDGET_MS,
+  });
+  if (timedOut === true && requests.length === 0) {
+    console.log(
+      pc.yellow(
+        "  Your Claude Code logs are too large to finish reading in time, so nothing was sent.",
+      ),
+    );
+    console.log(
+      pc.dim(
+        "  Try again when the machine is idle, or file a written appeal at whoburnedmore.com/appeal.",
+      ),
+    );
+    return;
+  }
   if (!found || requests.length === 0) {
     console.log(
       pc.yellow("  No local Claude Code logs found on this machine to verify."),
@@ -989,7 +1017,7 @@ async function runRemove(): Promise<void> {
   console.log(
     pc.dim("  Your local logs are untouched, and the account itself survives (delete it from your dashboard settings on the web)."),
   );
-  if (!(await confirm("  Delete your usage data?"))) {
+  if (!(await confirmDefaultNo("  Delete your usage data?"))) {
     console.log(pc.dim("  Cancelled — nothing was deleted."));
     return;
   }
@@ -1018,6 +1046,9 @@ async function runRemove(): Promise<void> {
   console.log(pc.dim("  Run `npx whoburnedmore` anytime to start fresh."));
 }
 
+/** Read budget for the interactive `verify` command (background reads use 45s). */
+const VERIFY_READ_BUDGET_MS = 180_000;
+
 async function main(): Promise<void> {
   const major = Number(process.versions.node.split(".")[0]);
   if (major < 20) {
@@ -1027,6 +1058,15 @@ async function main(): Promise<void> {
   }
   const args = process.argv.slice(2);
   const baseCommand = resolveCommand(args);
+  const problem = argumentProblem(args, baseCommand);
+  if (problem) {
+    // Refuse BEFORE collecting anything: the default command uploads publicly,
+    // so an ignored flag must never quietly become a real upload.
+    console.error(`  ${problem}`);
+    console.error("  Nothing was collected or sent. Run `npx whoburnedmore --help` for the options.");
+    process.exitCode = 2;
+    return;
+  }
   // `--watch` on a run/sync promotes to the long-running daemon, so a server can
   // start it the same way it'd start a one-off (`whoburnedmore sync --watch`).
   const command =

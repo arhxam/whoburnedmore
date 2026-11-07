@@ -191,6 +191,9 @@ export function normalizeModelKey(model: string): string {
   // "-vN" may BE the model version (legacy "claude-v2:1" must not become
   // bare "claude"); the resolver's tail-trim handles a dangling "-v1".
   k = k.replace(/:\d+$/, "").replace(/:latest$/, "");
+  // Client-side variant tags such as Claude Code's 1M-context "[1m]" are not
+  // part of the billed model id ("claude-opus-4-6[1m]" bills as claude-opus-4-6).
+  k = k.replace(/\[[^\]]*\]$/, "");
   return k;
 }
 
@@ -212,7 +215,7 @@ export function resolveModelPrice(model: string): ModelPrice | null {
   return resolved;
 }
 
-function resolveModelPriceUncached(model: string): ModelPrice | null {
+function exactCandidates(model: string): { candidates: string[]; dateless: string } {
   const norm = normalizeModelKey(model);
   const candidates = [norm];
   // "claude-opus-4-8-20260901" / "gpt-5.2-2025-12-11" / "gemini-x@20250219"
@@ -221,12 +224,20 @@ function resolveModelPriceUncached(model: string): ModelPrice | null {
     .replace(/-20\d{2}-\d{2}-\d{2}$/, "");
   if (dateless !== norm) candidates.push(dateless);
   if (norm.endsWith("-latest")) candidates.push(norm.slice(0, -"-latest".length));
+  return { candidates, dateless };
+}
 
-  let row: PriceRow | undefined;
-  for (const c of candidates) {
-    row = lookup(c);
-    if (row) break;
+function lookupExact(model: string): PriceRow | undefined {
+  for (const c of exactCandidates(model).candidates) {
+    const row = lookup(c);
+    if (row) return row;
   }
+  return undefined;
+}
+
+function resolveModelPriceUncached(model: string): ModelPrice | null {
+  const { dateless } = exactCandidates(model);
+  let row: PriceRow | undefined = lookupExact(model);
   if (!row) {
     // Trim trailing "-segment"s (thinking/effort/size variants a vendor tacks
     // on) until a known id emerges; stop before the name loses its identity —

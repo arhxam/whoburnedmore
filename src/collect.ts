@@ -10,6 +10,7 @@ import type {
   CodexReplayPriorRow,
   CodexReplayPriorScope,
   DailyUsageEntry,
+  PricingTokenCounts,
   SessionEntry,
   SkillStat,
   ToolStat,
@@ -27,7 +28,7 @@ import { collectCodexNative } from "./native/codex.js";
 import { plausibleUsageDate } from "./native/usage-date.js";
 import { collectVscodeAgent, VSCODE_AGENTS } from "./native/vscode-agents.js";
 import { loadLivePricing } from "./pricing-live.js";
-import { estimateCostUSD } from "./pricing.js";
+import { estimateCostUSD, resolveModelPrice } from "./pricing.js";
 import {
   loadProvenanceStore,
   provenanceStorePath,
@@ -151,6 +152,27 @@ function normCost(n: unknown): number {
 const PRICE_TABLE_COST_SOURCES: ReadonlySet<string> = new Set(["claude", "codex"]);
 
 /**
+ * Fill a $0 ccusage cost from the CLI's freshly loaded price table. ccusage
+ * runs `--offline` with the price list bundled in its release, so a model newer
+ * than that bundle comes back as $0. Only price-table sources (Claude, Codex)
+ * are filled; a positive cost is always kept, matching CLI 0.9.25 so the same
+ * day prices identically whichever version synced it.
+ */
+export function repriceCcusageCost(
+  tool: string,
+  model: string,
+  tokens: PricingTokenCounts,
+  ccusageCostUSD: number,
+): number {
+  if (ccusageCostUSD > 0) return ccusageCostUSD;
+  const known = model.length > 0 && model !== "unknown";
+  if (known && PRICE_TABLE_COST_SOURCES.has(tool) && resolveModelPrice(model)) {
+    return estimateCostUSD(model, tokens);
+  }
+  return 0;
+}
+
+/**
  * Map one ccusage daily report (per-source `date` or aggregate `period`
  * variant) to leaderboard entries: one entry per day per model.
  */
@@ -246,11 +268,8 @@ export function mapCcusageDaily(
         c.outputTokens +
         c.cacheCreationTokens +
         c.cacheReadTokens;
-      if (tokens === 0 && c.costUSD === 0) continue;
-      const costUSD =
-        c.costUSD === 0 && PRICE_TABLE_COST_SOURCES.has(tool)
-          ? estimateCostUSD(c.model, c)
-          : c.costUSD;
+      const costUSD = repriceCcusageCost(tool, c.model, c, c.costUSD);
+      if (tokens === 0 && costUSD === 0) continue;
       // CLI-collected usage from local ccusage logs: origin "cli", unverified.
       entries.push({ date, tool, ...c, costUSD, origin: "cli", verified: false });
     }
@@ -290,7 +309,17 @@ export function mapCcusageSessions(json: unknown): SessionEntry[] {
       outputTokens,
       cacheCreationTokens,
       cacheReadTokens,
-      costUSD: normCost(s.totalCost ?? s.costUSD),
+      // A single-model session can be re-priced exactly; a mixed-model one has
+      // no per-model token split, so it keeps ccusage's own total.
+      costUSD:
+        models.length === 1
+          ? repriceCcusageCost(
+              typeof s.agent === "string" ? s.agent : "unknown",
+              models[0],
+              { inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens },
+              normCost(s.totalCost ?? s.costUSD),
+            )
+          : normCost(s.totalCost ?? s.costUSD),
       lastActivity:
         typeof meta.lastActivity === "string"
           ? meta.lastActivity
@@ -771,16 +800,14 @@ export async function collectAll(
     },
   );
 
-  // Richer rollups, gathered once across all agents (ccusage aggregates them):
-  // sessions power "most expensive conversations", blocks power "peak hours".
-  const sessionTask = runCcusage(
-    cmd,
-    [...prefixArgs, "session", "--json", "--offline"],
-    undefined,
-    CCUSAGE_AGGREGATE_TIMEOUT_MS,
-  ).then((json) => {
+  // Conversation-level rows are never uploaded (identifiers stay on this
+  // machine and the server no longer returns them), so the all-agent
+  // `ccusage session` pass — which re-reads every transcript, up to 180s per
+  // run — is skipped. Its stage still ticks so the progress bar stays calibrated.
+  // Blocks power "peak hours".
+  const sessionTask = Promise.resolve().then(() => {
     tick();
-    return json ? mapCcusageSessions(json) : [];
+    return [] as SessionEntry[];
   });
   const blockTask = runCcusage(
     cmd,

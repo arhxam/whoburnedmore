@@ -91,6 +91,8 @@ export function parseClaudeLine(raw: string): ParsedRequest | null {
   } catch {
     return null;
   }
+  // Valid JSON is not necessarily an object (a literal `null` line would throw below).
+  if (!obj || typeof obj !== "object") return null;
   const message = obj.message as Record<string, unknown> | undefined;
   if (!message || typeof message !== "object") return null;
   const usage = message.usage as Record<string, unknown> | undefined;
