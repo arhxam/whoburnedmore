@@ -472,6 +472,7 @@ export async function collectClaudeRequests(
   const deadline = now() + (opts.budgetMs ?? NATIVE_READ_BUDGET_MS);
   const acc: ClaudeAccumulator = new Map();
   const onLine = boundedLineAccumulator(acc, opts.maxRequestBytes);
+  let skipped = false;
   for (const f of files) {
     if (now() > deadline) {
       return { requests: [], found: false, timedOut: true };
@@ -481,10 +482,16 @@ export async function collectClaudeRequests(
       deadline,
       now,
     });
+    if (!read.ok && read.reason === "permission-denied") {
+      // Denied at open, so no partial lines were consumed. Keep verifying the
+      // rest (as the usage read does) but flag the upload as incomplete.
+      skipped = true;
+      continue;
+    }
     if (!read.ok) {
       // Never expose a partial verification skeleton as complete.
       return { requests: [], found: false, timedOut: true };
     }
   }
-  return { requests: [...acc.values()], found: true };
+  return { requests: [...acc.values()], found: true, ...(skipped ? { timedOut: true } : {}) };
 }

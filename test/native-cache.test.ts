@@ -11,7 +11,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { collectClaudeNative } from "../src/native/claude.js";
+import { collectClaudeNative, collectClaudeRequests } from "../src/native/claude.js";
 import { CODEX_CACHE_VERSION, collectCodexNative } from "../src/native/codex.js";
 import { nativeCachePath, readFilesWithCache } from "../src/native/file-cache.js";
 
@@ -441,6 +441,12 @@ describe("claude native reader resilience", () => {
         expect(first.permissionDenied).toEqual([locked]);
         // Partial scan: fingerprints must not be treated as authoritative.
         expect(first.timedOut).toBe(true);
+
+        // `verify` reads the same files: it keeps going and flags the upload partial.
+        const verify = await collectClaudeRequests(env, { budgetMs: 5000 });
+        expect(verify.found).toBe(true);
+        expect(verify.requests).toHaveLength(1);
+        expect(verify.timedOut).toBe(true);
 
         // chmod changes neither size nor mtime, so a cached "skip" would stick.
         await chmod(locked, 0o644);
