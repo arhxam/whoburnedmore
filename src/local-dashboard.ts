@@ -41,6 +41,12 @@ interface Agg {
   cost: number;
 }
 
+/** YYYY-MM-DD of `d` in the local timezone (the same day key usage entries use). */
+function localDay(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
 /**
  * Render a fully self-contained dark dashboard for the given usage entries.
  * No network, no external assets — everything (styles, data, charts) is inline,
@@ -51,7 +57,9 @@ export function renderDashboardHtml(
   generatedAt: Date = new Date(),
   connect?: ConnectOptions,
 ): string {
-  const today = generatedAt.toISOString().slice(0, 10);
+  // Entries are bucketed by the user's LOCAL calendar day, so "today" and the
+  // chart must be too (toISOString() is UTC: wrong on either side of midnight UTC).
+  const today = localDay(generatedAt);
   const totals = {
     tokens: 0,
     cost: 0,
@@ -94,9 +102,10 @@ export function renderDashboardHtml(
   // Last 60 calendar days as a bar chart, oldest first.
   const days: Array<{ date: string; tokens: number }> = [];
   for (let i = 59; i >= 0; i--) {
-    const d = new Date(generatedAt.getTime() - i * 86_400_000)
-      .toISOString()
-      .slice(0, 10);
+    // Step by calendar day (not 24h) so DST changes never skip or repeat a day.
+    const day = new Date(generatedAt);
+    day.setDate(day.getDate() - i);
+    const d = localDay(day);
     days.push({ date: d, tokens: byDate.get(d) ?? 0 });
   }
   const maxDay = Math.max(1, ...days.map((d) => d.tokens));
@@ -234,7 +243,7 @@ export function renderDashboardHtml(
       <div class="flame">🔥</div>
       <div>
         <h1>your local burn</h1>
-        <div class="sub">generated ${esc(generatedAt.toISOString().slice(0, 16).replace("T", " "))} · nothing left your machine</div>
+        <div class="sub">generated ${esc(`${localDay(generatedAt)} ${String(generatedAt.getHours()).padStart(2, "0")}:${String(generatedAt.getMinutes()).padStart(2, "0")}`)} · nothing left your machine</div>
       </div>
     </header>
 ${connectCta}

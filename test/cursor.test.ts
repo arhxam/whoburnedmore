@@ -119,6 +119,18 @@ describe("fetchCursorEvents pagination", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("drops the partly-fetched boundary day when the page cap is reached", async () => {
+    const day = (iso: string) => String(Date.parse(iso));
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(okPage([{ timestamp: day("2026-11-06T12:00:00") }, { timestamp: day("2026-11-05T12:00:00") }]))
+      .mockResolvedValueOnce(okPage([{ timestamp: day("2026-11-05T09:00:00") }, { timestamp: day("2026-11-04T12:00:00") }]));
+    vi.stubGlobal("fetch", fetchMock);
+    // Two full pages with maxPages=2: the history continues past 2026-11-04.
+    const events = await fetchCursorEvents("cookie", 2, 2);
+    expect(events.map((e) => new Date(Number(e.timestamp)).getDate())).toEqual([6, 5, 5]);
+  });
+
   it("throws on a mid-pagination HTTP error rather than returning partial data", async () => {
     // First page succeeds (full), second page 500s. Returning the first page's
     // events would let a partial snapshot overwrite recent-day Cursor totals, so

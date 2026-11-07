@@ -191,6 +191,7 @@ export async function fetchCursorEvents(
   pageSize = 500,
 ): Promise<CursorEvent[]> {
   const all: CursorEvent[] = [];
+  let reachedEnd = false;
   for (let page = 1; page <= maxPages; page++) {
     const res = await fetch(EVENTS_URL, {
       method: "POST",
@@ -218,9 +219,25 @@ export async function fetchCursorEvents(
     const batch = body.usageEventsDisplay ?? [];
     all.push(...batch);
     // A short page is the natural end of data (not an error) — stop cleanly.
-    if (batch.length < pageSize) break;
+    if (batch.length < pageSize) {
+      reachedEnd = true;
+      break;
+    }
   }
-  return all;
+  return reachedEnd ? all : dropBoundaryDay(all);
+}
+
+/**
+ * The page cap stopped us before the end of the history, so the calendar day of
+ * the last fetched event is only partly fetched. Submitting it would overwrite
+ * that day's stored total with a smaller number; dropping it leaves the stored
+ * value in place (days never fetched are simply absent from the payload).
+ */
+function dropBoundaryDay(events: CursorEvent[]): CursorEvent[] {
+  const dayOf = (e: CursorEvent) => localUsageDate(Number(e.timestamp));
+  const boundary = events.length > 0 ? dayOf(events[events.length - 1]) : null;
+  if (!boundary) return events;
+  return events.filter((e) => dayOf(e) !== boundary);
 }
 
 /**
