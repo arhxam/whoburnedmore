@@ -288,6 +288,8 @@ export interface NativeCollectResult {
   filesScanned: number;
   /** True when the read abandoned early on its time budget (caller should fall back). */
   timedOut?: boolean;
+  /** Transcripts the OS refused to let us read; their usage is not included. */
+  permissionDenied?: string[];
 }
 
 /**
@@ -440,6 +442,11 @@ export async function collectClaudeNative(
     entries: finalizeClaudeEntries(acc),
     found: true,
     filesScanned: res.filesRead,
+    // Skipped files mean this scan is partial: keep its rows, but flag it the
+    // way a timeout is flagged so request fingerprints are never lowered.
+    ...(res.permissionDenied
+      ? { timedOut: true, permissionDenied: res.permissionDenied }
+      : {}),
   };
 }
 
@@ -465,6 +472,7 @@ export async function collectClaudeRequests(
   const deadline = now() + (opts.budgetMs ?? NATIVE_READ_BUDGET_MS);
   const acc: ClaudeAccumulator = new Map();
   const onLine = boundedLineAccumulator(acc, opts.maxRequestBytes);
+  let skipped = false;
   for (const f of files) {
     if (now() > deadline) {
       return { requests: [], found: false, timedOut: true };
@@ -474,10 +482,16 @@ export async function collectClaudeRequests(
       deadline,
       now,
     });
+    if (!read.ok && read.reason === "permission-denied") {
+      // Denied at open, so no partial lines were consumed. Keep verifying the
+      // rest (as the usage read does) but flag the upload as incomplete.
+      skipped = true;
+      continue;
+    }
     if (!read.ok) {
       // Never expose a partial verification skeleton as complete.
       return { requests: [], found: false, timedOut: true };
     }
   }
-  return { requests: [...acc.values()], found: true };
+  return { requests: [...acc.values()], found: true, ...(skipped ? { timedOut: true } : {}) };
 }

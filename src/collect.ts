@@ -27,6 +27,7 @@ import { collectCodexNative } from "./native/codex.js";
 import { plausibleUsageDate } from "./native/usage-date.js";
 import { collectVscodeAgent, VSCODE_AGENTS } from "./native/vscode-agents.js";
 import { loadLivePricing } from "./pricing-live.js";
+import { estimateCostUSD } from "./pricing.js";
 import {
   loadProvenanceStore,
   provenanceStorePath,
@@ -122,6 +123,11 @@ export const SOURCES = [
   "hermes",
   "pi",
   "codebuff",
+  // Read by ccusage >= 20.0.29 (Antigravity's conversations/*.db ledgers,
+  // Grok Build CLI's sessions/**/updates.jsonl, ZCode's cli/db/db.sqlite).
+  "antigravity",
+  "grok",
+  "zcode",
 ] as const;
 
 function norm(n: unknown): number {
@@ -133,6 +139,16 @@ function normCost(n: unknown): number {
   const v = Number(n);
   return Number.isFinite(v) && v > 0 ? v : 0;
 }
+
+/**
+ * Sources whose ccusage cost is derived from a token price table rather than
+ * read from the agent's own billing record. When that table predates a model,
+ * ccusage reports real tokens at $0; our shared table (refreshed from LiteLLM
+ * each run) may already know the model. Sources such as OpenCode record the
+ * provider's actual charge, where $0 can be a genuinely free model, so they
+ * are deliberately excluded.
+ */
+const PRICE_TABLE_COST_SOURCES: ReadonlySet<string> = new Set(["claude", "codex"]);
 
 /**
  * Map one ccusage daily report (per-source `date` or aggregate `period`
@@ -231,8 +247,12 @@ export function mapCcusageDaily(
         c.cacheCreationTokens +
         c.cacheReadTokens;
       if (tokens === 0 && c.costUSD === 0) continue;
+      const costUSD =
+        c.costUSD === 0 && PRICE_TABLE_COST_SOURCES.has(tool)
+          ? estimateCostUSD(c.model, c)
+          : c.costUSD;
       // CLI-collected usage from local ccusage logs: origin "cli", unverified.
-      entries.push({ date, tool, ...c, origin: "cli", verified: false });
+      entries.push({ date, tool, ...c, costUSD, origin: "cli", verified: false });
     }
   }
   return entries;
@@ -330,6 +350,9 @@ export interface CollectResult {
   agent: AgentStat;
   /** True when transcript scanning finished within its time budget (full snapshot). */
   attributionComplete: boolean;
+  /** Claude Code transcripts skipped because read access was denied (local paths;
+   *  shown in the terminal only, never submitted). */
+  unreadableClaudeFiles?: string[];
 }
 
 export function codexReplayTombstoneDates(
@@ -786,16 +809,29 @@ export async function collectAll(
   // and Continue.dev. Best effort like cursor: a no-op (found:false) when the
   // agent isn't installed, and they emit the same anti-fraud requestCount the
   // other native readers do.
-  const vscodeTasks = VSCODE_AGENTS.map((a) =>
-    collectVscodeAgent({ tool: a.tool, extIds: a.extIds }).then((r) => {
-      tick();
-      return { tool: a.tool, result: r };
-    }),
-  );
-  const continueTask = collectContinue().then((r) => {
-    tick();
-    return r;
+  // A throw from one of these must not reject the Promise.all below (that
+  // failed the WHOLE sync, so no tool's usage was submitted). Treat it like a
+  // bailed scan: no rows from that reader, and a non-authoritative run.
+  const bailed = (): NativeCollectResult => ({
+    entries: [],
+    found: false,
+    filesScanned: 0,
+    timedOut: true,
   });
+  const vscodeTasks = VSCODE_AGENTS.map((a) =>
+    collectVscodeAgent({ tool: a.tool, extIds: a.extIds })
+      .catch(bailed)
+      .then((r) => {
+        tick();
+        return { tool: a.tool, result: r };
+      }),
+  );
+  const continueTask = collectContinue()
+    .catch(bailed)
+    .then((r) => {
+      tick();
+      return r;
+    });
 
   const [
     sourceResults,
@@ -953,5 +989,8 @@ export async function collectAll(
     skills: sanitizeSkillStats(skills),
     agent: sanitizeAgentStat(reconciled.agent),
     attributionComplete: complete,
+    ...(nativeClaude.permissionDenied
+      ? { unreadableClaudeFiles: nativeClaude.permissionDenied }
+      : {}),
   };
 }

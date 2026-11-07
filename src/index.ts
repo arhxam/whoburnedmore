@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createInterface } from "node:readline/promises";
 import pc from "picocolors";
-import type { SubmitPayload } from "./shared.js";
+import type { SubmitPayload, SubmitResponse } from "./shared.js";
 import {
   applyScope,
   hasUnsafeInstallTokenArg,
@@ -48,6 +48,7 @@ import { antigravityNoticeLines, detectAntigravity } from "./antigravity.js";
 import { collectClaudeRequests } from "./native/claude.js";
 import { prepareVerifyUpload } from "./verify-upload.js";
 import {
+  autoSyncOptedOut,
   clearAuth,
   defaultConfigDir,
   deviceKeyHash,
@@ -57,6 +58,7 @@ import {
   recordDeviceBound,
   recordSync,
   saveAuth,
+  setAutoSyncOptOut,
 } from "./config.js";
 import { agentStatusReport } from "./status.js";
 import { renderDashboardHtml, writeLocalDashboard } from "./local-dashboard.js";
@@ -158,12 +160,13 @@ function openBrowser(url: string): void {
   spawn(cmd, args, { stdio: "ignore", detached: true }).unref();
 }
 
-async function confirm(question: string): Promise<boolean> {
+async function confirm(question: string, defaultYes = true): Promise<boolean> {
   if (!process.stdin.isTTY) return false;
   const rl = createInterface({ input: process.stdin, output: process.stdout });
-  const answer = (await rl.question(`${question} ${pc.dim("[Y/n]")} `)).trim();
+  const hint = defaultYes ? "[Y/n]" : "[y/N]";
+  const answer = (await rl.question(`${question} ${pc.dim(hint)} `)).trim();
   rl.close();
-  return answer === "" || /^y(es)?$/i.test(answer);
+  return answer === "" ? defaultYes : /^y(es)?$/i.test(answer);
 }
 
 interface Flags {
@@ -193,7 +196,7 @@ function showLocalDashboard(payload: SubmitPayload): void {
   console.log();
   console.log(`  Local dashboard: ${pc.cyan(fileUrl)}`);
   console.log(pc.dim("  Re-run `npx whoburnedmore --local` to refresh it. Nothing left your machine."));
-  openBrowser(fileUrl);
+  if (process.stdout.isTTY) openBrowser(fileUrl);
 }
 
 async function run(flags: Flags): Promise<void> {
@@ -222,6 +225,18 @@ async function run(flags: Flags): Promise<void> {
     collected = await collectAll(progress.onProgress, { offline: flags.local });
   } finally {
     progress.stop();
+  }
+  const unreadable = collected.unreadableClaudeFiles ?? [];
+  if (unreadable.length > 0 && !flags.quiet) {
+    console.log(
+      pc.yellow(
+        `  ⚠ Skipped ${unreadable.length} Claude Code transcript${unreadable.length === 1 ? "" : "s"} this account can't read (permission denied), e.g.`,
+      ),
+    );
+    console.log(pc.dim(`    ${sanitizeServerText(unreadable[0])}`));
+    console.log(
+      pc.dim("    Their usage isn't counted until you fix the file's owner or permissions (often left by `sudo claude`)."),
+    );
   }
   const {
     entries,
@@ -290,13 +305,17 @@ async function run(flags: Flags): Promise<void> {
     if (!flags.quiet && process.stdin.isTTY) {
       await publishLocal(payload, {
         confirm,
-        signIn: ensureSignedIn,
+        // Stored token, then a silent refresh, then device sign-in — the same
+        // order as every other signed-in command.
+        signIn: () => requireSignedIn("--local"),
         submit: async (token, p) => {
           // Use the same bind-before-submit path as a normal signed-in run. This
           // also attaches the just-created device hash to first-run Codex proof
           // metadata; binding after the write made a valid first correction fail
           // closed and left the inflated total in place.
-          const result = await submitFromBoundDevice(token, p);
+          // An expired token is refreshed (or re-signed-in) once, like a normal run.
+          const result = await submitWithAuthRecovery(token, p, true);
+          if (!result) return null;
           try {
             recordSync();
           } catch {
@@ -447,32 +466,36 @@ async function ensureSignedIn(): Promise<{ token: string; handle: string } | nul
  * and retry; unattended and unhealable, give up quietly (the next interactive
  * run re-auths).
  */
+async function submitWithAuthRecovery(
+  token: string,
+  payload: SubmitPayload,
+  interactive: boolean,
+): Promise<SubmitResponse | null> {
+  try {
+    return await submitFromBoundDevice(token, payload);
+  } catch (err) {
+    if (!(err instanceof UnauthorizedError)) throw err;
+    const healed = await refreshCliTokenFromConfig();
+    if (healed) {
+      saveAuth(undefined, { cliToken: healed.token, handle: healed.handle });
+      return await submitFromBoundDevice(healed.token, payload);
+    }
+    clearAuth();
+    if (!interactive) return null; // background can't re-auth — stay silent
+    const auth = await ensureSignedIn();
+    if (!auth) return null;
+    return await submitFromBoundDevice(auth.token, payload);
+  }
+}
+
 async function submitSignedIn(
   token: string,
   payload: SubmitPayload,
   flags: Flags,
   interactive: boolean,
 ): Promise<void> {
-  let result;
-  try {
-    result = await submitFromBoundDevice(token, payload);
-  } catch (err) {
-    if (err instanceof UnauthorizedError) {
-      const healed = await refreshCliTokenFromConfig();
-      if (healed) {
-        saveAuth(undefined, { cliToken: healed.token, handle: healed.handle });
-        result = await submitFromBoundDevice(healed.token, payload);
-      } else {
-        clearAuth();
-        if (!interactive) return; // background can't re-auth — stay silent
-        const auth = await ensureSignedIn();
-        if (!auth) return;
-        result = await submitFromBoundDevice(auth.token, payload);
-      }
-    } else {
-      throw err;
-    }
-  }
+  const result = await submitWithAuthRecovery(token, payload, interactive);
+  if (!result) return;
 
   try {
     recordSync();
@@ -503,7 +526,8 @@ async function submitSignedIn(
           "  Verify your usage to get back on — this sends a detailed per-request breakdown (timestamps + token counts, never your prompts or code).",
         ),
       );
-      if (process.stdin.isTTY && (await confirm("  Verify now?"))) {
+      // Verifying uploads a per-request breakdown, so Enter must not opt in.
+      if (process.stdin.isTTY && (await confirm("  Verify now?", false))) {
         await runVerify();
         afterSubmitChores(flags);
         return;
@@ -534,8 +558,12 @@ async function submitSignedIn(
       );
     }
     if (isTrustedWebUrl(baseUrl)) {
-      console.log(pc.dim("  Opening your dashboard in your browser…"));
-      openBrowser(baseUrl);
+      // Only pop a browser for a person at a terminal; CI, pipes and
+      // redirected runs still get the address in the next-step lines below.
+      if (process.stdout.isTTY) {
+        console.log(pc.dim("  Opening your dashboard in your browser…"));
+        openBrowser(baseUrl);
+      }
     } else {
       console.log(
         pc.dim("  The server returned an unexpected dashboard address, so it was NOT auto-opened. Open it yourself only if you trust it:"),
@@ -604,14 +632,21 @@ function afterSubmitChores(flags: Flags): void {
     }
     return;
   }
-  try {
-    reconcileAutoSync();
-  } catch {
-    // ignore — the submit already succeeded; user can `install-sync` manually.
+  // `uninstall-sync` is an explicit choice: a later foreground run must not
+  // quietly turn background sync back on (only `install-sync`/`link` do).
+  const optedOut = autoSyncOptedOut();
+  if (!optedOut) {
+    try {
+      reconcileAutoSync();
+    } catch {
+      // ignore — the submit already succeeded; user can `install-sync` manually.
+    }
   }
   console.log();
   console.log(
-    autoSyncInstalled()
+    optedOut
+      ? pc.dim("  Background sync is off. Re-run anytime to update your page, or `npx whoburnedmore install-sync` to turn it back on.")
+      : autoSyncInstalled()
       ? pc.dim("  Background sync is on — your page updates automatically every 15 min (`npx whoburnedmore uninstall-sync` to stop).")
       : pc.dim("  Re-run anytime to update your page."),
   );
@@ -673,6 +708,8 @@ async function linkServerInstall(token: string | undefined): Promise<void> {
   });
 
   try {
+    // Linking a server is an explicit request for background sync.
+    setAutoSyncOptOut(false);
     const action = reconcileAutoSync();
     if (action === "installed") {
       console.log(pc.dim("  Background sync installed; this machine will refresh every 15 min."));
@@ -778,22 +815,10 @@ async function runVerify(): Promise<void> {
     ),
   );
 
-  // Verify is tied to the delisted account, so it requires sign-in.
-  const cfg = loadConfig();
-  let token = cfg?.cliToken;
-  if (!token) {
-    if (!process.stdout.isTTY) {
-      console.log(
-        pc.yellow(
-          "  Sign in first — run `npx whoburnedmore verify` in an interactive terminal.",
-        ),
-      );
-      return;
-    }
-    const auth = await ensureSignedIn();
-    if (!auth) return;
-    token = auth.token;
-  }
+  // Verify is tied to the delisted account, so it requires sign-in. Try the
+  // stored token, then a silent refresh, before asking for a new approval.
+  const auth = await requireSignedIn("verify");
+  if (!auth) return;
 
   if (process.stdin.isTTY) {
     const ok = await confirm("\n  Send this breakdown to verify your usage?");
@@ -829,13 +854,28 @@ async function runVerify(): Promise<void> {
       `  Sending ${records.length} request records for analysis${truncated ? " (most recent, sampled)" : ""}…`,
     ),
   );
+  const body = {
+    cliVersion: VERSION,
+    requests: records,
+    ...(truncated ? { truncated: true } : {}),
+  };
+  // An expired bearer is refreshed once for the SAME account. Never fall
+  // through to a fresh device sign-in here: the breakdown must not go to a
+  // different account than the one the user set out to verify.
+  const verifyWithRefresh = async () => {
+    try {
+      return await verifyUsage(auth.token, body);
+    } catch (err) {
+      if (!(err instanceof UnauthorizedError)) throw err;
+      const healed = await refreshCliTokenFromConfig();
+      if (!healed) throw err;
+      saveAuth(undefined, { cliToken: healed.token, handle: healed.handle });
+      return await verifyUsage(healed.token, body);
+    }
+  };
   let result;
   try {
-    result = await verifyUsage(token, {
-      cliVersion: VERSION,
-      requests: records,
-      ...(truncated ? { truncated: true } : {}),
-    });
+    result = await verifyWithRefresh();
   } catch (err) {
     if (err instanceof UnauthorizedError) {
       clearAuth();
@@ -1048,9 +1088,12 @@ async function main(): Promise<void> {
       break;
     case "install-sync":
       console.log(`  ${installAutoSync()}`);
+      setAutoSyncOptOut(false);
       break;
     case "uninstall-sync":
       console.log(`  ${uninstallAutoSync()}`);
+      // Remember the choice so the next foreground run doesn't reinstall it.
+      setAutoSyncOptOut(true);
       break;
     case "help":
       printHelp();

@@ -1,6 +1,10 @@
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it, expect } from "vitest";
 import {
   accumulatorToResult,
+  collectAttribution,
   countRecord,
   createAccumulator,
   createCodexContext,
@@ -283,5 +287,35 @@ describe("processRecord — per-tool / per-skill token burn", () => {
       count: 1,
       tokens: 200,
     });
+  });
+});
+
+describe("collectAttribution transcript roots", () => {
+  it("scans every comma-separated CLAUDE_CONFIG_DIR root, like the usage reader", async () => {
+    const root = await mkdtemp(join(tmpdir(), "wbm-attr-roots-"));
+    try {
+      const line = (tool: string) =>
+        JSON.stringify({
+          type: "assistant",
+          sessionId: `s-${tool}`,
+          message: { role: "assistant", content: [{ type: "tool_use", name: tool }] },
+        }) + "\n";
+      for (const [dir, tool] of [["a", "Bash"], ["b", "Read"]] as const) {
+        await mkdir(join(root, dir, "projects", "p"), { recursive: true });
+        await writeFile(join(root, dir, "projects", "p", "t.jsonl"), line(tool));
+      }
+      // HOME points at an empty dir: nothing outside the configured roots counts.
+      const env = {
+        HOME: join(root, "home"),
+        CLAUDE_CONFIG_DIR: `${join(root, "a")},${join(root, "b")}`,
+        CODEX_HOME: join(root, "codex"),
+        WHOBURNEDMORE_CONFIG_DIR: join(root, "cfg"),
+      } as NodeJS.ProcessEnv;
+      const result = await collectAttribution(env);
+      expect(result.tools.map((t) => t.name).sort()).toEqual(["Bash", "Read"]);
+      expect(result.complete).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

@@ -543,6 +543,68 @@ describe("mapCcusageDaily", () => {
     expect(entries[0].costUSD).toBeCloseTo(0.8634);
   });
 
+  it("prices codex tokens that ccusage reported at $0 from the shared table", () => {
+    // Suggested in public PR #26: an older ccusage price snapshot reports real
+    // Codex tokens with a zero day cost. 1M input on gpt-5.3-codex = $1.75.
+    const entries = mapCcusageDaily("codex", {
+      daily: [
+        {
+          date: "2026-02-05",
+          costUSD: 0,
+          models: {
+            "gpt-5.3-codex": {
+              inputTokens: 1_000_000,
+              outputTokens: 0,
+              cacheCreationTokens: 0,
+              cacheReadTokens: 0,
+            },
+          },
+        },
+      ],
+    });
+    expect(entries).toHaveLength(1);
+    expect(entries[0].costUSD).toBeCloseTo(1.75, 6);
+  });
+
+  it("keeps a $0 day at $0 for unknown models and for sources that record real charges", () => {
+    const unknown = mapCcusageDaily("codex", {
+      daily: [
+        {
+          date: "2026-02-05",
+          costUSD: 0,
+          models: { "not-a-real-model": { inputTokens: 5_000, outputTokens: 0 } },
+        },
+      ],
+    });
+    expect(unknown[0].costUSD).toBe(0);
+    // OpenCode stores the provider's actual charge; a free model stays free.
+    const opencode = mapCcusageDaily("opencode", {
+      daily: [
+        {
+          date: "2026-02-05",
+          inputTokens: 1_000_000,
+          outputTokens: 0,
+          totalCost: 0,
+          modelsUsed: ["gpt-5.3-codex"],
+        },
+      ],
+    });
+    expect(opencode[0].costUSD).toBe(0);
+  });
+
+  it("does not replace a nonzero ccusage cost with an estimate", () => {
+    const entries = mapCcusageDaily("codex", {
+      daily: [
+        {
+          date: "2026-02-05",
+          costUSD: 0.5,
+          models: { "gpt-5.3-codex": { inputTokens: 1_000_000, outputTokens: 0 } },
+        },
+      ],
+    });
+    expect(entries[0].costUSD).toBeCloseTo(0.5, 6);
+  });
+
   it("splits day-level cost across the models map proportionally to tokens", () => {
     const entries = mapCcusageDaily("codex", {
       daily: [

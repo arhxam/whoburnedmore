@@ -153,10 +153,22 @@ async function collectFastClaude(env: NodeJS.ProcessEnv, cachePath: string): Pro
   if (fingerprint !== null && cached?.fingerprint === fingerprint && Date.now() - cached.at < 60 * 60_000) {
     return { ...cached.value, filesScanned: 0 };
   }
-  const value = await collectClaudeNative(env, { cachePath });
+  const raw = await collectClaudeNative(env, { cachePath });
+  // Transcripts the OS refused to read make this scan partial. The sidecar has
+  // no last-good fingerprint store like the CLI's reconcileProvenance, so never
+  // send a request count that could be LOWER than the stored one (that reads as
+  // forgery). Rows without requestCount are what the old ccusage fallback sent.
+  const value: NativeCollectResult = raw.permissionDenied
+    ? {
+        ...raw,
+        entries: raw.entries.map(({ requestCount: _dropped, ...entry }) => entry),
+      }
+    : raw;
   // Retain only aggregate rows, not transcript/request caches. Idle safety
-  // polls should not deserialize and rewrite a potentially 128-MiB cache.
-  if (fingerprint !== null && !value.timedOut) {
+  // polls should not deserialize and rewrite a potentially 128-MiB cache. A
+  // permission-denied scan is complete apart from those files, so it is cached
+  // too (the hour-long TTL bounds how long a later chmod goes unnoticed).
+  if (fingerprint !== null && (!value.timedOut || value.permissionDenied)) {
     claudeCache.set(key, { at: Date.now(), fingerprint, value });
   }
   return value;

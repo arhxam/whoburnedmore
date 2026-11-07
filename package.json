@@ -1,6 +1,6 @@
 {
   "name": "whoburnedmore",
-  "version": "0.9.24",
+  "version": "0.9.25",
   "description": "Find out who burned more — submit your AI coding-agent token usage to the public leaderboard at whoburnedmore.com",
   "type": "module",
   "bin": {
@@ -17,7 +17,7 @@
     "prepublishOnly": "npm run lint && npm run test && npm run build && npm run smoke:package"
   },
   "dependencies": {
-    "ccusage": "20.0.19",
+    "ccusage": "20.0.46",
     "picocolors": "1.1.1"
   },
   "devDependencies": {
