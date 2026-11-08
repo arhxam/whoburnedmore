@@ -18,6 +18,36 @@ final class SecurityBoundaryTests: XCTestCase {
         XCTAssertNil(TrustedWebURL.serviceOrigin("file:///tmp/socket"))
     }
 
+    func testAPIOriginPrefersWhoburnedmoreAPI() {
+        XCTAssertEqual(
+            TrustedWebURL.apiOrigin(environment: [
+                "WHOBURNEDMORE_API": "https://api.example.com",
+                "BURNBAR_API_BASE": "https://other.example.com",
+            ]),
+            "https://api.example.com"
+        )
+        XCTAssertEqual(
+            TrustedWebURL.apiOrigin(environment: [
+                "BURNBAR_API_BASE": "http://127.0.0.1:3001",
+            ]),
+            "http://127.0.0.1:3001"
+        )
+        XCTAssertEqual(
+            TrustedWebURL.apiOrigin(environment: [
+                "WHOBURNEDMORE_API": "   ",
+                "BURNBAR_API_BASE": "https://api.example.com",
+            ]),
+            "https://api.example.com"
+        )
+        XCTAssertEqual(TrustedWebURL.apiOrigin(environment: [:]), "https://api.whoburnedmore.com")
+        XCTAssertNil(
+            TrustedWebURL.apiOrigin(environment: [
+                "WHOBURNEDMORE_API": "http://api.example.com",
+                "BURNBAR_API_BASE": "https://api.whoburnedmore.com",
+            ])
+        )
+    }
+
     func testBoundedDataAccumulatorStopsAtTheConfiguredCeiling() throws {
         var accumulator = BoundedDataAccumulator(maxBytes: 4)
         try accumulator.append(1)

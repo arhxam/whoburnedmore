@@ -7,6 +7,11 @@ import SwiftUI
 @MainActor
 enum OnboardingWindow {
     private static var window: NSWindow?
+    private static var closeMonitor: OnboardingCloseMonitor?
+
+    static func releaseWindow() {
+        window = nil
+    }
 
     static func showIfNeeded(model: AppModel, settings: SettingsStore) {
         guard !settings.onboardingDone, window == nil else { return }
@@ -19,6 +24,9 @@ enum OnboardingWindow {
         w.setContentSize(NSSize(width: 520, height: 650))
         w.styleMask = [.titled, .closable]
         w.isReleasedWhenClosed = false
+        let monitor = OnboardingCloseMonitor(settings: settings)
+        w.delegate = monitor
+        closeMonitor = monitor
         w.level = .floating
         w.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         w.center()
@@ -58,6 +66,7 @@ struct OnboardingView: View {
     private let tools = Self.detectTools()
 
     var body: some View {
+        let signedInHandle = WbmClient.configuredHandle()
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 8) {
                 BurnFlame(size: 20)
@@ -131,10 +140,18 @@ struct OnboardingView: View {
                 Button("See the leaderboard ↗") {
                     if let url = URL(string: "https://whoburnedmore.com") { NSWorkspace.shared.open(url) }
                 }
-                Button("Connect account") {
-                    settings.onboardingDone = true
-                    OnboardingWindow.close()
-                    SettingsWindow.show(model: model, settings: settings)
+                if let signedInHandle {
+                    Text("Signed in as @\(signedInHandle).")
+                        .font(.callout)
+                } else if WbmClient.hasCliToken() {
+                    Text("Signed in.")
+                        .font(.callout)
+                } else {
+                    Button("Connect account") {
+                        settings.onboardingDone = true
+                        OnboardingWindow.close()
+                        SettingsWindow.show(model: model, settings: settings, pane: .account)
+                    }
                 }
                 Spacer()
                 Button("Done") {
@@ -146,5 +163,20 @@ struct OnboardingView: View {
         }
         .padding(24)
         .frame(width: 520)
+    }
+}
+
+/// The window close button has to finish onboarding too, not only Done / Connect.
+@MainActor
+private final class OnboardingCloseMonitor: NSObject, NSWindowDelegate {
+    private let settings: SettingsStore
+
+    init(settings: SettingsStore) {
+        self.settings = settings
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        settings.onboardingDone = true
+        OnboardingWindow.releaseWindow()
     }
 }

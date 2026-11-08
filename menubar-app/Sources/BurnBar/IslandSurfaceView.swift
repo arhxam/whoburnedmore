@@ -331,9 +331,33 @@ private struct IslandDashboard: View {
                 }
                 .frame(height: 46)
             }
+        case .signedInSyncOff(let handle):
+            Button {
+                if !settings.syncEnabled { model.setLeaderboardSyncEnabled(true) }
+            } label: {
+                VStack(alignment: .leading, spacing: 8) {
+                    sectionLabel("Today’s leaderboard")
+                    HStack(spacing: 9) {
+                        Image(systemName: "person.crop.circle.badge.checkmark")
+                            .foregroundStyle(.orange)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(WbmClient.signedInTitle(handle))
+                                .font(.callout.weight(.semibold))
+                            Text(settings.syncEnabled ? "Leaderboard sync is on." : "Turn on leaderboard sync")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                    }
+                    .frame(height: 46)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(settings.syncEnabled ? "Leaderboard sync is on" : "Turn on leaderboard sync")
         case .noAccount:
             Button {
-                openLeaderboardHome()
+                SettingsWindow.show(model: model, settings: settings, pane: .account)
             } label: {
                 VStack(alignment: .leading, spacing: 8) {
                     sectionLabel("Today’s leaderboard")
@@ -348,7 +372,7 @@ private struct IslandDashboard: View {
                                 .foregroundStyle(.secondary)
                         }
                         Spacer()
-                        Image(systemName: "arrow.up.right")
+                        Image(systemName: "chevron.right")
                             .font(.caption.weight(.bold))
                             .foregroundStyle(.tertiary)
                     }
@@ -357,6 +381,7 @@ private struct IslandDashboard: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .help("Open Account settings")
         }
     }
 
@@ -428,11 +453,6 @@ private struct IslandDashboard: View {
         .frame(height: 22)
         .padding(.horizontal, 6)
         .background(isCurrent ? Color.white.opacity(0.08) : .clear, in: RoundedRectangle(cornerRadius: 6))
-    }
-
-    private func openLeaderboardHome() {
-        let web = ProcessInfo.processInfo.environment["WHOBURNEDMORE_WEB"] ?? "https://whoburnedmore.com"
-        if let url = URL(string: web) { NSWorkspace.shared.open(url) }
     }
 
     private var footer: some View {

@@ -103,7 +103,11 @@ final class DeviceFlow: ObservableObject {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         req.httpBody = try? JSONSerialization.data(withJSONObject: ["anonKey": anonKey])
-        _ = try? await BoundedHTTP.data(for: req, maxBytes: 512 * 1024) // best-effort; refresh still works via CLI
+        // 200 bound or already linked; 409 is a definitive identity conflict.
+        // Match the CLI: only that answer stamps deviceBoundAt. Best-effort.
+        guard let (_, http) = try? await BoundedHTTP.data(for: req, maxBytes: 512 * 1024),
+              http.statusCode == 200 || http.statusCode == 409 else { return }
+        try? AuthConfigStore.recordDeviceBound(url: Self.configFileURL())
     }
 
     private struct StartResp: Decodable {

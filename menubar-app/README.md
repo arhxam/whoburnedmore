@@ -92,7 +92,7 @@ Appcast release notes follow the same rule: `whoburnedmore.md` is primary and
 
 - `BURNBAR_DEBUG_WINDOW=1` opens the popover content in a floating window
   (used by `scripts/debug-window-shot.sh` for screenshot verification).
-- `BURNBAR_API_BASE` / `WHOBURNEDMORE_WEB` override the whoburnedmore endpoints;
+- `WHOBURNEDMORE_API` overrides the API origin and wins over `BURNBAR_API_BASE`; `WHOBURNEDMORE_WEB` overrides the website;
   `BURNBAR_SIDECAR` / `BURNBAR_CCUSAGE` point at dev binaries;
   `BURNBAR_CACHE_DIR`, `BURNBAR_DEBOUNCE_MS`, `BURNBAR_NATIVE_POLL_MS`,
   `BURNBAR_LIMITS_POLL_MS`, `BURNBAR_WATCH_RESCAN_MS`, and

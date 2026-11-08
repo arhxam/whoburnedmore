@@ -1,10 +1,14 @@
 import BurnBarCore
 import Foundation
 
-/// Leaderboard data for the always-present island section. Standalone-first:
-/// no config file gets a connect prompt; network failure gets an offline state.
+/// Leaderboard data for the always-present island section.
+/// No stored sign-in gets a connect prompt. A stored sign-in with sync off
+/// stays signed in. Network failure gets an offline state.
 enum WbmState: Equatable {
     case noAccount
+    /// A handle or token is already stored, and leaderboard sync is off.
+    /// `handle` is empty only when a token is stored without a handle.
+    case signedInSyncOff(handle: String)
     case offline(handle: String)
     case ready(WbmProfile)
 }
@@ -12,12 +16,38 @@ enum WbmState: Equatable {
 @MainActor
 final class WbmClient {
     static func apiBase() -> String? {
-        let raw = ProcessInfo.processInfo.environment["BURNBAR_API_BASE"]
-            ?? "https://api.whoburnedmore.com"
-        return TrustedWebURL.serviceOrigin(raw)?.absoluteString
+        TrustedWebURL.apiOrigin(environment: ProcessInfo.processInfo.environment)
+    }
+
+    static func signedInTitle(_ handle: String) -> String {
+        handle.isEmpty ? "Signed in" : "Signed in as @\(handle)"
+    }
+
+    static func hasCliToken() -> Bool {
+        storedAccount().hasToken
+    }
+
+    /// Sync off is not the same as signed out. Fetching stays disabled either way.
+    static func accountStateForDisabledSync() -> WbmState {
+        let account = storedAccount()
+        if account.hasToken || account.handle != nil {
+            return .signedInSyncOff(handle: account.handle ?? "")
+        }
+        return .noAccount
     }
 
     static func configuredHandle() -> String? {
+        storedAccount().handle
+    }
+
+    private struct StoredAccount {
+        var handle: String?
+        var hasToken: Bool
+    }
+
+    /// First config that already has a handle or token. `WHOBURNEDMORE_CONFIG_DIR`
+    /// is checked before `~/.config/whoburnedmore`.
+    private static func storedAccount() -> StoredAccount {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let candidates = [
             ProcessInfo.processInfo.environment["WHOBURNEDMORE_CONFIG_DIR"].map { URL(fileURLWithPath: $0) },
@@ -25,13 +55,16 @@ final class WbmClient {
         ].compactMap { $0 }
         for dir in candidates {
             let file = dir.appendingPathComponent("config.json")
-            guard let data = try? Data(contentsOf: file) else { continue }
-            struct Cfg: Decodable { let handle: String? }
-            if let handle = (try? JSONDecoder().decode(Cfg.self, from: data))?.handle, !handle.isEmpty {
-                return handle
+            guard let data = try? Data(contentsOf: file),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+            let handle = (object["handle"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            let token = object["cliToken"] as? String
+            let hasToken = !(token?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+            if handle != nil || hasToken {
+                return StoredAccount(handle: handle, hasToken: hasToken)
             }
         }
-        return nil
+        return StoredAccount(handle: nil, hasToken: false)
     }
 
     func fetch() async -> WbmState {
