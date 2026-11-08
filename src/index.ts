@@ -29,6 +29,8 @@ import {
   webBase,
   isTrustedWebUrl,
   isOpenableUrl,
+  browserOpenCommand,
+  RateLimitedError,
   redeemServerInstall,
   verifyUsage,
   UnauthorizedError,
@@ -64,7 +66,7 @@ import {
 } from "./config.js";
 import { agentStatusReport } from "./status.js";
 import { renderDashboardHtml, writeLocalDashboard } from "./local-dashboard.js";
-import { sanitizeServerText, signedInNextStepLines } from "./output.js";
+import { scopeWarningLines, sanitizeServerText, signedInNextStepLines, syncSummaryLine } from "./output.js";
 import { publishLocal } from "./publish.js";
 
 const require = createRequire(import.meta.url);
@@ -152,13 +154,7 @@ function openBrowser(url: string): void {
   // Never hand the OS opener anything but an http(s)/file URL — blocks javascript:/data:/
   // custom-scheme URLs and leading-dash arg-injection a hostile server response could carry.
   if (!isOpenableUrl(url)) return;
-  const os = platform();
-  const [cmd, args] =
-    os === "darwin"
-      ? ["open", [url]]
-      : os === "win32"
-        ? ["cmd", ["/c", "start", "", url]]
-        : ["xdg-open", [url]];
+  const [cmd, args] = browserOpenCommand(platform(), url);
   spawn(cmd, args, { stdio: "ignore", detached: true }).unref();
 }
 
@@ -442,15 +438,27 @@ async function ensureSignedIn(): Promise<{ token: string; handle: string } | nul
   console.log(pc.dim("  Waiting for you to approve in the browser…"));
 
   const deadline = Date.now() + dev.expiresInSeconds * 1000;
-  const intervalMs = Math.max(1, dev.pollIntervalSeconds) * 1000;
+  const baseIntervalMs = Math.max(1, dev.pollIntervalSeconds) * 1000;
+  let intervalMs = baseIntervalMs;
+  let warnedBusy = false;
   while (Date.now() < deadline) {
     await sleep(intervalMs);
     let res;
     try {
       res = await devicePoll(dev.deviceCode);
-    } catch {
+    } catch (err) {
+      if (err instanceof RateLimitedError) {
+        // Say so once instead of silently waiting out the whole code lifetime,
+        // and back off so we stop adding to the pressure.
+        if (!warnedBusy) {
+          console.log(pc.dim("  The sign-in server is busy right now; still waiting — approve in the browser and this will finish."));
+          warnedBusy = true;
+        }
+        intervalMs = Math.min(intervalMs * 2, 30_000);
+      }
       continue; // transient network blip — keep polling until the deadline
     }
+    intervalMs = baseIntervalMs;
     if (res.status === "ok") {
       saveAuth(undefined, {
         cliToken: res.token,
@@ -521,6 +529,8 @@ async function submitSignedIn(
       pc.green("  ✓ Synced securely.") +
         pc.dim(" Only your daily totals left this machine — never your prompts, code, or file names."),
     );
+    const summary = syncSummaryLine(result, payload.entries);
+    if (summary) console.log(summary);
     // Delisted? Surface it right here and offer the one-step fix in the same
     // session — the user is already signed in and at the keyboard, so this turns
     // "discover you're gone → hunt for the fix → open a terminal" into one prompt.
@@ -584,6 +594,7 @@ async function submitSignedIn(
       if (line.includes("→")) console.log(pc.bold(line));
       else console.log(line);
     }
+    for (const line of scopeWarningLines(flags, result)) console.log(pc.yellow(line));
   }
   afterSubmitChores(flags);
 }
@@ -1188,6 +1199,10 @@ function printHelp(): void {
 }
 
 main().catch((err: Error) => {
-  console.error(pc.red(`\n  ${err.message}\n`));
+  // Last line of defense for any message that carries server text: keep line
+  // breaks (some local errors are multi-line) but drop every other control byte.
+  // eslint-disable-next-line no-control-regex -- removing control bytes is the point
+  const message = String(err?.message ?? err).replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/g, "");
+  console.error(pc.red(`\n  ${message}\n`));
   process.exitCode = 1;
 });
