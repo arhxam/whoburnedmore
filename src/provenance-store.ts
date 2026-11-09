@@ -17,7 +17,10 @@
  * Conservative + back-compat: with nothing stored it is a no-op, and it never
  * inflates a day beyond what a real scan actually observed.
  */
-import { join } from "node:path";
+import { randomBytes } from "node:crypto";
+import { lstatSync, mkdirSync, opendirSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import type { AgentStat, DailyUsageEntry } from "./shared.js";
 import { defaultConfigDir } from "./config.js";
 import { readTextFileSyncCapped, writePrivateFileAtomic } from "./safe-local-file.js";
@@ -87,6 +90,113 @@ export function saveProvenanceStore(path: string, store: ProvenanceStore): void 
     writePrivateFileAtomic(path, JSON.stringify(store), MAX_PROVENANCE_STORE_BYTES);
   } catch {
     // Best-effort: the run still submits correct data without the store.
+  }
+}
+
+/** Remove only our unique marker. Never recursively remove a shared lock. */
+function releaseProvenanceLock(path: string, marker: string): void {
+  try { unlinkSync(join(path, marker)); } catch { /* already removed */ }
+  // A late releaser/reaper cannot remove a new owner's nonempty directory.
+  try { rmdirSync(path); } catch { /* occupied, missing, or inaccessible */ }
+}
+
+/** Recover only confirmed-dead local owners, never an expired time lease. */
+function reapProvenanceLock(path: string): void {
+  try {
+    if (!lstatSync(path).isDirectory()) return; // includes symlinks
+    const dir = opendirSync(path);
+    let marker: string | null = null;
+    try {
+      const first = dir.readSync();
+      if (first) {
+        if (!first.isFile() || dir.readSync()) return;
+        marker = first.name;
+      }
+    } finally {
+      dir.closeSync();
+    }
+    if (marker === null) {
+      // Close the directory handle first for Windows. A new owner's nonempty
+      // directory cannot be removed if it publishes before this rmdir.
+      try { rmdirSync(path); } catch { /* no longer empty */ }
+      return;
+    }
+    const match = /^([1-9][0-9]*)\.([a-f0-9]{32})$/.exec(marker);
+    if (!match) return;
+    const pid = Number(match[1]);
+    if (!Number.isSafeInteger(pid)) return;
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") {
+        releaseProvenanceLock(path, marker);
+      }
+    }
+  } catch {
+    // Malformed, inaccessible, or concurrently removed locks fail closed.
+  }
+}
+
+/**
+ * Local-filesystem, same-host lock. Publish a prefilled directory atomically:
+ * rename cannot replace another owner's nonempty directory, and no crash can
+ * expose a half-written owner record. PID reuse merely prevents reclamation;
+ * a suspended live process never loses its lock to a stale-time heuristic.
+ * Acquisition retries are bounded; filesystem syscalls themselves may block.
+ */
+async function acquireProvenanceLock(path: string): Promise<(() => void) | null> {
+  const lockPath = `${path}.lock`;
+  const marker = `${process.pid}.${randomBytes(16).toString("hex")}`;
+  const staging = `${lockPath}.${marker}.tmp`;
+  let published = false;
+  try {
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    mkdirSync(staging, { mode: 0o700 });
+    writeFileSync(join(staging, marker), "", { flag: "wx", mode: 0o600 });
+    const deadline = performance.now() + 1_000;
+    while (true) {
+      try {
+        if (!lstatSync(lockPath).isDirectory()) return null;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") return null;
+      }
+      try {
+        renameSync(staging, lockPath);
+        published = true;
+        return () => releaseProvenanceLock(lockPath, marker);
+      } catch {
+        reapProvenanceLock(lockPath);
+      }
+      if (performance.now() >= deadline) return null;
+      await delay(10);
+    }
+  } catch {
+    return null;
+  } finally {
+    if (!published) releaseProvenanceLock(staging, marker);
+  }
+}
+
+/**
+ * Serialize the entire read/reconcile/write, not just the atomic replacement.
+ * Keep the transaction synchronous after acquiring the lock. On contention or
+ * IO failure, reconcile against a fresh read but do not persist an unlocked
+ * snapshot: that would overwrite another process's last-good fingerprints.
+ * A killed owner is recoverable; this is not a power-loss durability guarantee.
+ */
+export async function reconcileAndSaveProvenance(
+  path: string,
+  entries: DailyUsageEntry[],
+  agent: AgentStat,
+  complete: boolean,
+): Promise<ReturnType<typeof reconcileProvenance>> {
+  const release = await acquireProvenanceLock(path);
+  try {
+    const reconciled = reconcileProvenance(entries, agent, complete, loadProvenanceStore(path));
+    if (release) saveProvenanceStore(path, reconciled.store);
+    return reconciled;
+  } finally {
+    release?.();
   }
 }
 
