@@ -19,17 +19,30 @@ server** so you land on the public leaderboard and get a shareable dashboard.
 
 Your **first run signs you in** — the CLI opens a page and you approve a short code — then
 binds this machine to your account so your usage lands on the leaderboard under your handle.
-(Prefer to stay fully offline? `--local` never signs in and never uploads.)
+(Prefer to stay offline? Use `--local` and decline the optional publish prompt.)
 
 ### What leaves your machine
 
-Only **daily aggregate numbers** — date, tool, model, token counts, and estimated cost
-(plus optional per-session / per-tool rollups). **Never** your prompts, your code, file
-contents, or file paths. Run `private` to drop off the board, `remove` to delete your
-dashboard and its data, or use `--local` to stay fully offline.
+**Normal runs and background sync** upload daily usage totals: date, tool, model, token
+counts, estimated cost and request counts when available. They can also send time-window
+totals, tool/skill names and counts, and aggregate main-agent/subagent message and token
+counts. Sync includes CLI, timezone and device metadata, plus any requested board/org
+scope. Per-session rollups, session identifiers and project names are not uploaded.
 
-> Want a 100%-local report that makes **no** network calls at all? Use `npx whoburnedmore
-> --local`, which builds an HTML dashboard on your machine and uploads nothing.
+**Opt-in verification is different:** `verify` sends a bounded per-request breakdown
+from local Claude Code logs, including dates, timestamps, model, token counts and hashed
+request identifiers. An interactive sync can also offer “Verify now?” for a suppressed
+account; accepting starts this separate flow. Background sync does not send it. Neither
+flow uploads prompts, code, file contents or file paths. See
+[SECURITY.md](./SECURITY.md#what-leaves-your-machine) for payload details and source links.
+
+Run `private` to drop off the board or `remove` to delete your dashboard and its data.
+Use `--dry-run` to preview the normal usage payload without submitting it.
+
+> Want a local report with **no** network calls? `npx whoburnedmore --local` builds an
+> HTML dashboard offline. In an interactive terminal it then offers to publish; decline
+> that default-no prompt to keep everything local. Accepting signs in and uploads the
+> normal sync payload.
 
 ## Supported sources
 
