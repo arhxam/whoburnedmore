@@ -30,6 +30,7 @@ import {
 } from "../../../src/wire-sanitize.js";
 import { refreshCliToken, submit, UnauthorizedError } from "../../../src/api.js";
 import {
+  clearAuth,
   deviceKeyHash,
   loadConfig,
   recordSync,
@@ -132,9 +133,9 @@ export interface SyncOptions {
 /**
  * Submit as a signed-in user via `/v1/submit`, mirroring `index.ts`'s
  * `submitSignedIn`: on a 401 (expired/invalid token) try the server-issued
- * refresh once; if that fails there is no interactive fallback here (`sync`
- * is a one-shot, non-interactive command) so it reports the error instead of
- * launching a browser sign-in.
+ * refresh once. There is no interactive fallback here (`sync` is a one-shot,
+ * non-interactive command). A final unauthorized result is reported by the
+ * caller, which also clears the stored sign-in.
  */
 async function submitWithRefresh(
   token: string,
@@ -182,7 +183,19 @@ export async function runSync(options: SyncOptions = {}): Promise<void> {
     return;
   }
 
-  if (!cfg?.cliToken) {
+  const configDir = env.WHOBURNEDMORE_CONFIG_DIR;
+  let token = cfg?.cliToken;
+  // An earlier unauthorized response clears the access token but keeps the
+  // refresh token. Mint a replacement before reporting that nobody is signed in.
+  if (!token && cfg?.refreshToken) {
+    const healed = await refreshCliToken(cfg.refreshToken);
+    if (healed) {
+      saveAuth(configDir, { cliToken: healed.token, handle: healed.handle });
+      token = healed.token;
+    }
+  }
+
+  if (!token) {
     console.log(JSON.stringify({ error: "not-connected" }));
     process.exitCode = 3;
     return;
@@ -198,13 +211,20 @@ export async function runSync(options: SyncOptions = {}): Promise<void> {
   let result: SubmitResponse;
   try {
     result = await submitWithRefresh(
-      cfg.cliToken,
-      cfg.refreshToken,
+      token,
+      cfg?.refreshToken,
       payload,
-      env.WHOBURNEDMORE_CONFIG_DIR,
+      configDir,
     );
   } catch (err) {
     if (err instanceof UnauthorizedError) {
+      // Refresh already ran (or there was no refresh token). Drop the dead
+      // token and handle so BurnBar does not stay "connected".
+      try {
+        clearAuth(configDir);
+      } catch {
+        /* best-effort — still report that the sign-in is dead */
+      }
       console.log(JSON.stringify({ error: "unauthorized" }));
       process.exitCode = 3;
       return;
