@@ -44,9 +44,10 @@ Usage is read only from logs and databases the agents keep **on this machine**.
 | Cursor | Your local Cursor sign-in, used to fetch your own usage events from Cursor's dashboard API (the session token goes only to Cursor, never to whoburnedmore) |
 | Cline, Roo Code | Native reader for VS Code / Cursor extension task logs |
 | Continue | Native reader for `~/.continue` |
+| Claude on the web (claude.ai) | **Estimated.** The [contexto](https://github.com/nikkexe0-del/contexto) browser extension's dashboard has an **Export for whoburnedmore** button that saves `whoburnedmore-claude-web.json` to Downloads. It holds daily token totals only, never chat text. Tokens are text length ÷ 4, so the real figure is higher. Set `WHOBURNEDMORE_CLAUDE_WEB=<path>` to use another file, or `=0` to ignore it |
 
-**Not supported:** usage that only exists in a provider's cloud — ChatGPT or Claude on the
-web or in apps, cloud agents, and Grok on the web or in X. There is no local record to read,
+**Not supported:** usage that only exists in a provider's cloud — ChatGPT, Claude in the
+mobile apps, cloud agents, and Grok on the web or in X. There is no local record to read,
 and the CLI never estimates usage it can't read. Older Antigravity builds that kept only
 encrypted conversation logs can't be counted either.
 

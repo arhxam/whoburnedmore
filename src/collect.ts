@@ -17,6 +17,7 @@ import type {
 } from "./shared.js";
 import { collectAttribution } from "./attribution.js";
 import { collectContinue } from "./continue.js";
+import { collectClaudeWeb } from "./claude-web.js";
 import { collectCursor } from "./cursor.js";
 import {
   collectClaudeNative,
@@ -704,9 +705,10 @@ export type ProgressFn = (done: number, total: number, label: string) => void;
 /**
  * Total number of collection stages: the ccusage sources, plus the fixed extra
  * ticking tasks — sessions, blocks, cursor, attribution (4), and the native
- * non-ccusage readers cline, roo, continue (VSCODE_AGENTS.length + 1).
+ * non-ccusage readers cline, roo, continue (VSCODE_AGENTS.length + 1), and the
+ * claude.ai web export (1).
  */
-export const COLLECT_STAGES = SOURCES.length + 4 + VSCODE_AGENTS.length + 1;
+export const COLLECT_STAGES = SOURCES.length + 4 + VSCODE_AGENTS.length + 2;
 
 /**
  * A run is AUTHORITATIVE — safe to lower a stored requestCount fingerprint —
@@ -859,6 +861,13 @@ export async function collectAll(
       tick();
       return r;
     });
+  // claude.ai chats, from the companion extension's export file (estimated).
+  const claudeWebTask = collectClaudeWeb()
+    .catch(() => ({ entries: [], found: false, filesScanned: 0 }) as NativeCollectResult)
+    .then((r) => {
+      tick();
+      return r;
+    });
 
   const [
     sourceResults,
@@ -870,6 +879,7 @@ export async function collectAll(
     nativeCodex,
     vscodeResults,
     continueResult,
+    claudeWebResult,
   ] = await Promise.all([
     sourceTasks,
     sessionTask,
@@ -880,6 +890,7 @@ export async function collectAll(
     nativeCodexTask,
     Promise.all(vscodeTasks),
     continueTask,
+    claudeWebTask,
   ]);
 
   const native = { claude: nativeClaude, codex: nativeCodex };
@@ -936,6 +947,10 @@ export async function collectAll(
   if (continueResult.found && continueResult.entries.length > 0) {
     entries.push(...continueResult.entries);
     toolsFound.push("continue");
+  }
+  if (claudeWebResult.found && claudeWebResult.entries.length > 0) {
+    entries.push(...claudeWebResult.entries);
+    toolsFound.push("claude-web");
   }
 
   const { tools, skills, agent, sessionMessages, complete } = attribution;
