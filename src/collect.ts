@@ -16,7 +16,7 @@ import type {
   ToolStat,
 } from "./shared.js";
 import { collectAttribution } from "./attribution.js";
-import { collectAntigravity } from "./antigravity.js";
+import { collectAntigravity, detectAntigravity } from "./antigravity.js";
 import { collectContinue } from "./continue.js";
 import { collectCursor } from "./cursor.js";
 import {
@@ -761,11 +761,14 @@ export async function collectAll(
   // stages complete out of order — the bar tracks the count, not the sequence.
   const tick = () => onProgress?.(++done, COLLECT_STAGES, "");
 
-  // Read these ledgers before ccusage starts its all-source blocks pass, which
-  // can contend for the same SQLite databases on Windows.
-  const antigravityResult = await collectAntigravity().catch(bailed);
+  // Read Antigravity before the all-source blocks pass can contend for the
+  // same SQLite databases. The bundled reader also covers step-only and retry
+  // usage, which a generation-ledger-only scan can miss.
+  const antigravityReport = await runCcusage(cmd, [
+    ...prefixArgs, "antigravity", "daily", "--json", "--offline",
+  ]);
+  const antigravityMapped = mapCcusageDaily("antigravity", antigravityReport);
   const zcodeResult = await collectZcode().catch(bailed);
-  const nativeDaily = { antigravity: antigravityResult, zcode: zcodeResult };
 
   // Independent work overlaps, but per-source ccusage children use a small
   // worker pool. The old all-at-once pass could reserve hundreds of MiB of output
@@ -803,15 +806,13 @@ export async function collectAll(
         tick();
         return { source, mapped: [] as DailyUsageEntry[] };
       }
-      if (source in nativeDaily) {
-        const result = nativeDaily[source as keyof typeof nativeDaily];
-        if (nativeReaderWon(result)) {
-          tick();
-          return { source, mapped: result.entries };
-        }
-        if (result.timedOut) {
-          console.warn(`  ${source}: native usage scan incomplete; trying bundled ccusage.`);
-        }
+      if (source === "antigravity") {
+        tick();
+        return { source, mapped: antigravityMapped };
+      }
+      if (source === "zcode" && nativeReaderWon(zcodeResult)) {
+        tick();
+        return { source, mapped: zcodeResult.entries };
       }
       const json = await runCcusage(cmd, [
         ...prefixArgs,
@@ -901,6 +902,14 @@ export async function collectAll(
     continueTask,
   ]);
 
+  // Keep the direct reader for installations where the bundled daily scan
+  // returned no usable Antigravity rows. Give it the SQLite files to itself.
+  const antigravityResult = antigravityMapped.length === 0 && detectAntigravity()
+    ? await collectAntigravity().catch(bailed)
+    : null;
+  if (antigravityResult?.timedOut) {
+    console.warn("  Antigravity: usage scan incomplete; retrying on the next sync.");
+  }
   const native = { claude: nativeClaude, codex: nativeCodex };
 
   // Deferred ccusage pass for natively-scanned sources, only after the parallel
@@ -933,7 +942,9 @@ export async function collectAll(
   // Claude prefers native, Codex prefers replay-aware ccusage, and every other
   // source keeps ccusage's mapped entries (see selectSourceEntries).
   for (const { source, mapped } of sourceResults) {
-    const chosen = selectSourceEntries(source, fallbacks.get(source) ?? mapped, native);
+    const chosen = source === "antigravity" && antigravityResult
+      ? antigravityResult.entries
+      : selectSourceEntries(source, fallbacks.get(source) ?? mapped, native);
     if (chosen.length > 0) {
       entries.push(...chosen);
       toolsFound.push(source);
@@ -986,7 +997,7 @@ export async function collectAll(
     nativeCodex,
     ...vscodeResults.map(({ result }) => result),
     continueResult,
-    antigravityResult,
+    antigravityResult ?? {},
     zcodeResult,
   );
   const storePath = provenanceStorePath();
