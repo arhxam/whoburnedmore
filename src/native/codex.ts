@@ -101,6 +101,8 @@ export function inspectCodexRollout(lines: Iterable<string>): CodexRolloutInspec
     } catch {
       continue;
     }
+    // Valid JSON is not necessarily an object (a literal `null` line would throw below).
+    if (!obj || typeof obj !== "object") continue;
     const payload = obj.payload as Record<string, unknown> | undefined;
     if (!payload || typeof payload !== "object") continue;
 

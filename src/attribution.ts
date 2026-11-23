@@ -1,8 +1,8 @@
 import { readdirSync, statSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import type { AgentStat, SkillStat, ToolStat } from "./shared.js";
-import { NATIVE_READ_BUDGET_MS } from "./native/claude.js";
+import { NATIVE_READ_BUDGET_MS, resolveClaudeProjectDirs } from "./native/claude.js";
+import { resolveCodexSessionsDirs } from "./native/codex.js";
 import { nativeCachePath, readFilesWithCache } from "./native/file-cache.js";
 
 // ccusage gives tokens by tool/model, but not which tools/skills/MCP servers you
@@ -14,8 +14,6 @@ import { nativeCachePath, readFilesWithCache } from "./native/file-cache.js";
 // tokens — never arguments, content, project/repo names, or conversation titles.
 // Best-effort and bounded so a huge ~/.claude never makes the CLI hang.
 
-const CLAUDE_PROJECTS = join(homedir(), ".claude", "projects");
-const CODEX_SESSIONS = join(homedir(), ".codex", "sessions");
 const MAX_FILES = 5000;
 /**
  * Wall-clock budget for the whole attribution scan. It used to be 12s and re-read
@@ -514,14 +512,6 @@ export function parseCodexAttrFile(content: string): AttrFileAgg[] {
 }
 
 /** Claude Code transcript roots, including config-dir overrides (best-effort). */
-function claudeProjectDirs(): string[] {
-  const dirs = [CLAUDE_PROJECTS];
-  const cfg = process.env.CLAUDE_CONFIG_DIR;
-  if (cfg) dirs.push(join(cfg, "projects"));
-  dirs.push(join(homedir(), ".config", "claude", "projects"));
-  return [...new Set(dirs)];
-}
-
 /** Recursively list *.jsonl files under a dir, newest first, bounded. */
 function listTranscripts(dir: string): string[] {
   const out: Array<{ path: string; mtime: number }> = [];
@@ -588,7 +578,10 @@ export async function collectAttribution(
   try {
     // Claude Code — rich format (tool_use, attributionSkill, isSidechain).
     const claudeFiles: string[] = [];
-    for (const dir of claudeProjectDirs()) claudeFiles.push(...listTranscripts(dir));
+    // Same roots as the usage readers (comma-separated CLAUDE_CONFIG_DIR,
+    // CODEX_HOME, archived Codex sessions), resolved per call from `env`, so
+    // the rollups describe exactly the transcripts whose usage was counted.
+    for (const dir of resolveClaudeProjectDirs(env)) claudeFiles.push(...listTranscripts(dir));
     if (claudeFiles.length > 0) {
       const res = await readFilesWithCache<AttrFileAgg>({
         files: claudeFiles,
@@ -600,7 +593,7 @@ export async function collectAttribution(
       mergeInto(res.itemsByFile);
     }
     // Codex — rollout format (function_call, token_count).
-    const codexFiles = listTranscripts(CODEX_SESSIONS);
+    const codexFiles = resolveCodexSessionsDirs(env).flatMap((dir) => listTranscripts(dir));
     if (codexFiles.length > 0) {
       const res = await readFilesWithCache<AttrFileAgg>({
         files: codexFiles,

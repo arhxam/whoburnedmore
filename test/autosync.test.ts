@@ -116,6 +116,11 @@ describe("buildLaunchdPlist", () => {
 });
 
 describe("syncEnv (identity/endpoint env propagation)", () => {
+  it("forwards a shell TZ so background days and caches match foreground runs", () => {
+    const pairs = syncEnv({ npmPath: "/opt/homebrew/bin/npm", env: { TZ: "Asia/Tokyo" } });
+    expect(pairs).toContainEqual(["TZ", "Asia/Tokyo"]);
+  });
+
   it("always exports PATH first", () => {
     const pairs = syncEnv({ npmPath: "/opt/homebrew/bin/npm", env: {} });
     expect(pairs[0][0]).toBe("PATH");

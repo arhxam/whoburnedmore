@@ -10,6 +10,7 @@ import type {
   CodexReplayPriorRow,
   CodexReplayPriorScope,
   DailyUsageEntry,
+  PricingTokenCounts,
   SessionEntry,
   SkillStat,
   ToolStat,
@@ -28,6 +29,7 @@ import { collectCodexNative } from "./native/codex.js";
 import { plausibleUsageDate } from "./native/usage-date.js";
 import { collectVscodeAgent, VSCODE_AGENTS } from "./native/vscode-agents.js";
 import { loadLivePricing } from "./pricing-live.js";
+import { estimateCostUSD, resolveModelPrice } from "./pricing.js";
 import { collectZcode } from "./zcode.js";
 import {
   loadProvenanceStore,
@@ -124,6 +126,11 @@ export const SOURCES = [
   "hermes",
   "pi",
   "codebuff",
+  // Read by ccusage >= 20.0.29 (Antigravity's conversations/*.db ledgers,
+  // Grok Build CLI's sessions/**/updates.jsonl, ZCode's cli/db/db.sqlite).
+  "antigravity",
+  "grok",
+  "zcode",
 ] as const;
 
 function norm(n: unknown): number {
@@ -134,6 +141,37 @@ function norm(n: unknown): number {
 function normCost(n: unknown): number {
   const v = Number(n);
   return Number.isFinite(v) && v > 0 ? v : 0;
+}
+
+/**
+ * Sources whose ccusage cost is derived from a token price table rather than
+ * read from the agent's own billing record. When that table predates a model,
+ * ccusage reports real tokens at $0; our shared table (refreshed from LiteLLM
+ * each run) may already know the model. Sources such as OpenCode record the
+ * provider's actual charge, where $0 can be a genuinely free model, so they
+ * are deliberately excluded.
+ */
+const PRICE_TABLE_COST_SOURCES: ReadonlySet<string> = new Set(["claude", "codex"]);
+
+/**
+ * Fill a $0 ccusage cost from the CLI's freshly loaded price table. ccusage
+ * runs `--offline` with the price list bundled in its release, so a model newer
+ * than that bundle comes back as $0. Only price-table sources (Claude, Codex)
+ * are filled; a positive cost is always kept, matching CLI 0.9.25 so the same
+ * day prices identically whichever version synced it.
+ */
+export function repriceCcusageCost(
+  tool: string,
+  model: string,
+  tokens: PricingTokenCounts,
+  ccusageCostUSD: number,
+): number {
+  if (ccusageCostUSD > 0) return ccusageCostUSD;
+  const known = model.length > 0 && model !== "unknown";
+  if (known && PRICE_TABLE_COST_SOURCES.has(tool) && resolveModelPrice(model)) {
+    return estimateCostUSD(model, tokens);
+  }
+  return 0;
 }
 
 /**
@@ -232,9 +270,10 @@ export function mapCcusageDaily(
         c.outputTokens +
         c.cacheCreationTokens +
         c.cacheReadTokens;
-      if (tokens === 0 && c.costUSD === 0) continue;
+      const costUSD = repriceCcusageCost(tool, c.model, c, c.costUSD);
+      if (tokens === 0 && costUSD === 0) continue;
       // CLI-collected usage from local ccusage logs: origin "cli", unverified.
-      entries.push({ date, tool, ...c, origin: "cli", verified: false });
+      entries.push({ date, tool, ...c, costUSD, origin: "cli", verified: false });
     }
   }
   return entries;
@@ -272,7 +311,17 @@ export function mapCcusageSessions(json: unknown): SessionEntry[] {
       outputTokens,
       cacheCreationTokens,
       cacheReadTokens,
-      costUSD: normCost(s.totalCost ?? s.costUSD),
+      // A single-model session can be re-priced exactly; a mixed-model one has
+      // no per-model token split, so it keeps ccusage's own total.
+      costUSD:
+        models.length === 1
+          ? repriceCcusageCost(
+              typeof s.agent === "string" ? s.agent : "unknown",
+              models[0],
+              { inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens },
+              normCost(s.totalCost ?? s.costUSD),
+            )
+          : normCost(s.totalCost ?? s.costUSD),
       lastActivity:
         typeof meta.lastActivity === "string"
           ? meta.lastActivity
@@ -332,6 +381,9 @@ export interface CollectResult {
   agent: AgentStat;
   /** True when transcript scanning finished within its time budget (full snapshot). */
   attributionComplete: boolean;
+  /** Claude Code transcripts skipped because read access was denied (local paths;
+   *  shown in the terminal only, never submitted). */
+  unreadableClaudeFiles?: string[];
 }
 
 export function codexReplayTombstoneDates(
@@ -751,16 +803,14 @@ export async function collectAll(
     },
   );
 
-  // Richer rollups, gathered once across all agents (ccusage aggregates them):
-  // sessions power "most expensive conversations", blocks power "peak hours".
-  const sessionTask = runCcusage(
-    cmd,
-    [...prefixArgs, "session", "--json", "--offline"],
-    undefined,
-    CCUSAGE_AGGREGATE_TIMEOUT_MS,
-  ).then((json) => {
+  // Conversation-level rows are never uploaded (identifiers stay on this
+  // machine and the server no longer returns them), so the all-agent
+  // `ccusage session` pass — which re-reads every transcript, up to 180s per
+  // run — is skipped. Its stage still ticks so the progress bar stays calibrated.
+  // Blocks power "peak hours".
+  const sessionTask = Promise.resolve().then(() => {
     tick();
-    return json ? mapCcusageSessions(json) : [];
+    return [] as SessionEntry[];
   });
   const blockTask = runCcusage(
     cmd,
@@ -785,25 +835,39 @@ export async function collectAll(
     tick();
     return a;
   });
-  // Non-ccusage native readers for the Cline-lineage VS Code agents (Cline, Roo),
-  // Continue.dev, Antigravity, and ZCode. Best effort like cursor: a no-op
-  // (found:false) when the agent isn't installed, and they emit the same
-  // anti-fraud requestCount the other native readers do.
+  // Non-ccusage native readers for the Cline-lineage VS Code agents (Cline, Roo)
+  // and Continue.dev. Best effort like cursor: a no-op (found:false) when the
+  // agent isn't installed, and they emit the same anti-fraud requestCount the
+  // other native readers do.
+  // A throw from one of these must not reject the Promise.all below (that
+  // failed the WHOLE sync, so no tool's usage was submitted). Treat it like a
+  // bailed scan: no rows from that reader, and a non-authoritative run.
+  const bailed = (): NativeCollectResult => ({
+    entries: [],
+    found: false,
+    filesScanned: 0,
+    timedOut: true,
+  });
   const vscodeTasks = VSCODE_AGENTS.map((a) =>
-    collectVscodeAgent({ tool: a.tool, extIds: a.extIds }).then((r) => {
-      tick();
-      return { tool: a.tool, result: r };
-    }),
+    collectVscodeAgent({ tool: a.tool, extIds: a.extIds })
+      .catch(bailed)
+      .then((r) => {
+        tick();
+        return { tool: a.tool, result: r };
+      }),
   );
-  const continueTask = collectContinue().then((r) => {
+  const continueTask = collectContinue()
+    .catch(bailed)
+    .then((r) => {
+      tick();
+      return r;
+    });
+
+  const antigravityTask = collectAntigravity().catch(bailed).then((r) => {
     tick();
     return r;
   });
-  const antigravityTask = collectAntigravity().then((r) => {
-    tick();
-    return r;
-  });
-  const zcodeTask = collectZcode().then((r) => {
+  const zcodeTask = collectZcode().catch(bailed).then((r) => {
     tick();
     return r;
   });
@@ -976,5 +1040,8 @@ export async function collectAll(
     skills: sanitizeSkillStats(skills),
     agent: sanitizeAgentStat(reconciled.agent),
     attributionComplete: complete,
+    ...(nativeClaude.permissionDenied
+      ? { unreadableClaudeFiles: nativeClaude.permissionDenied }
+      : {}),
   };
 }

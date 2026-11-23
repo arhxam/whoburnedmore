@@ -3,6 +3,7 @@ import { platform, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  autoSyncOptedOut,
   clearAuth,
   defaultConfigDir,
   deviceKeyHash,
@@ -14,6 +15,7 @@ import {
   recordLaunchNotificationDelivered,
   saveAuth,
   saveConfig,
+  setAutoSyncOptOut,
 } from "../src/config.js";
 
 describe("config", () => {
@@ -213,5 +215,28 @@ describe("ensureAnonKey", () => {
     expect(first).toMatch(/^[0-9a-f]{64}$/);
     expect(ensureAnonKey(dir)).toBe(first);
     expect(loadConfig(dir)?.anonKey).toBe(first);
+  });
+});
+
+describe("background sync opt-out", () => {
+  it("persists uninstall-sync's choice, survives sign-out, and clears on install-sync", () => {
+    const dir = mkdtempSync(join(tmpdir(), "wbm-optout-"));
+    saveAuth(dir, { cliToken: "tok", handle: "alice", refreshToken: "r" });
+    expect(autoSyncOptedOut(dir)).toBe(false);
+    setAutoSyncOptOut(true, dir);
+    expect(autoSyncOptedOut(dir)).toBe(true);
+    // The choice is independent of the sign-in and keeps the credentials.
+    expect(loadConfig(dir)).toMatchObject({ cliToken: "tok", refreshToken: "r" });
+    clearAuth(dir);
+    expect(autoSyncOptedOut(dir)).toBe(true);
+    setAutoSyncOptOut(false, dir);
+    expect(autoSyncOptedOut(dir)).toBe(false);
+    expect(loadConfig(dir)).not.toHaveProperty("autoSyncOptOut");
+  });
+
+  it("ignores a non-boolean opt-out value in a hand-edited config", () => {
+    const dir = mkdtempSync(join(tmpdir(), "wbm-optout-"));
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ autoSyncOptOut: "yes" }));
+    expect(autoSyncOptedOut(dir)).toBe(false);
   });
 });

@@ -35,6 +35,9 @@ export interface CliConfig {
    *  token self-heal via `/v1/auth/cli/refresh`, so the CLI binds once after
    *  sign-in / on the first signed-in submit and stamps this to stop re-asking. */
   deviceBoundAt?: number;
+  /** Set by `uninstall-sync` so later foreground runs don't silently reinstall
+   *  the background agent; cleared by `install-sync` (or `link`). */
+  autoSyncOptOut?: boolean;
 }
 
 /** Stable, non-secret identity the API compares with its bound-device hashes. */
@@ -83,6 +86,7 @@ export function loadConfig(dir: string = defaultConfigDir()): CliConfig | null {
     ) {
       config.deviceBoundAt = parsed.deviceBoundAt;
     }
+    if (parsed.autoSyncOptOut === true) config.autoSyncOptOut = true;
     return Object.keys(config).length > 0 ? config : null;
   } catch {
     return null;
@@ -146,6 +150,22 @@ export function recordLaunchNotificationDelivered(
 ): void {
   const config = loadConfig(dir) ?? {};
   saveConfig(dir, { ...config, launchNotificationDeliveredAt: when });
+}
+
+/** Record (or clear) the user's explicit `uninstall-sync` choice, preserving the rest. */
+export function setAutoSyncOptOut(
+  optOut: boolean,
+  dir: string = defaultConfigDir(),
+): void {
+  const config = loadConfig(dir);
+  if (!optOut && !config?.autoSyncOptOut) return;
+  const { autoSyncOptOut: _o, ...rest } = config ?? {};
+  saveConfig(dir, optOut ? { ...rest, autoSyncOptOut: true } : rest);
+}
+
+/** Has the user turned background sync off with `uninstall-sync`? */
+export function autoSyncOptedOut(dir: string = defaultConfigDir()): boolean {
+  return loadConfig(dir)?.autoSyncOptOut === true;
 }
 
 /**

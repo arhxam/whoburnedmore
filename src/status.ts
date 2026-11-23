@@ -21,6 +21,8 @@ export interface StatusInput {
   /** Stable (survives `brew upgrade node`) vs a version-pinned Cellar path. */
   nodePathStable: boolean;
   logPath: string;
+  /** The user turned background sync off with `uninstall-sync`. */
+  optedOut?: boolean;
 }
 
 function ago(ms: number): string {
@@ -45,7 +47,9 @@ export function buildStatusReport(s: StatusInput): string[] {
   lines.push(
     s.installed
       ? `  • Background agent: installed${s.loaded ? " and loaded" : " but NOT loaded with the scheduler"}`
-      : "  • Background agent: NOT installed — run `npx whoburnedmore` to set it up",
+      : s.optedOut
+        ? "  • Background agent: off (turned off with `uninstall-sync`) — run `npx whoburnedmore install-sync` to turn it back on"
+        : "  • Background agent: NOT installed — run `npx whoburnedmore` to set it up",
   );
   if (s.installed && s.drift !== "ok") {
     lines.push(
@@ -94,5 +98,6 @@ export function agentStatusReport(now: number = Date.now()): string[] {
     nodePath,
     nodePathStable: !nodePath.includes("/Cellar/"),
     logPath: syncLogPath(),
+    optedOut: cfg?.autoSyncOptOut === true,
   });
 }

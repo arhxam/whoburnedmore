@@ -1,33 +1,58 @@
 # Contributing to whoburnedmore
 
-Thanks for taking the time to contribute! This is a small, friendly project and PRs are welcome.
+Thanks for taking the time to contribute! Issues and pull requests are welcome.
+
+This repository is a generated mirror of the production CLI, so a merged change is
+re-applied upstream and then synced back here. Keep pull requests focused on one change;
+that makes them much easier to review and carry over.
 
 ## Development
 
-You'll need Node.js 20+.
+You'll need Node.js 20+ (22.5+ also runs the SQLite-backed integration tests).
 
 ```bash
-npm install        # install dependencies and build
-npm test           # run the unit tests (node:test)
-npm run typecheck  # strict TypeScript check
-npm run build      # bundle to dist/cli.js
-npm start          # run the CLI locally
+npm install     # install dependencies
+npm run lint    # strict TypeScript check
+npm test        # run the tests (vitest)
+npm run build   # bundle src/index.ts to dist/index.js
+node dist/index.js --dry-run   # print what would be sent, send nothing
 ```
+
+Use `--dry-run` or `--local` while developing. Point a test run at your own server with
+`WHOBURNEDMORE_API`; never test against the production API with fabricated usage.
+
+## How the CLI handles data
+
+The CLI reads local agent logs and, on a normal run, **uploads daily aggregate numbers**
+(date, tool, model, token counts, estimated cost, plus optional per-session and per-tool
+rollups) to whoburnedmore.com. It never uploads prompts, code, file contents or file paths.
+`--local` makes no network calls at all. See the [README](./README.md) for the full list.
 
 ## Ground rules
 
-- **Keep it local.** This tool's whole promise is that nothing leaves your machine. Pull requests that add network calls, telemetry, analytics, or "phone home" behaviour will not be merged.
-- **Keep it small.** Prefer the standard library over new dependencies. There are currently zero runtime dependencies — let's keep it that way where we can.
-- **Add a test.** New aggregation or pricing logic should come with a test in [`test/`](./test).
-- **Match the style.** Run `npm run typecheck` before opening a PR; keep functions small and commented.
+- **No new data leaves the machine without discussion.** Open an issue before adding a
+  network call, a new uploaded field, telemetry, or analytics.
+- **Never estimate usage you can't read.** A new source needs a real local record of
+  per-request or per-day tokens. Don't infer usage from quotas, prices or activity.
+- **Keep dependencies minimal.** Runtime dependencies are exact-pinned. Prefer the
+  standard library, and explain any new dependency in the pull request.
+- **Add a test.** New readers, aggregation or pricing logic need tests in [`test/`](./test),
+  using synthetic fixtures only. Never commit real transcripts, prompts or account data.
+- **Match the style.** Run `npm run lint` and `npm test` before opening a pull request.
 
 ## Good first issues
 
-- Add or correct models in the [pricing table](./src/pricing.ts).
-- Support transcript formats from more AI coding agents. **Claude Code** and **OpenAI Codex** are supported today; **Cursor** is a future addition that would need an optional external tool to read its store.
-- Improve the HTML dashboard layout or add a chart.
-- ~~Add a `--by-day` sparkline to the terminal report.~~ ✅ Done in 1.1.0.
+- Add or correct a model-family price fallback in [`src/pricing.ts`](./src/pricing.ts).
+  The per-model table is generated from LiteLLM and refreshed at runtime, so don't edit
+  `src/pricing-data.generated.ts` by hand.
+- Read a new coding agent's usage. The [README](./README.md#supported-sources) lists
+  what's covered today. Many agents are read through
+  [ccusage](https://github.com/ccusage/ccusage), so support added there often needs only
+  a small change here.
+- Improve the `--local` HTML dashboard.
 
 ## Reporting bugs
 
-Open an issue with your Node version, OS, and the exact command you ran. Never paste real prompt content or anything sensitive — `--json` output with the numbers is plenty.
+Open an issue with your Node version, OS, CLI version (`npx whoburnedmore version`) and the
+exact command you ran. Never paste prompts, transcripts or anything sensitive. The token
+counts from `--dry-run` are plenty.

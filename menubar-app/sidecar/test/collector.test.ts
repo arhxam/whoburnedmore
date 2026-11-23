@@ -394,3 +394,47 @@ setTimeout(() => {
     expect(merged).toEqual([]);
   });
 });
+
+describe("Claude permission-denied transcripts", () => {
+  const canDeny =
+    process.platform !== "win32" && typeof process.getuid === "function" && process.getuid() !== 0;
+
+  it.skipIf(!canDeny)(
+    "keeps readable usage but never sends a request count from a partial scan",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "burnbar-claude-denied-"));
+      const proj = join(root, "claude", "projects", "p");
+      await mkdir(proj, { recursive: true });
+      const line = (req: string, msg: string, output: number) =>
+        JSON.stringify({
+          timestamp: new Date(Date.now() - 3_600_000).toISOString(),
+          requestId: req,
+          message: { role: "assistant", id: msg, model: "claude-sonnet-4-5",
+            usage: { input_tokens: 10, output_tokens: output, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } },
+        }) + "\n";
+      await writeFile(join(proj, "ok.jsonl"), line("r1", "m1", 40));
+      const locked = join(proj, "locked.jsonl");
+      await writeFile(locked, line("r2", "m2", 7));
+      await chmod(locked, 0o000);
+      try {
+        const env = {
+          CLAUDE_CONFIG_DIR: join(root, "claude"),
+          CODEX_HOME: join(root, "codex"),
+          BURNBAR_CACHE_DIR: join(root, "cache"),
+          BURNBAR_CCUSAGE: "/usr/bin/false",
+          WHOBURNEDMORE_PRICING_OFFLINE: "1",
+        } as NodeJS.ProcessEnv;
+        const tier = await collectNativeTier(env);
+        expect(tier.claude.found).toBe(true);
+        expect(tier.claude.permissionDenied).toEqual([locked]);
+        expect(tier.claude.entries[0].outputTokens).toBe(40);
+        // The CLI would restore a last-good fingerprint here; the sidecar can't,
+        // so it must not send a (possibly lowered) request count at all.
+        expect(tier.claude.entries.every((e) => e.requestCount === undefined)).toBe(true);
+        expect(tier.partial).toBe(true);
+      } finally {
+        await chmod(locked, 0o644);
+      }
+    },
+  );
+});

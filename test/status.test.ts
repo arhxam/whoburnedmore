@@ -42,6 +42,14 @@ describe("buildStatusReport (status command)", () => {
     expect(out).toContain("never recorded");
   });
 
+  it("says sync was turned off on purpose after uninstall-sync, not 'run npx whoburnedmore'", () => {
+    const off = buildStatusReport(base({ installed: false, loaded: false, optedOut: true })).join("\n");
+    expect(off).toContain("install-sync");
+    expect(off).not.toContain("run `npx whoburnedmore` to set it up");
+    const missing = buildStatusReport(base({ installed: false, loaded: false })).join("\n");
+    expect(missing).toContain("run `npx whoburnedmore` to set it up");
+  });
+
   it("flags an agent that is installed but not loaded", () => {
     const out = buildStatusReport(base({ loaded: false })).join("\n");
     expect(out).toContain("NOT loaded");
