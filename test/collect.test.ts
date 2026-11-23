@@ -790,7 +790,7 @@ describe("opencode source (ccusage-only, no native reader)", () => {
           outputTokens: 250,
           cacheCreationTokens: 0,
           cacheReadTokens: 100,
-          totalCost: 3.5,
+          totalCost: 0.009,
           modelsUsed: ["claude-opus-4-8"],
         },
       ],
@@ -804,7 +804,7 @@ describe("opencode source (ccusage-only, no native reader)", () => {
       outputTokens: 250,
       cacheCreationTokens: 0,
       cacheReadTokens: 100,
-      costUSD: 3.5,
+      costUSD: 0.009,
       origin: "cli",
       verified: false,
     });

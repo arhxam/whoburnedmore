@@ -39,6 +39,17 @@ describe("ccusage cost re-pricing", () => {
     expect(repriceCcusageCost("opencode", NEW_CODEX_MODEL, tokens, 0.42)).toBe(0.42);
   });
 
+  it("re-estimates an impossible recorded OpenCode charge for known rates", () => {
+    setLivePricing(LIVE);
+    const tokens = {
+      inputTokens: 100_000, outputTokens: 50_000,
+      cacheCreationTokens: 300_000, cacheReadTokens: 550_000,
+    };
+    expect(repriceCcusageCost("opencode", NEW_CODEX_MODEL, tokens, 1000))
+      .toBe(estimateCostUSD(NEW_CODEX_MODEL, tokens));
+    expect(repriceCcusageCost("opencode", "unknown-local-model", tokens, 8)).toBe(8);
+  });
+
   it("fills a $0 Claude cost but keeps a $0 recorded by a billing-record source", () => {
     setLivePricing(LIVE);
     const tokens = { inputTokens: 1_000_000, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0 };
