@@ -155,8 +155,8 @@ const PRICE_TABLE_COST_SOURCES: ReadonlySet<string> = new Set(["claude", "codex"
  * Fill a $0 ccusage cost from the CLI's freshly loaded price table. ccusage
  * runs `--offline` with the price list bundled in its release, so a model newer
  * than that bundle comes back as $0. Only price-table sources (Claude, Codex)
- * are filled; a positive cost is always kept, matching CLI 0.9.25 so the same
- * day prices identically whichever version synced it.
+ * are filled. OpenCode keeps its recorded costs unless they greatly exceed
+ * what the reported tokens could cost at the most expensive model rate.
  */
 export function repriceCcusageCost(
   tool: string,
@@ -164,7 +164,22 @@ export function repriceCcusageCost(
   tokens: PricingTokenCounts,
   ccusageCostUSD: number,
 ): number {
-  if (ccusageCostUSD > 0) return ccusageCostUSD;
+  if (ccusageCostUSD > 0) {
+    if (tool === "opencode") {
+      const price = resolveModelPrice(model);
+      const totalTokens = tokens.inputTokens + tokens.outputTokens +
+        tokens.cacheCreationTokens + tokens.cacheReadTokens;
+      if (price && totalTokens > 0) {
+        // Even billing every token at the highest rate, allow 4x for rate drift
+        // and provider markups before treating the stored charge as corrupt.
+        const maxRate = Math.max(price.in, price.out, price.cacheWrite, price.cacheRead);
+        if (maxRate > 0 && ccusageCostUSD > 4 * maxRate * totalTokens / 1_000_000) {
+          return estimateCostUSD(model, tokens);
+        }
+      }
+    }
+    return ccusageCostUSD;
+  }
   const known = model.length > 0 && model !== "unknown";
   if (known && PRICE_TABLE_COST_SOURCES.has(tool) && resolveModelPrice(model)) {
     return estimateCostUSD(model, tokens);
