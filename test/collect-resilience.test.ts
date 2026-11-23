@@ -19,6 +19,13 @@ vi.mock("../src/continue.js", async (importOriginal) => ({
   }),
 }));
 
+vi.mock("../src/antigravity.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/antigravity.js")>()),
+  detectAntigravity: vi.fn(() => false),
+  collectAntigravity: vi.fn(),
+}));
+
+const { collectAntigravity, detectAntigravity } = await import("../src/antigravity.js");
 const { collectAll } = await import("../src/collect.js");
 
 const KEYS = ["HOME", "USERPROFILE", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "WHOBURNEDMORE_CONFIG_DIR",
@@ -61,5 +68,20 @@ describe("collectAll resilience", () => {
     expect(result.toolsFound).not.toContain("continue");
     const claude = result.entries.filter((e) => e.tool === "claude");
     expect(claude.reduce((s, e) => s + e.inputTokens + e.outputTokens, 0)).toBe(30);
+  }, 60_000);
+
+  it("falls back to the direct Antigravity reader when bundled daily usage is empty", async () => {
+    vi.mocked(detectAntigravity).mockReturnValueOnce(true);
+    const row = {
+      date: new Date(Date.now() - 86_400_000).toISOString().slice(0, 10),
+      tool: "antigravity", model: "gemini", inputTokens: 10, outputTokens: 5,
+      cacheCreationTokens: 0, cacheReadTokens: 0, costUSD: 0,
+      origin: "cli" as const, verified: false,
+    };
+    vi.mocked(collectAntigravity).mockResolvedValueOnce({
+      entries: [row], found: true, filesScanned: 1,
+    });
+    const result = await collectAll(undefined, { offline: true });
+    expect(result.entries.filter((entry) => entry.tool === "antigravity")).toEqual([row]);
   }, 60_000);
 });

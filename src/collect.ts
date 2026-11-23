@@ -16,6 +16,7 @@ import type {
   ToolStat,
 } from "./shared.js";
 import { collectAttribution } from "./attribution.js";
+import { collectAntigravity, detectAntigravity } from "./antigravity.js";
 import { collectContinue } from "./continue.js";
 import { collectCursor } from "./cursor.js";
 import {
@@ -29,6 +30,7 @@ import { plausibleUsageDate } from "./native/usage-date.js";
 import { collectVscodeAgent, VSCODE_AGENTS } from "./native/vscode-agents.js";
 import { loadLivePricing } from "./pricing-live.js";
 import { estimateCostUSD, resolveModelPrice } from "./pricing.js";
+import { collectZcode } from "./zcode.js";
 import {
   loadProvenanceStore,
   provenanceStorePath,
@@ -704,7 +706,8 @@ export type ProgressFn = (done: number, total: number, label: string) => void;
 /**
  * Total number of collection stages: the ccusage sources, plus the fixed extra
  * ticking tasks — sessions, blocks, cursor, attribution (4), and the native
- * non-ccusage readers cline, roo, continue (VSCODE_AGENTS.length + 1).
+ * non-ccusage readers cline, roo, continue, antigravity, zcode
+ * (VSCODE_AGENTS.length + 3).
  */
 export const COLLECT_STAGES = SOURCES.length + 4 + VSCODE_AGENTS.length + 1;
 
@@ -747,10 +750,25 @@ export async function collectAll(
   ).catch(() => {});
 
   const { cmd, prefixArgs } = resolveCcusageBin();
+  const bailed = (): NativeCollectResult => ({
+    entries: [],
+    found: false,
+    filesScanned: 0,
+    timedOut: true,
+  });
   let done = 0;
   // Each task bumps the bar as it finishes. Because everything runs at once,
   // stages complete out of order — the bar tracks the count, not the sequence.
   const tick = () => onProgress?.(++done, COLLECT_STAGES, "");
+
+  // Read Antigravity before the all-source blocks pass can contend for the
+  // same SQLite databases. The bundled reader also covers step-only and retry
+  // usage, which a generation-ledger-only scan can miss.
+  const antigravityReport = await runCcusage(cmd, [
+    ...prefixArgs, "antigravity", "daily", "--json", "--offline",
+  ]);
+  const antigravityMapped = mapCcusageDaily("antigravity", antigravityReport);
+  const zcodeResult = await collectZcode().catch(bailed);
 
   // Independent work overlaps, but per-source ccusage children use a small
   // worker pool. The old all-at-once pass could reserve hundreds of MiB of output
@@ -787,6 +805,14 @@ export async function collectAll(
         await (source === "claude" ? nativeClaudeTask : nativeCodexTask);
         tick();
         return { source, mapped: [] as DailyUsageEntry[] };
+      }
+      if (source === "antigravity") {
+        tick();
+        return { source, mapped: antigravityMapped };
+      }
+      if (source === "zcode" && nativeReaderWon(zcodeResult)) {
+        tick();
+        return { source, mapped: zcodeResult.entries };
       }
       const json = await runCcusage(cmd, [
         ...prefixArgs,
@@ -839,12 +865,6 @@ export async function collectAll(
   // A throw from one of these must not reject the Promise.all below (that
   // failed the WHOLE sync, so no tool's usage was submitted). Treat it like a
   // bailed scan: no rows from that reader, and a non-authoritative run.
-  const bailed = (): NativeCollectResult => ({
-    entries: [],
-    found: false,
-    filesScanned: 0,
-    timedOut: true,
-  });
   const vscodeTasks = VSCODE_AGENTS.map((a) =>
     collectVscodeAgent({ tool: a.tool, extIds: a.extIds })
       .catch(bailed)
@@ -882,6 +902,14 @@ export async function collectAll(
     continueTask,
   ]);
 
+  // Keep the direct reader for installations where the bundled daily scan
+  // returned no usable Antigravity rows. Give it the SQLite files to itself.
+  const antigravityResult = antigravityMapped.length === 0 && detectAntigravity()
+    ? await collectAntigravity().catch(bailed)
+    : null;
+  if (antigravityResult?.timedOut) {
+    console.warn("  Antigravity: usage scan incomplete; retrying on the next sync.");
+  }
   const native = { claude: nativeClaude, codex: nativeCodex };
 
   // Deferred ccusage pass for natively-scanned sources, only after the parallel
@@ -914,7 +942,9 @@ export async function collectAll(
   // Claude prefers native, Codex prefers replay-aware ccusage, and every other
   // source keeps ccusage's mapped entries (see selectSourceEntries).
   for (const { source, mapped } of sourceResults) {
-    const chosen = selectSourceEntries(source, fallbacks.get(source) ?? mapped, native);
+    const chosen = source === "antigravity" && antigravityResult
+      ? antigravityResult.entries
+      : selectSourceEntries(source, fallbacks.get(source) ?? mapped, native);
     if (chosen.length > 0) {
       entries.push(...chosen);
       toolsFound.push(source);
@@ -925,8 +955,7 @@ export async function collectAll(
     blocks.push(...cursor.blocks);
     toolsFound.push("cursor");
   }
-  // Cline / Roo (VS Code globalStorage tasks) and Continue.dev — additive; each
-  // no-ops when its agent isn't present.
+  // VS Code and Continue readers add sources that ccusage does not scan here.
   for (const { tool, result } of vscodeResults) {
     if (result.found && result.entries.length > 0) {
       entries.push(...result.entries);
@@ -968,6 +997,8 @@ export async function collectAll(
     nativeCodex,
     ...vscodeResults.map(({ result }) => result),
     continueResult,
+    antigravityResult ?? {},
+    zcodeResult,
   );
   const storePath = provenanceStorePath();
   const reconciled = reconcileProvenance(
