@@ -24,6 +24,7 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
+import { setTimeout as delay } from "node:timers/promises";
 import { join } from "node:path";
 import type { DailyUsageEntry } from "./shared.js";
 import type { NativeCollectResult } from "./native/claude.js";
@@ -568,24 +569,38 @@ export async function collectAntigravity(
   const rows: AntigravityUsageRow[] = [];
   let scanned = 0;
 
-  for (const file of files) {
-    if (now() > deadline) {
-      return { entries: [], found: true, filesScanned: scanned, timedOut: true };
+  let pending = files;
+  for (const backoffMs of [0, 150, 500, 1_000]) {
+    if (backoffMs > 0) {
+      const remaining = deadline - now();
+      if (remaining <= 0) break;
+      await delay(Math.min(backoffMs, remaining));
     }
-    let mtimeMs = now();
-    try {
-      mtimeMs = statSync(file).mtimeMs;
-    } catch {
-      // keep the wall-clock fallback
+    const locked: string[] = [];
+    for (const file of pending) {
+      if (now() > deadline) {
+        return { entries: [], found: true, filesScanned: scanned, timedOut: true };
+      }
+      let mtimeMs = now();
+      try {
+        mtimeMs = statSync(file).mtimeMs;
+      } catch {
+        // Keep the wall-clock fallback.
+      }
+      const read = readAntigravityDb(sqlite, file, mtimeMs);
+      if (read.busy) {
+        locked.push(file);
+        continue;
+      }
+      rows.push(...read.rows);
+      scanned += 1;
     }
-    const read = readAntigravityDb(sqlite, file, mtimeMs);
-    if (read.busy) {
-      return { entries: [], found: true, filesScanned: scanned, timedOut: true };
-    }
-    rows.push(...read.rows);
-    scanned += 1;
+    pending = locked;
+    if (pending.length === 0) break;
   }
-
+  if (pending.length > 0) {
+    return { entries: [], found: true, filesScanned: scanned, timedOut: true };
+  }
   return {
     entries: mapAntigravityUsageRows(rows),
     found: true,

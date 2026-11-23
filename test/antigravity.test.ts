@@ -216,7 +216,7 @@ describe("mapAntigravityUsageRows", () => {
 });
 
 describe.skipIf(!sqliteAvailable)("collectAntigravity (SQLite)", () => {
-  it("reads a conversation DB end to end", async () => {
+  it("retries a locked conversation DB and reads it after the lock clears", async () => {
     const root = await mkdtemp(join(tmpdir(), "wbm-ag-db-"));
     try {
       const dir = join(root, "conversations");
@@ -240,10 +240,16 @@ describe.skipIf(!sqliteAvailable)("collectAntigravity (SQLite)", () => {
         db.close();
       }
 
-      const result = await collectAntigravity({
-        dirs: [dir],
-        now: () => LOCAL_NOON,
-      });
+      const writer = new DatabaseSync(join(dir, "cascade.db"));
+      writer.exec("BEGIN EXCLUSIVE");
+      let result;
+      try {
+        const scan = collectAntigravity({ dirs: [dir], now: () => LOCAL_NOON });
+        writer.exec("ROLLBACK");
+        result = await scan;
+      } finally {
+        writer.close();
+      }
       expect(result).toMatchObject({ found: true, filesScanned: 1 });
       expect(result.entries).toHaveLength(1);
       expect(result.entries[0]).toMatchObject({

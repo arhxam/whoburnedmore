@@ -709,7 +709,7 @@ export type ProgressFn = (done: number, total: number, label: string) => void;
  * non-ccusage readers cline, roo, continue, antigravity, zcode
  * (VSCODE_AGENTS.length + 3).
  */
-export const COLLECT_STAGES = SOURCES.length + 4 + VSCODE_AGENTS.length + 3;
+export const COLLECT_STAGES = SOURCES.length + 4 + VSCODE_AGENTS.length + 1;
 
 /**
  * A run is AUTHORITATIVE — safe to lower a stored requestCount fingerprint —
@@ -750,10 +750,22 @@ export async function collectAll(
   ).catch(() => {});
 
   const { cmd, prefixArgs } = resolveCcusageBin();
+  const bailed = (): NativeCollectResult => ({
+    entries: [],
+    found: false,
+    filesScanned: 0,
+    timedOut: true,
+  });
   let done = 0;
   // Each task bumps the bar as it finishes. Because everything runs at once,
   // stages complete out of order — the bar tracks the count, not the sequence.
   const tick = () => onProgress?.(++done, COLLECT_STAGES, "");
+
+  // Read these ledgers before ccusage starts its all-source blocks pass, which
+  // can contend for the same SQLite databases on Windows.
+  const antigravityResult = await collectAntigravity().catch(bailed);
+  const zcodeResult = await collectZcode().catch(bailed);
+  const nativeDaily = { antigravity: antigravityResult, zcode: zcodeResult };
 
   // Independent work overlaps, but per-source ccusage children use a small
   // worker pool. The old all-at-once pass could reserve hundreds of MiB of output
@@ -790,6 +802,16 @@ export async function collectAll(
         await (source === "claude" ? nativeClaudeTask : nativeCodexTask);
         tick();
         return { source, mapped: [] as DailyUsageEntry[] };
+      }
+      if (source in nativeDaily) {
+        const result = nativeDaily[source as keyof typeof nativeDaily];
+        if (nativeReaderWon(result)) {
+          tick();
+          return { source, mapped: result.entries };
+        }
+        if (result.timedOut) {
+          console.warn(`  ${source}: native usage scan incomplete; trying bundled ccusage.`);
+        }
       }
       const json = await runCcusage(cmd, [
         ...prefixArgs,
@@ -842,12 +864,6 @@ export async function collectAll(
   // A throw from one of these must not reject the Promise.all below (that
   // failed the WHOLE sync, so no tool's usage was submitted). Treat it like a
   // bailed scan: no rows from that reader, and a non-authoritative run.
-  const bailed = (): NativeCollectResult => ({
-    entries: [],
-    found: false,
-    filesScanned: 0,
-    timedOut: true,
-  });
   const vscodeTasks = VSCODE_AGENTS.map((a) =>
     collectVscodeAgent({ tool: a.tool, extIds: a.extIds })
       .catch(bailed)
@@ -863,15 +879,6 @@ export async function collectAll(
       return r;
     });
 
-  const antigravityTask = collectAntigravity().catch(bailed).then((r) => {
-    tick();
-    return r;
-  });
-  const zcodeTask = collectZcode().catch(bailed).then((r) => {
-    tick();
-    return r;
-  });
-
   const [
     sourceResults,
     sessions,
@@ -882,8 +889,6 @@ export async function collectAll(
     nativeCodex,
     vscodeResults,
     continueResult,
-    antigravityResult,
-    zcodeResult,
   ] = await Promise.all([
     sourceTasks,
     sessionTask,
@@ -894,8 +899,6 @@ export async function collectAll(
     nativeCodexTask,
     Promise.all(vscodeTasks),
     continueTask,
-    antigravityTask,
-    zcodeTask,
   ]);
 
   const native = { claude: nativeClaude, codex: nativeCodex };
@@ -941,23 +944,16 @@ export async function collectAll(
     blocks.push(...cursor.blocks);
     toolsFound.push("cursor");
   }
-  // Cline / Roo (VS Code globalStorage tasks), Continue.dev, Antigravity, and
-  // ZCode — additive; each no-ops when its agent isn't present.
+  // VS Code and Continue readers add sources that ccusage does not scan here.
   for (const { tool, result } of vscodeResults) {
     if (result.found && result.entries.length > 0) {
       entries.push(...result.entries);
       toolsFound.push(tool);
     }
   }
-  for (const [tool, result] of [
-    ["continue", continueResult],
-    ["antigravity", antigravityResult],
-    ["zcode", zcodeResult],
-  ] as const) {
-    if (result.found && result.entries.length > 0) {
-      entries.push(...result.entries);
-      toolsFound.push(tool);
-    }
+  if (continueResult.found && continueResult.entries.length > 0) {
+    entries.push(...continueResult.entries);
+    toolsFound.push("continue");
   }
 
   const { tools, skills, agent, sessionMessages, complete } = attribution;
