@@ -13,7 +13,8 @@ machines. This repository is a public, always-in-sync mirror of it.
 ## What it does
 
 `whoburnedmore` reads your local AI coding-agent usage (Claude Code, Codex, Gemini CLI,
-Copilot, Cursor and more, via [ccusage](https://github.com/ryoppippi/ccusage)), adds up
+Copilot, Cursor, Devin, Zed, Kiro and 40+ more, via [ccusage](https://github.com/ccusage/ccusage),
+[tokscale](https://github.com/junhoyeo/tokscale) and its own native readers), adds up
 the tokens and estimated cost, and **submits your daily totals to the whoburnedmore.com
 server** so you land on the public leaderboard and get a shareable dashboard.
 
@@ -40,14 +41,16 @@ Usage is read only from logs and databases the agents keep **on this machine**.
 | Claude Code | Native reader for `~/.claude/projects` and `~/.config/claude/projects` (or comma-separated `CLAUDE_CONFIG_DIR`) |
 | Codex CLI | ccusage's replay-aware reader for `sessions` and `archived_sessions` under `CODEX_HOME` (default `~/.codex`) |
 | Gemini CLI, GitHub Copilot CLI, OpenCode, Amp, Droid, Goose, Kimi, Qwen, Kilo, OpenClaw, Hermes, pi, Codebuff | [ccusage](https://github.com/ccusage/ccusage) |
-| Google Antigravity (desktop, CLI, IDE), Grok Build CLI, ZCode | ccusage |
+| Google Antigravity (desktop, CLI, IDE), Grok Build CLI, ZCode, DeepSeek Harness | ccusage |
+| Devin (CLI and desktop), Zed Agent, Kiro, Crush, Augment Code, Junie, Qoder, Mux, Mistral Vibe, CodeBuddy, WorkBuddy, Command Code, MiMo Code, Jcode, OpenCodeReview, Gajae-Code, Kimchi, Reasonix, Prime Agent, Freebuff, MiniMax Code, Fx, oh-my-pi, Senpi, Muse, Aside, Proma, bb | [tokscale](https://github.com/junhoyeo/tokscale), run `--offline` and restricted to agents nothing else here reads, so no day is counted twice |
 | Cursor | Your local Cursor sign-in, used to fetch your own usage events from Cursor's dashboard API (the session token goes only to Cursor, never to whoburnedmore) |
 | Cline, Roo Code | Native reader for VS Code / Cursor extension task logs |
 | Continue | Native reader for `~/.continue` |
 
 **Not supported:** usage that only exists in a provider's cloud — ChatGPT or Claude on the
-web or in apps, cloud agents, and Grok on the web or in X. There is no local record to read,
-and the CLI never estimates usage it can't read. Older Antigravity builds that kept only
+web or in apps, cloud agents (including Devin's hosted sessions), and Grok on the web or in X.
+There is no local record to read, and the CLI never estimates usage it can't read. Local
+model servers (LM Studio, Unsloth) and request proxies are deliberately not counted. Older Antigravity builds that kept only
 encrypted conversation logs can't be counted either.
 
 **Something missing?** Run `npx whoburnedmore --dry-run` to see exactly which tools and

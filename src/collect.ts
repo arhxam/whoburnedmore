@@ -27,6 +27,7 @@ import {
 import { collectCodexNative } from "./native/codex.js";
 import { plausibleUsageDate } from "./native/usage-date.js";
 import { collectVscodeAgent, VSCODE_AGENTS } from "./native/vscode-agents.js";
+import { collectTokscaleExtras } from "./tokscale.js";
 import { loadLivePricing } from "./pricing-live.js";
 import { estimateCostUSD, resolveModelPrice } from "./pricing.js";
 import {
@@ -129,6 +130,8 @@ export const SOURCES = [
   "antigravity",
   "grok",
   "zcode",
+  // DeepSeek Harness, read by ccusage >= 20.1.0.
+  "dsh",
 ] as const;
 
 function norm(n: unknown): number {
@@ -652,6 +655,18 @@ export function isRetryableCcusageFailure(err: unknown): boolean {
   return e.signal != null || typeof e.code === "string";
 }
 
+/**
+ * Environment for every ccusage child. ccusage >= 20.1 sends a once-a-day usage
+ * ping unless told not to. `--offline` already disables it, but the "nothing
+ * leaves your machine except daily totals to whoburnedmore" promise should not
+ * hinge on one flag staying wired, so opt out explicitly as well.
+ */
+export function ccusageChildEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  return { ...env, DO_NOT_TRACK: "1" };
+}
+
 async function runCcusageOnce(
   cmd: string,
   args: string[],
@@ -668,7 +683,7 @@ async function runCcusageOnce(
       // everything for minutes. The claude/codex fallback passes a longer cap —
       // see CCUSAGE_FALLBACK_TIMEOUT_MS.
       timeout: timeoutMs,
-      ...(env ? { env } : {}),
+      env: ccusageChildEnv(env),
     });
     if (!stdout) return { json: null, transient: false };
     try {
@@ -703,10 +718,11 @@ export type ProgressFn = (done: number, total: number, label: string) => void;
 
 /**
  * Total number of collection stages: the ccusage sources, plus the fixed extra
- * ticking tasks — sessions, blocks, cursor, attribution (4), and the native
- * non-ccusage readers cline, roo, continue (VSCODE_AGENTS.length + 1).
+ * ticking tasks — sessions, blocks, cursor, attribution (4), the native
+ * non-ccusage readers cline, roo, continue (VSCODE_AGENTS.length + 1), and the
+ * tokscale pass for agents nothing else reads (1).
  */
-export const COLLECT_STAGES = SOURCES.length + 4 + VSCODE_AGENTS.length + 1;
+export const COLLECT_STAGES = SOURCES.length + 4 + VSCODE_AGENTS.length + 1 + 1;
 
 /**
  * A run is AUTHORITATIVE — safe to lower a stored requestCount fingerprint —
@@ -859,6 +875,16 @@ export async function collectAll(
       tick();
       return r;
     });
+  // Agents only tokscale can read (Devin, Zed, Kiro, Crush, Augment, Junie, …):
+  // one offline `tokscale graph` pass restricted to clients no other reader
+  // covers. Best effort — a no-op when tokscale isn't installed for this
+  // platform, and a failure or timeout contributes nothing.
+  const tokscaleTask = collectTokscaleExtras()
+    .catch(() => ({ entries: [] as DailyUsageEntry[], ran: false, timedOut: false }))
+    .then((r) => {
+      tick();
+      return r;
+    });
 
   const [
     sourceResults,
@@ -870,6 +896,7 @@ export async function collectAll(
     nativeCodex,
     vscodeResults,
     continueResult,
+    tokscaleExtras,
   ] = await Promise.all([
     sourceTasks,
     sessionTask,
@@ -880,6 +907,7 @@ export async function collectAll(
     nativeCodexTask,
     Promise.all(vscodeTasks),
     continueTask,
+    tokscaleTask,
   ]);
 
   const native = { claude: nativeClaude, codex: nativeCodex };
@@ -936,6 +964,11 @@ export async function collectAll(
   if (continueResult.found && continueResult.entries.length > 0) {
     entries.push(...continueResult.entries);
     toolsFound.push("continue");
+  }
+  if (tokscaleExtras.entries.length > 0) {
+    entries.push(...tokscaleExtras.entries);
+    for (const tool of new Set(tokscaleExtras.entries.map((e) => e.tool)))
+      toolsFound.push(tool);
   }
 
   const { tools, skills, agent, sessionMessages, complete } = attribution;
