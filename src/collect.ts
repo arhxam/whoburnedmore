@@ -130,8 +130,6 @@ export const SOURCES = [
   "antigravity",
   "grok",
   "zcode",
-  // DeepSeek Harness, read by ccusage >= 20.1.0.
-  "dsh",
 ] as const;
 
 function norm(n: unknown): number {
@@ -657,9 +655,9 @@ export function isRetryableCcusageFailure(err: unknown): boolean {
 
 /**
  * Environment for every ccusage child. ccusage >= 20.1 sends a once-a-day usage
- * ping unless told not to. `--offline` already disables it, but the "nothing
- * leaves your machine except daily totals to whoburnedmore" promise should not
- * hinge on one flag staying wired, so opt out explicitly as well.
+ * ping unless told not to. `--offline` disables it, but the "nothing leaves
+ * your machine except daily totals to whoburnedmore" promise should not hinge on
+ * one flag staying wired across a future bump, so opt out explicitly as well.
  */
 export function ccusageChildEnv(
   env: NodeJS.ProcessEnv = process.env,

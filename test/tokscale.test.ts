@@ -246,5 +246,8 @@ describe("installed tokscale", () => {
       (c) => !(c in TOKSCALE_EXTRA_CLIENTS) && !(c in TOKSCALE_EXCLUDED_CLIENTS),
     );
     expect(unclassified).toEqual([]);
+    // The reverse: tokscale rejects the whole `--client` list if one id is
+    // unknown, which would silently drop every extra agent at once.
+    expect(Object.keys(TOKSCALE_EXTRA_CLIENTS).filter((c) => !clients.includes(c))).toEqual([]);
   });
 });

@@ -17,11 +17,11 @@
     "prepublishOnly": "npm run lint && npm run test && npm run build && npm run smoke:package"
   },
   "dependencies": {
-    "ccusage": "20.1.1",
+    "ccusage": "20.0.51",
     "picocolors": "1.1.1"
   },
   "optionalDependencies": {
-    "tokscale": "4.23.1"
+    "tokscale": "4.23.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

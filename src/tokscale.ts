@@ -91,7 +91,9 @@ export const TOKSCALE_EXCLUDED_CLIENTS: Readonly<Record<string, string>> = {
   "antigravity-extension": "ccusage (antigravity) — same conversations dir",
   grok: "ccusage",
   zcode: "ccusage",
-  dsh: "ccusage",
+  // DeepSeek Harness: ccusage reads it from 20.1 (not yet past our 7-day
+  // release-age rule). Left out so that bump can't double-count it.
+  dsh: "ccusage from 20.1",
   // Read by our own native readers.
   cline: "native vscode-agents",
   roocode: "native vscode-agents",

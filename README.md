@@ -41,7 +41,7 @@ Usage is read only from logs and databases the agents keep **on this machine**.
 | Claude Code | Native reader for `~/.claude/projects` and `~/.config/claude/projects` (or comma-separated `CLAUDE_CONFIG_DIR`) |
 | Codex CLI | ccusage's replay-aware reader for `sessions` and `archived_sessions` under `CODEX_HOME` (default `~/.codex`) |
 | Gemini CLI, GitHub Copilot CLI, OpenCode, Amp, Droid, Goose, Kimi, Qwen, Kilo, OpenClaw, Hermes, pi, Codebuff | [ccusage](https://github.com/ccusage/ccusage) |
-| Google Antigravity (desktop, CLI, IDE), Grok Build CLI, ZCode, DeepSeek Harness | ccusage |
+| Google Antigravity (desktop, CLI, IDE), Grok Build CLI, ZCode | ccusage |
 | Devin (CLI and desktop), Zed Agent, Kiro, Crush, Augment Code, Junie, Qoder, Mux, Mistral Vibe, CodeBuddy, WorkBuddy, Command Code, MiMo Code, Jcode, OpenCodeReview, Gajae-Code, Kimchi, Reasonix, Prime Agent, Freebuff, MiniMax Code, Fx, oh-my-pi, Senpi, Muse, Aside, Proma, bb | [tokscale](https://github.com/junhoyeo/tokscale), run `--offline` and restricted to agents nothing else here reads, so no day is counted twice |
 | Cursor | Your local Cursor sign-in, used to fetch your own usage events from Cursor's dashboard API (the session token goes only to Cursor, never to whoburnedmore) |
 | Cline, Roo Code | Native reader for VS Code / Cursor extension task logs |
