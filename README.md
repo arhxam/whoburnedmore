@@ -84,7 +84,11 @@ After your first run, a background sync keeps your page fresh automatically
 every 15 minutes (`uninstall-sync` to stop). The installed background job runs
 the exact CLI version that installed it, with npm lifecycle scripts disabled.
 Run an updated CLI in the foreground to repair the job and advance its version;
-background jobs do not automatically download a newer release. The server endpoint is
+background jobs do not automatically download a newer release. To make that
+visible, the CLI checks the npm registry for a newer release at most once a day
+(a small read-only GET, skipped entirely in `--local`; opt out with
+`WHOBURNEDMORE_VERSION_CHECK_OFFLINE=1`) and prints an upgrade note after
+foreground runs and in `npx whoburnedmore status` when one exists. The server endpoint is
 overridable with `WHOBURNEDMORE_API`.
 
 On Windows, sync runs while you are signed in using a windowless Windows Script

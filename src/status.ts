@@ -9,6 +9,11 @@ import {
   type DriftState,
 } from "./autosync.js";
 import { loadConfig } from "./config.js";
+import { isNewerVersion, readLatestVersionCacheSync, updateNoticeLines } from "./version-check.js";
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const CLI_VERSION = (require("../package.json") as { version: string }).version;
 
 export interface StatusInput {
   installed: boolean;
@@ -23,6 +28,10 @@ export interface StatusInput {
   logPath: string;
   /** The user turned background sync off with `uninstall-sync`. */
   optedOut?: boolean;
+  /** Version of the CLI building this report. */
+  currentVersion?: string;
+  /** Newest version the registry check knows about (null when never checked). */
+  latestVersion?: string | null;
 }
 
 function ago(ms: number): string {
@@ -58,6 +67,15 @@ export function buildStatusReport(s: StatusInput): string[] {
   }
   lines.push(`  • Interval: every ${syncIntervalLabel(s.intervalMinutes)}`);
 
+  if (s.currentVersion) {
+    lines.push(`  • CLI: v${s.currentVersion}`);
+    if (s.latestVersion && isNewerVersion(s.currentVersion, s.latestVersion)) {
+      // The pinned background agent never follows `latest` on its own — say so
+      // plainly, or the user reasonably assumes auto-sync means auto-updated.
+      lines.push(...updateNoticeLines(s.currentVersion, s.latestVersion));
+    }
+  }
+
   const staleAfterMs = s.intervalMinutes * 2 * 60 * 1000;
   if (s.lastSyncAt === null) {
     lines.push("  • Last sync: never recorded");
@@ -88,6 +106,7 @@ export function buildStatusReport(s: StatusInput): string[] {
 export function agentStatusReport(now: number = Date.now()): string[] {
   const cfg = loadConfig();
   const nodePath = resolveNodePath();
+  const versionCache = readLatestVersionCacheSync();
   return buildStatusReport({
     installed: autoSyncInstalled(),
     loaded: autoSyncLoaded(),
@@ -99,5 +118,7 @@ export function agentStatusReport(now: number = Date.now()): string[] {
     nodePathStable: !nodePath.includes("/Cellar/"),
     logPath: syncLogPath(),
     optedOut: cfg?.autoSyncOptOut === true,
+    currentVersion: CLI_VERSION,
+    latestVersion: versionCache?.version ?? null,
   });
 }

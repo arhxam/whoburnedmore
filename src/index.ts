@@ -65,6 +65,12 @@ import {
   setAutoSyncOptOut,
 } from "./config.js";
 import { agentStatusReport } from "./status.js";
+import {
+  isNewerVersion,
+  readLatestVersionCache,
+  refreshLatestVersion,
+  updateNoticeLines,
+} from "./version-check.js";
 import { renderDashboardHtml, writeLocalDashboard } from "./local-dashboard.js";
 import { scopeWarningLines, sanitizeServerText, signedInNextStepLines, syncSummaryLine } from "./output.js";
 import { publishLocal } from "./publish.js";
@@ -205,6 +211,27 @@ function showLocalDashboard(payload: SubmitPayload): void {
   if (process.stdout.isTTY) openBrowser(fileUrl);
 }
 
+/**
+ * Print the upgrade nudge when the cached registry answer says this binary is
+ * behind. Reads only the local cache — never the network — so it cannot violate
+ * any offline guarantee, and it is best-effort: a missing or corrupt cache just
+ * means no notice. Only foreground runs print; background ticks stay silent and
+ * simply keep the cache fresh for `status` and the next foreground run.
+ */
+async function printUpgradeNotice(): Promise<void> {
+  try {
+    const cached = await readLatestVersionCache();
+    if (cached && isNewerVersion(VERSION, cached.version)) {
+      console.log();
+      for (const line of updateNoticeLines(VERSION, cached.version)) {
+        console.log(pc.yellow(line));
+      }
+    }
+  } catch {
+    // best-effort — never fail a good run over an upgrade hint
+  }
+}
+
 async function run(flags: Flags): Promise<void> {
   if (!flags.quiet) {
     printBanner();
@@ -226,12 +253,20 @@ async function run(flags: Flags): Promise<void> {
   const progress = flags.quiet
     ? { onProgress: undefined as ProgressFn | undefined, stop: () => {} }
     : startProgress();
+  // Race the read-only registry version check against collection — it answers
+  // long before parsing finishes, so it costs the run nothing. Skipped entirely
+  // in --local mode: the "fully offline" promise must hold literally. The probe
+  // only refreshes the cache; the notice prints from cache at the end of the run.
+  const latestVersionProbe = flags.local
+    ? null
+    : refreshLatestVersion().catch(() => null);
   let collected;
   try {
     collected = await collectAll(progress.onProgress, { offline: flags.local });
   } finally {
     progress.stop();
   }
+  if (latestVersionProbe) await latestVersionProbe;
   const unreadable = collected.unreadableClaudeFiles ?? [];
   if (unreadable.length > 0 && !flags.quiet) {
     console.log(
@@ -1097,6 +1132,7 @@ async function main(): Promise<void> {
   switch (command) {
     case "run":
       await run(flags);
+      await printUpgradeNotice();
       break;
     case "sync": {
       // Background sync only runs once this machine has an anonymous key from a
