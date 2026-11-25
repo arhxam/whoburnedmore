@@ -70,3 +70,32 @@ describe("buildStatusReport (status command)", () => {
     expect(out).toMatch(/version-pinned/);
   });
 });
+
+describe("buildStatusReport — version staleness", () => {
+  it("shows the CLI version and warns when a newer one is known", () => {
+    const out = buildStatusReport(
+      base({ currentVersion: "0.9.27", latestVersion: "0.9.28" }),
+    ).join("\n");
+    expect(out).toContain("• CLI: v0.9.27");
+    expect(out).toContain("v0.9.28 is out");
+    expect(out).toContain("pinned");
+    expect(out).toContain("npx whoburnedmore@latest");
+  });
+
+  it("stays quiet when up to date or when nothing is known", () => {
+    const current = buildStatusReport(
+      base({ currentVersion: "0.9.28", latestVersion: "0.9.28" }),
+    ).join("\n");
+    expect(current).toContain("• CLI: v0.9.28");
+    expect(current).not.toContain("is out");
+
+    const unknown = buildStatusReport(
+      base({ currentVersion: "0.9.28", latestVersion: null }),
+    ).join("\n");
+    expect(unknown).not.toContain("is out");
+
+    // Older inputs without version fields render exactly as before.
+    const legacy = buildStatusReport(base()).join("\n");
+    expect(legacy).not.toContain("• CLI:");
+  });
+});
