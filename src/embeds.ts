@@ -281,9 +281,11 @@ export function renderUsageCard(
         534,
         74,
         data
-          ? options.period !== "today" && data.highlights
-            ? `${formatEmbedTokens(data.highlights.today)} burned today`
-            : `${data.totals.activeDays} active days`
+          ? data.highlights
+            ? options.period === "today"
+              ? `${formatEmbedTokens(data.highlights.week)} this week`
+              : `${formatEmbedTokens(data.highlights.today)} burned today`
+            : `${data.totals.activeDays} active ${data.totals.activeDays === 1 ? "day" : "days"}`
           : "No data available",
         13,
         fg,
@@ -304,6 +306,21 @@ export function renderUsageCard(
         ? data.activity.slice(-30)
         : (data?.daily.slice(-30) ?? []);
     const max = Math.max(1, ...days.map((d) => d.tokens));
+    // Week-shaped periods always get seven slots (Mon→Sun for "week"), so a
+    // Monday card with one day of data draws one bar instead of a full-width
+    // block, and a mid-week line stops at today instead of stretching.
+    const slots =
+      options.period === "week" || options.period === "7d"
+        ? Math.max(7, days.length)
+        : Math.max(1, days.length);
+    const slotDate = (index: number) =>
+      days.length
+        ? new Date(
+            Date.parse(`${days[0].date}T00:00:00Z`) + index * 86_400_000,
+          )
+            .toISOString()
+            .slice(0, 10)
+        : "";
     const chartLabel =
       options.period === "today"
         ? "Daily tokens · last 30 days"
@@ -409,7 +426,11 @@ export function renderUsageCard(
             ? "Claude Code"
             : d.tool === "codex"
               ? "Codex"
-              : d.tool;
+              : d.tool === "gemini"
+                ? "Gemini CLI"
+                : d.tool.replace(/(^|[-_])(\w)/g, (_m, sep: string, c: string) =>
+                    `${sep ? " " : ""}${c.toUpperCase()}`,
+                  );
         body +=
           text(26, y + 3, tool.slice(0, 19), 11, fg) +
           rect(157, y - 8, 250, 12, panel, 3) +
@@ -458,13 +479,14 @@ export function renderUsageCard(
         );
       body += `<path d="M26 ${top}H534 M26 ${Math.round((top + bottom) / 2)}H534 M26 ${bottom}H534" stroke="${line}" stroke-dasharray="3 5"/>`;
       if (style === "signature" && days.length > 1) {
+        const x = (i: number) => left + (i * width) / (slots - 1);
         const points = days.map(
           (d, i) =>
-            `${left + (i * width) / (days.length - 1)},${bottom - (Math.max(0, d.tokens) / max) * (bottom - top)}`,
+            `${x(i)},${bottom - (Math.max(0, d.tokens) / max) * (bottom - top)}`,
         );
-        body += `<path d="M${left},${bottom} L${points.join(" L")} L534,${bottom} Z" fill="${color}" fill-opacity=".1"/><path d="M${points.join(" L")}" stroke="${color}" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>`;
+        body += `<path d="M${left},${bottom} L${points.join(" L")} L${x(days.length - 1)},${bottom} Z" fill="${color}" fill-opacity=".1"/><path d="M${points.join(" L")}" stroke="${color}" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>`;
       } else {
-        const step = width / Math.max(days.length, 1);
+        const step = width / slots;
         days.forEach((d, i) => {
           const bh = Math.max(
             2,
@@ -486,7 +508,7 @@ export function renderUsageCard(
           text(
             534,
             264,
-            shortDate(days[days.length - 1].date),
+            shortDate(slotDate(slots - 1)),
             9,
             muted,
             'text-anchor="end"',

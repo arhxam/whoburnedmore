@@ -7,9 +7,20 @@ import type {
   VerifyResponse,
 } from "./shared.js";
 import { readTextResponseCapped } from "./http-bounds.js";
+import { sanitizeServerText } from "./output.js";
 
 const DEFAULT_API_BASE = "https://api.whoburnedmore.com";
 const MAX_SERVER_RESPONSE_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Server-supplied text that ends up in an Error message (and so on the user's
+ * terminal). Strips control bytes so a hostile/compromised response can't
+ * clear the screen, retitle the window, or paint fake colored instructions.
+ * Non-strings (missing fields) pass through as undefined.
+ */
+function serverText(v: unknown): string | undefined {
+  return typeof v === "string" ? sanitizeServerText(v) : undefined;
+}
 
 export interface ServerInstallRedeemResponse {
   ok: true;
@@ -87,6 +98,23 @@ export function isOpenableUrl(url: string): boolean {
   return /^(https?|file):\/\//.test(url);
 }
 
+/**
+ * The OS command that opens a (pre-validated, see isOpenableUrl) URL in the
+ * default browser. Windows deliberately avoids `cmd /c start`: cmd.exe parses
+ * `&`, `|`, `^` and `%VAR%` inside the URL, so a hostile server URL like
+ * `https://whoburnedmore.com/cli?code=X&calc.exe` would run a command.
+ * `rundll32 url.dll,FileProtocolHandler` hands the URL to the default handler
+ * with no shell in between.
+ */
+export function browserOpenCommand(
+  os: NodeJS.Platform | string,
+  url: string,
+): [string, string[]] {
+  if (os === "darwin") return ["open", [url]];
+  if (os === "win32") return ["rundll32", ["url.dll,FileProtocolHandler", url]];
+  return ["xdg-open", [url]];
+}
+
 /** Parse a response body as JSON, tolerating empty or non-JSON responses. */
 async function readJson<T>(res: Response): Promise<T> {
   const text = await readTextResponseCapped(res, MAX_SERVER_RESPONSE_BYTES);
@@ -161,9 +189,9 @@ export async function verifyUsage(
   if (status !== 200) {
     const err = body as { error: string; details?: string[] };
     const details = err.details?.length
-      ? `\n  - ${err.details.join("\n  - ")}`
+      ? `\n  - ${err.details.map((d) => serverText(d) ?? "").join("\n  - ")}`
       : "";
-    throw new Error(`${err.error ?? "verification failed"}${details}`);
+    throw new Error(`${serverText(err.error) ?? "verification failed"}${details}`);
   }
   return body as VerifyResponse;
 }
@@ -188,7 +216,7 @@ export async function deviceStart(): Promise<DeviceCodeResponse> {
   );
   if (status !== 200) {
     throw new Error(
-      (body as { error?: string }).error ?? `sign-in failed (HTTP ${status})`,
+      serverText((body as { error?: string }).error) ?? `sign-in failed (HTTP ${status})`,
     );
   }
   return body as DeviceCodeResponse;
@@ -202,10 +230,19 @@ export async function devicePoll(
     "/v1/auth/device/token",
     { deviceCode },
   );
+  if (status === 429) throw new RateLimitedError();
   if (status !== 200) {
     throw new Error(`sign-in failed (HTTP ${status})`);
   }
   return body as DeviceTokenResponse;
+}
+
+/** The server asked us to slow down (HTTP 429). */
+export class RateLimitedError extends Error {
+  constructor() {
+    super("rate limited");
+    this.name = "RateLimitedError";
+  }
 }
 
 /**
@@ -285,14 +322,16 @@ export async function submit(
     // contest it. Relay the operator's reason and the appeal link the server
     // returned, instead of a bare "account blocked".
     if (status === 403 && err.error === "account blocked") {
-      const reason = err.reason ? `\n  Reason: ${err.reason}` : "";
+      const reason = err.reason ? `\n  Reason: ${serverText(err.reason)}` : "";
       const appeal = err.appealUrl
-        ? `\n  If you think this is a mistake, appeal at: ${err.appealUrl}`
+        ? `\n  If you think this is a mistake, appeal at: ${serverText(err.appealUrl)}`
         : "";
       throw new Error(`Your account is blocked.${reason}${appeal}`);
     }
-    const details = err.details?.length ? `\n  - ${err.details.join("\n  - ")}` : "";
-    throw new Error(`${err.error ?? `submit failed (HTTP ${status})`}${details}`);
+    const details = err.details?.length
+      ? `\n  - ${err.details.map((d) => serverText(d) ?? "").join("\n  - ")}`
+      : "";
+    throw new Error(`${serverText(err.error) ?? `submit failed (HTTP ${status})`}${details}`);
   }
   return body as SubmitResponse;
 }
@@ -316,7 +355,7 @@ export async function setVisibility(
   }>("/v1/cli/visibility", { listed }, token);
   if (status === 401) throw new UnauthorizedError();
   if (status !== 200) {
-    throw new Error(body.error ?? `failed (HTTP ${status})`);
+    throw new Error(serverText(body.error) ?? `failed (HTTP ${status})`);
   }
   return { listed: body.listed === true, eligible: body.eligible === true };
 }
@@ -335,7 +374,7 @@ export async function removeUsage(token: string): Promise<{ deletedDays: number 
   }>("DELETE", "/v1/cli/usage", undefined, token);
   if (status === 401) throw new UnauthorizedError();
   if (status !== 200) {
-    throw new Error(body.error ?? `failed (HTTP ${status})`);
+    throw new Error(serverText(body.error) ?? `failed (HTTP ${status})`);
   }
   return { deletedDays: body.deletedDays ?? 0 };
 }

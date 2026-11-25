@@ -13,7 +13,8 @@ machines. This repository is a public, always-in-sync mirror of it.
 ## What it does
 
 `whoburnedmore` reads your local AI coding-agent usage (Claude Code, Codex, Gemini CLI,
-Copilot, Cursor and more, via [ccusage](https://github.com/ryoppippi/ccusage)), adds up
+Copilot, Cursor, Devin, Zed, Kiro and 40+ more, via [ccusage](https://github.com/ccusage/ccusage),
+[tokscale](https://github.com/junhoyeo/tokscale) and its own native readers), adds up
 the tokens and estimated cost, and **submits your daily totals to the whoburnedmore.com
 server** so you land on the public leaderboard and get a shareable dashboard.
 
@@ -30,6 +31,34 @@ dashboard and its data, or use `--local` to stay fully offline.
 
 > Want a 100%-local report that makes **no** network calls at all? Use `npx whoburnedmore
 > --local`, which builds an HTML dashboard on your machine and uploads nothing.
+
+## Supported sources
+
+Usage is read only from logs and databases the agents keep **on this machine**.
+
+| Source | How it's read |
+|---|---|
+| Claude Code | Native reader for `~/.claude/projects` and `~/.config/claude/projects` (or comma-separated `CLAUDE_CONFIG_DIR`) |
+| Codex CLI | ccusage's replay-aware reader for `sessions` and `archived_sessions` under `CODEX_HOME` (default `~/.codex`) |
+| Gemini CLI, GitHub Copilot CLI, OpenCode, Amp, Droid, Goose, Kimi, Qwen, Kilo, OpenClaw, Hermes, pi, Codebuff | [ccusage](https://github.com/ccusage/ccusage) |
+| Google Antigravity (desktop, CLI, IDE), Grok Build CLI, ZCode | ccusage |
+| Zed Agent, Kiro, Crush, Augment Code, Junie, Qoder, Mux, Mistral Vibe, CodeBuddy, WorkBuddy, Command Code, MiMo Code, Jcode, OpenCodeReview, Gajae-Code, Kimchi, Reasonix, Prime Agent, Freebuff, Fx, oh-my-pi, Senpi, Muse, Aside, Proma, bb | [tokscale](https://github.com/junhoyeo/tokscale), run `--offline` and restricted to agents nothing else here reads, so no day is counted twice |
+| Cursor | Your local Cursor sign-in, used to fetch your own usage events from Cursor's dashboard API (the session token goes only to Cursor, never to whoburnedmore) |
+| Cline, Roo Code | Native reader for VS Code / Cursor extension task logs |
+| Continue | Native reader for `~/.continue` |
+| Devin (CLI, and Desktop's local sessions) | Native reader for `~/.local/share/devin/cli/sessions/*/log.jsonl` (Windows: `%APPDATA%\devin\cli`); older installs' `sessions.db` via tokscale |
+
+**Not supported:** usage that only exists in a provider's cloud — ChatGPT or Claude on the
+web or in apps, cloud agents (including Devin's hosted sessions), and Grok on the web or in X.
+There is no local record to read, and the CLI never estimates usage it can't read. Local
+model servers (LM Studio, Unsloth) and request proxies are deliberately not counted. Older Antigravity builds that kept only
+encrypted conversation logs can't be counted either.
+
+**Something missing?** Run `npx whoburnedmore --dry-run` to see exactly which tools and
+days were found on this machine (nothing is sent). If a source you use isn't listed, its data
+isn't readable locally yet. If it's listed but empty, run the CLI on the machine where you
+use that agent. If the numbers are right locally but your page is stale, run
+`npx whoburnedmore status` to check background sync.
 
 ## Commands
 

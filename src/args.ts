@@ -53,6 +53,74 @@ export function applyScope<T extends Record<string, unknown>>(
   return payload;
 }
 
+/** Flags that take a value (`--board CODE` / `--board=CODE`). */
+const VALUE_FLAGS = new Set(["--board", "--org", "--token", "--pass", "--code"]);
+
+/** Every flag the CLI understands. Anything else is a typo, not a no-op. */
+const KNOWN_FLAGS = new Set([
+  ...VALUE_FLAGS,
+  "--dry-run",
+  "--no-submit",
+  "--local",
+  "--watch",
+  "--help",
+  "-h",
+  "--version",
+  "-v",
+]);
+
+/** Flags whose whole point is that nothing is uploaded. */
+const NO_UPLOAD_FLAGS = ["--dry-run", "--no-submit", "--local"];
+
+/**
+ * Reject argv that would otherwise do something the user did not ask for.
+ * Returns a message to print, or null when the arguments are fine.
+ *
+ * The default command uploads usage publicly, so silently ignoring a flag is
+ * never harmless: a typo such as `--dryrun`, a flag from another tool, a
+ * `--board` with no code, or `--dry-run --watch` (the daemon always uploads)
+ * all used to fall through to a real upload.
+ */
+export function argumentProblem(args: string[], command: string): string | null {
+  if (command === "help" || command === "version") return null;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (!a.startsWith("-")) continue;
+    const name = a.includes("=") ? a.slice(0, a.indexOf("=")) : a;
+    if (!KNOWN_FLAGS.has(name)) return `Unknown option ${name}.`;
+    // On/off flags are matched exactly elsewhere, so `--dry-run=true` would be
+    // accepted here yet NOT treated as --dry-run: refuse the `=` form.
+    if (!VALUE_FLAGS.has(name) && a.includes("=")) {
+      return `${name} doesn't take a value; use ${name} on its own.`;
+    }
+    if (VALUE_FLAGS.has(name)) {
+      if (parseValueFlag([a, args[i + 1] ?? ""], name) === undefined) {
+        const example = { "--board": "CODE", "--org": "SLUG", "--token": "TOKEN" }[name] ?? "PASSWORD";
+        return `${name} needs a value, for example ${name}=${example}.`;
+      }
+      if (!a.includes("=")) i++;
+    }
+  }
+  const noUpload = NO_UPLOAD_FLAGS.filter((f) => args.includes(f));
+  if (args.includes("--watch")) {
+    if (command !== "run" && command !== "sync" && command !== "daemon") {
+      return `--watch only works with sync (it keeps uploading every 15 minutes).`;
+    }
+    if (noUpload.length > 0) {
+      return `--watch keeps uploading every 15 minutes, so it can't be combined with ${noUpload.join(", ")}.`;
+    }
+  }
+  if ((command === "sync" || command === "daemon") && noUpload.length > 0) {
+    return `${command} always uploads, so it can't be combined with ${noUpload.join(", ")}. To preview without sending, run \`npx whoburnedmore --dry-run\`.`;
+  }
+  // --dry-run/--local/--no-submit only change the default command; every other
+  // command would silently ignore them (link and verify still send data).
+  if (command !== "run" && noUpload.length > 0) {
+    return `${noUpload.join(", ")} only works with the default command, not \`${command}\`.`;
+  }
+  return null;
+}
+
 /** Shared `--name=value` / `--name value` reader; ignores empty and following flags. */
 function parseValueFlag(args: string[], name: string): string | undefined {
   const prefix = `${name}=`;
@@ -81,14 +149,15 @@ export function resolveCommand(args: string[]): string {
   // (`--board CODE`, `--org SLUG`) so a value like `--board help` is never treated
   // as the help subcommand/flag. `flags` holds dash tokens (their own flags);
   // `words` holds non-dash tokens that aren't a flag's value.
-  const valueFlags = new Set(["--board", "--org", "--token", "--pass", "--code"]);
   const flags: string[] = [];
   const words: string[] = [];
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a.startsWith("-")) {
       flags.push(a);
-      if (valueFlags.has(a)) i++; // also skip its value
+      // Skip the value only when the next token IS a value: `--board --help`
+      // must still see `--help` (parseValueFlag never takes a dash token).
+      if (VALUE_FLAGS.has(a) && args[i + 1] !== undefined && !args[i + 1].startsWith("-")) i++;
       continue;
     }
     words.push(a);
@@ -110,4 +179,10 @@ export function resolveCommand(args: string[]): string {
   }
   // An explicit subcommand wins; otherwise the default is `run`.
   return words[0] ?? "run";
+}
+
+/** Interpret a typed yes/no answer; an empty answer (just Enter) takes the default. */
+export function confirmAnswer(answer: string, defaultYes: boolean): boolean {
+  const a = answer.trim();
+  return a === "" ? defaultYes : /^y(es)?$/i.test(a);
 }

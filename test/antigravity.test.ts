@@ -16,15 +16,28 @@ describe("detectAntigravity", () => {
       await rm(home, { recursive: true, force: true });
     }
   });
+
+  it("also detects the Antigravity CLI and IDE data roots", async () => {
+    const home = await mkdtemp(join(tmpdir(), "wbm-ag-"));
+    try {
+      const env = { HOME: home } as NodeJS.ProcessEnv;
+      await mkdir(join(home, ".gemini", "antigravity-cli"), { recursive: true });
+      expect(detectAntigravity(env)).toBe(true);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("antigravityNoticeLines", () => {
-  it("explains, honestly, that Antigravity is detected but its usage can't be counted", () => {
+  it("names the readable ledger and is honest about uncountable older logs", () => {
     const lines = antigravityNoticeLines();
     expect(lines.length).toBeGreaterThan(0);
     const text = lines.join(" ").toLowerCase();
     expect(text).toContain("antigravity");
-    // Must set the honest expectation: not counted (encrypted / quota-only local data).
-    expect(text).toMatch(/can'?t|cannot|not counted|no.*local|encrypt/);
+    expect(text).toContain("conversations/*.db");
+    // Older encrypted-only history must still be described as uncountable.
+    expect(text).toMatch(/encrypted/);
+    expect(text).toMatch(/can'?t be counted/);
   });
 });

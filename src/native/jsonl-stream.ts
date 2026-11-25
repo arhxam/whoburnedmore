@@ -9,7 +9,7 @@ export async function readJsonlStream(
   path: string,
   onLine: (line: string) => void,
   opts: { deadline: number; now?: () => number; maxLineBytes?: number },
-): Promise<{ ok: true } | { ok: false; reason: "unreadable" | "too-large" | "timed-out" }> {
+): Promise<{ ok: true } | { ok: false; reason: "unreadable" | "permission-denied" | "too-large" | "timed-out" }> {
   const now = opts.now ?? Date.now;
   const maxLineBytes = Math.max(1, opts.maxLineBytes ?? MAX_NATIVE_FILE_BYTES);
   let handle: Awaited<ReturnType<typeof open>> | undefined;
@@ -53,7 +53,11 @@ export async function readJsonlStream(
     if (pendingBytes > 0) onLine(Buffer.concat(parts, pendingBytes).toString("utf8"));
     if (now() > opts.deadline) return { ok: false, reason: "timed-out" };
     return { ok: true };
-  } catch {
+  } catch (err) {
+    // A permission error is permanent for this file (e.g. a root-owned
+    // transcript left by `sudo claude`); callers may skip it and keep going.
+    const code = (err as NodeJS.ErrnoException | undefined)?.code;
+    if (code === "EACCES" || code === "EPERM") return { ok: false, reason: "permission-denied" };
     return { ok: false, reason: "unreadable" };
   } finally {
     await handle?.close().catch(() => undefined);

@@ -191,6 +191,7 @@ export async function fetchCursorEvents(
   pageSize = 500,
 ): Promise<CursorEvent[]> {
   const all: CursorEvent[] = [];
+  let reachedEnd = false;
   for (let page = 1; page <= maxPages; page++) {
     const res = await fetch(EVENTS_URL, {
       method: "POST",
@@ -218,9 +219,25 @@ export async function fetchCursorEvents(
     const batch = body.usageEventsDisplay ?? [];
     all.push(...batch);
     // A short page is the natural end of data (not an error) — stop cleanly.
-    if (batch.length < pageSize) break;
+    if (batch.length < pageSize) {
+      reachedEnd = true;
+      break;
+    }
   }
-  return all;
+  return reachedEnd ? all : dropBoundaryDay(all);
+}
+
+/**
+ * The page cap stopped us before the end of the history, so the calendar day of
+ * the last fetched event is only partly fetched. Submitting it would overwrite
+ * that day's stored total with a smaller number; dropping it leaves the stored
+ * value in place (days never fetched are simply absent from the payload).
+ */
+function dropBoundaryDay(events: CursorEvent[]): CursorEvent[] {
+  const dayOf = (e: CursorEvent) => localUsageDate(Number(e.timestamp));
+  const boundary = events.length > 0 ? dayOf(events[events.length - 1]) : null;
+  if (!boundary) return events;
+  return events.filter((e) => dayOf(e) !== boundary);
 }
 
 /**
@@ -249,14 +266,12 @@ export async function collectCursor(opts?: { offline?: boolean }): Promise<{
     // endpoint changed) — fall through to the tokscale fallback below.
   }
 
-  // Fallback: the community-maintained `tokscale` CLI, reading its synced Cursor
-  // cache. Resilient to Cursor API changes. It is NOT a bundled dependency (it
-  // pulled in a deprecated, vuln-flagged `glob` via a heavy TUI tree that printed
-  // an npm-deprecation warning on every `npx whoburnedmore`), so this is a no-op
-  // unless the user has installed it globally (`npm i -g tokscale`) and run
-  // `tokscale cursor login` + `sync`. The primary path above needs none of that.
+  // Fallback: the community-maintained `tokscale` CLI (an optional dependency),
+  // reading its locally synced Cursor cache — resilient to Cursor API changes.
+  // A no-op unless the user ran `tokscale cursor login` + `sync` themselves; it
+  // always runs `--offline`, so it never contacts Cursor or anyone else.
   try {
-    const entries = collectCursorViaTokscale();
+    const entries = await collectCursorViaTokscale();
     if (entries.length > 0) return { entries, blocks: [], found: true };
   } catch {
     /* tokscale missing or no data — give up quietly */
