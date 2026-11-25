@@ -25,8 +25,10 @@ import {
   type NativeCollectResult,
 } from "./native/claude.js";
 import { collectCodexNative } from "./native/codex.js";
+import { collectDevinNative, DEVIN_TOOL } from "./native/devin.js";
 import { plausibleUsageDate } from "./native/usage-date.js";
 import { collectVscodeAgent, VSCODE_AGENTS } from "./native/vscode-agents.js";
+import { collectTokscaleExtras } from "./tokscale.js";
 import { loadLivePricing } from "./pricing-live.js";
 import { estimateCostUSD, resolveModelPrice } from "./pricing.js";
 import {
@@ -652,6 +654,18 @@ export function isRetryableCcusageFailure(err: unknown): boolean {
   return e.signal != null || typeof e.code === "string";
 }
 
+/**
+ * Environment for every ccusage child. ccusage >= 20.1 sends a once-a-day usage
+ * ping unless told not to. `--offline` disables it, but the "nothing leaves
+ * your machine except daily totals to whoburnedmore" promise should not hinge on
+ * one flag staying wired across a future bump, so opt out explicitly as well.
+ */
+export function ccusageChildEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  return { ...env, DO_NOT_TRACK: "1" };
+}
+
 async function runCcusageOnce(
   cmd: string,
   args: string[],
@@ -668,7 +682,7 @@ async function runCcusageOnce(
       // everything for minutes. The claude/codex fallback passes a longer cap —
       // see CCUSAGE_FALLBACK_TIMEOUT_MS.
       timeout: timeoutMs,
-      ...(env ? { env } : {}),
+      env: ccusageChildEnv(env),
     });
     if (!stdout) return { json: null, transient: false };
     try {
@@ -703,10 +717,35 @@ export type ProgressFn = (done: number, total: number, label: string) => void;
 
 /**
  * Total number of collection stages: the ccusage sources, plus the fixed extra
- * ticking tasks — sessions, blocks, cursor, attribution (4), and the native
- * non-ccusage readers cline, roo, continue (VSCODE_AGENTS.length + 1).
+ * ticking tasks — sessions, blocks, cursor, attribution (4), the native
+ * non-ccusage readers cline, roo, continue, devin (VSCODE_AGENTS.length + 2),
+ * and the tokscale pass for agents nothing else reads (1).
  */
-export const COLLECT_STAGES = SOURCES.length + 4 + VSCODE_AGENTS.length + 1;
+export const COLLECT_STAGES = SOURCES.length + 4 + VSCODE_AGENTS.length + 2 + 1;
+
+/**
+ * Devin has two local stores: current per-session `log.jsonl` files (our native
+ * reader) and the legacy `sessions.db` (tokscale). The same session can exist
+ * in both after an upgrade, and the two can't be de-duplicated against each
+ * other here, so exactly ONE store is used: the native reader whenever it finds
+ * any session log — even if it timed out, because then sending nothing keeps
+ * the server's last good day rather than overwriting it with a legacy-only
+ * undercount — and tokscale's legacy rows only on machines with no session logs.
+ */
+export function selectDevinEntries(
+  native: Pick<NativeCollectResult, "found" | "timedOut" | "entries">,
+  tokscaleEntries: DailyUsageEntry[],
+): { native: DailyUsageEntry[]; tokscale: DailyUsageEntry[] } {
+  // A reader that threw reports found:false + timedOut:true; it may well have
+  // had logs, so treat it as found (send nothing) rather than as "no logs".
+  if (native.found || native.timedOut === true) {
+    return {
+      native: native.timedOut ? [] : native.entries,
+      tokscale: tokscaleEntries.filter((e) => e.tool !== DEVIN_TOOL),
+    };
+  }
+  return { native: [], tokscale: tokscaleEntries };
+}
 
 /**
  * A run is AUTHORITATIVE — safe to lower a stored requestCount fingerprint —
@@ -859,6 +898,22 @@ export async function collectAll(
       tick();
       return r;
     });
+  // Agents only tokscale can read (Devin, Zed, Kiro, Crush, Augment, Junie, …):
+  // one offline `tokscale graph` pass restricted to clients no other reader
+  // covers. Best effort — a no-op when tokscale isn't installed for this
+  // platform, and a failure or timeout contributes nothing.
+  const devinTask = collectDevinNative()
+    .catch(bailed)
+    .then((r) => {
+      tick();
+      return r;
+    });
+  const tokscaleTask = collectTokscaleExtras()
+    .catch(() => ({ entries: [] as DailyUsageEntry[], ran: false, timedOut: false }))
+    .then((r) => {
+      tick();
+      return r;
+    });
 
   const [
     sourceResults,
@@ -870,6 +925,8 @@ export async function collectAll(
     nativeCodex,
     vscodeResults,
     continueResult,
+    devinResult,
+    tokscaleExtras,
   ] = await Promise.all([
     sourceTasks,
     sessionTask,
@@ -880,6 +937,8 @@ export async function collectAll(
     nativeCodexTask,
     Promise.all(vscodeTasks),
     continueTask,
+    devinTask,
+    tokscaleTask,
   ]);
 
   const native = { claude: nativeClaude, codex: nativeCodex };
@@ -937,6 +996,16 @@ export async function collectAll(
     entries.push(...continueResult.entries);
     toolsFound.push("continue");
   }
+  const devin = selectDevinEntries(devinResult, tokscaleExtras.entries);
+  if (devin.native.length > 0) {
+    entries.push(...devin.native);
+    toolsFound.push(DEVIN_TOOL);
+  }
+  if (devin.tokscale.length > 0) {
+    entries.push(...devin.tokscale);
+    for (const tool of new Set(devin.tokscale.map((e) => e.tool)))
+      if (!toolsFound.includes(tool)) toolsFound.push(tool);
+  }
 
   const { tools, skills, agent, sessionMessages, complete } = attribution;
   onProgress?.(COLLECT_STAGES, COLLECT_STAGES, "");
@@ -968,6 +1037,7 @@ export async function collectAll(
     nativeCodex,
     ...vscodeResults.map(({ result }) => result),
     continueResult,
+    devinResult,
   );
   const storePath = provenanceStorePath();
   const reconciled = reconcileProvenance(

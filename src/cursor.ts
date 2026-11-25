@@ -266,14 +266,12 @@ export async function collectCursor(opts?: { offline?: boolean }): Promise<{
     // endpoint changed) — fall through to the tokscale fallback below.
   }
 
-  // Fallback: the community-maintained `tokscale` CLI, reading its synced Cursor
-  // cache. Resilient to Cursor API changes. It is NOT a bundled dependency (it
-  // pulled in a deprecated, vuln-flagged `glob` via a heavy TUI tree that printed
-  // an npm-deprecation warning on every `npx whoburnedmore`), so this is a no-op
-  // unless the user has installed it globally (`npm i -g tokscale`) and run
-  // `tokscale cursor login` + `sync`. The primary path above needs none of that.
+  // Fallback: the community-maintained `tokscale` CLI (an optional dependency),
+  // reading its locally synced Cursor cache — resilient to Cursor API changes.
+  // A no-op unless the user ran `tokscale cursor login` + `sync` themselves; it
+  // always runs `--offline`, so it never contacts Cursor or anyone else.
   try {
-    const entries = collectCursorViaTokscale();
+    const entries = await collectCursorViaTokscale();
     if (entries.length > 0) return { entries, blocks: [], found: true };
   } catch {
     /* tokscale missing or no data — give up quietly */
