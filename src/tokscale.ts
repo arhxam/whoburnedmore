@@ -13,7 +13,7 @@ const execFileAsync = promisify(execFile);
  * no JS dependencies, shipped per-platform through npm optionalDependencies).
  *
  * It reads the local session stores of ~60 coding agents. We use it ONLY for the
- * agents nothing else in this CLI can see — Devin, Zed, Kiro, Crush, Augment,
+ * agents nothing else in this CLI can see — Zed, Kiro, Crush, Augment,
  * Junie, Qoder and friends — via a single `tokscale graph` call, which returns
  * per-day × client × model token totals. Every agent already read by ccusage or
  * by one of our native readers is deliberately left out of the client list, so a
@@ -22,6 +22,10 @@ const execFileAsync = promisify(execFile);
  * It also backs the Cursor fallback: when the Cursor dashboard API path fails,
  * tokscale's local Cursor cache (populated only if the user ran `tokscale cursor
  * sync` themselves) is read through the same graph call.
+ *
+ * Devin is special: its current per-session logs are read natively
+ * (native/devin.ts); tokscale's devin clients only cover the legacy
+ * `sessions.db` store, and collect.ts uses them only when no session logs exist.
  *
  * Always run with `--offline`: local data + cached pricing, no network request.
  */
@@ -53,7 +57,6 @@ export const TOKSCALE_EXTRA_CLIENTS: Readonly<Record<string, string>> = {
   reasonix: "reasonix",
   "prime-agent": "prime",
   freebuff: "freebuff",
-  mcode: "mcode",
   fx: "fx",
   omp: "omp",
   senpi: "senpi",
@@ -109,6 +112,9 @@ export const TOKSCALE_EXCLUDED_CLIENTS: Readonly<Record<string, string>> = {
   lmstudio: "local model server, not an agent",
   unsloth: "local model studio, not an agent",
   cherrystudio: "general chat app",
+  // Reads only tokscale's own `tokscale headless` capture dir, not MiniMax
+  // Code's store — normal MiniMax Code use would never show up.
+  mcode: "tokscale headless capture only",
 };
 
 /** Bound on one tokscale run (it reads every selected client in one pass). */

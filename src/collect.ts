@@ -25,6 +25,7 @@ import {
   type NativeCollectResult,
 } from "./native/claude.js";
 import { collectCodexNative } from "./native/codex.js";
+import { collectDevinNative, DEVIN_TOOL } from "./native/devin.js";
 import { plausibleUsageDate } from "./native/usage-date.js";
 import { collectVscodeAgent, VSCODE_AGENTS } from "./native/vscode-agents.js";
 import { collectTokscaleExtras } from "./tokscale.js";
@@ -717,10 +718,34 @@ export type ProgressFn = (done: number, total: number, label: string) => void;
 /**
  * Total number of collection stages: the ccusage sources, plus the fixed extra
  * ticking tasks — sessions, blocks, cursor, attribution (4), the native
- * non-ccusage readers cline, roo, continue (VSCODE_AGENTS.length + 1), and the
- * tokscale pass for agents nothing else reads (1).
+ * non-ccusage readers cline, roo, continue, devin (VSCODE_AGENTS.length + 2),
+ * and the tokscale pass for agents nothing else reads (1).
  */
-export const COLLECT_STAGES = SOURCES.length + 4 + VSCODE_AGENTS.length + 1 + 1;
+export const COLLECT_STAGES = SOURCES.length + 4 + VSCODE_AGENTS.length + 2 + 1;
+
+/**
+ * Devin has two local stores: current per-session `log.jsonl` files (our native
+ * reader) and the legacy `sessions.db` (tokscale). The same session can exist
+ * in both after an upgrade, and the two can't be de-duplicated against each
+ * other here, so exactly ONE store is used: the native reader whenever it finds
+ * any session log — even if it timed out, because then sending nothing keeps
+ * the server's last good day rather than overwriting it with a legacy-only
+ * undercount — and tokscale's legacy rows only on machines with no session logs.
+ */
+export function selectDevinEntries(
+  native: Pick<NativeCollectResult, "found" | "timedOut" | "entries">,
+  tokscaleEntries: DailyUsageEntry[],
+): { native: DailyUsageEntry[]; tokscale: DailyUsageEntry[] } {
+  // A reader that threw reports found:false + timedOut:true; it may well have
+  // had logs, so treat it as found (send nothing) rather than as "no logs".
+  if (native.found || native.timedOut === true) {
+    return {
+      native: native.timedOut ? [] : native.entries,
+      tokscale: tokscaleEntries.filter((e) => e.tool !== DEVIN_TOOL),
+    };
+  }
+  return { native: [], tokscale: tokscaleEntries };
+}
 
 /**
  * A run is AUTHORITATIVE — safe to lower a stored requestCount fingerprint —
@@ -877,6 +902,12 @@ export async function collectAll(
   // one offline `tokscale graph` pass restricted to clients no other reader
   // covers. Best effort — a no-op when tokscale isn't installed for this
   // platform, and a failure or timeout contributes nothing.
+  const devinTask = collectDevinNative()
+    .catch(bailed)
+    .then((r) => {
+      tick();
+      return r;
+    });
   const tokscaleTask = collectTokscaleExtras()
     .catch(() => ({ entries: [] as DailyUsageEntry[], ran: false, timedOut: false }))
     .then((r) => {
@@ -894,6 +925,7 @@ export async function collectAll(
     nativeCodex,
     vscodeResults,
     continueResult,
+    devinResult,
     tokscaleExtras,
   ] = await Promise.all([
     sourceTasks,
@@ -905,6 +937,7 @@ export async function collectAll(
     nativeCodexTask,
     Promise.all(vscodeTasks),
     continueTask,
+    devinTask,
     tokscaleTask,
   ]);
 
@@ -963,10 +996,15 @@ export async function collectAll(
     entries.push(...continueResult.entries);
     toolsFound.push("continue");
   }
-  if (tokscaleExtras.entries.length > 0) {
-    entries.push(...tokscaleExtras.entries);
-    for (const tool of new Set(tokscaleExtras.entries.map((e) => e.tool)))
-      toolsFound.push(tool);
+  const devin = selectDevinEntries(devinResult, tokscaleExtras.entries);
+  if (devin.native.length > 0) {
+    entries.push(...devin.native);
+    toolsFound.push(DEVIN_TOOL);
+  }
+  if (devin.tokscale.length > 0) {
+    entries.push(...devin.tokscale);
+    for (const tool of new Set(devin.tokscale.map((e) => e.tool)))
+      if (!toolsFound.includes(tool)) toolsFound.push(tool);
   }
 
   const { tools, skills, agent, sessionMessages, complete } = attribution;
@@ -999,6 +1037,7 @@ export async function collectAll(
     nativeCodex,
     ...vscodeResults.map(({ result }) => result),
     continueResult,
+    devinResult,
   );
   const storePath = provenanceStorePath();
   const reconciled = reconcileProvenance(
