@@ -46,11 +46,12 @@ Usage is read only from logs and databases the agents keep **on this machine**.
 | Cursor | Your local Cursor sign-in, used to fetch your own usage events from Cursor's dashboard API (the session token goes only to Cursor, never to whoburnedmore) |
 | Cline, Roo Code | Native reader for VS Code / Cursor extension task logs |
 | Continue | Native reader for `~/.continue` |
-| Devin (CLI, and Desktop's local sessions) | Native reader for `~/.local/share/devin/cli/sessions/*/log.jsonl` (Windows: `%APPDATA%\devin\cli`); older installs' `sessions.db` via tokscale |
+| Devin (CLI, and Desktop's local sessions) | Native reader for `~/.local/share/devin/cli/sessions/*/log.jsonl` (Windows: `%APPDATA%\devin\cli`); `sessions.db` via tokscale |
+| Devin Cloud | Local Devin Desktop session caches (`User/acp-messages/*.db`, metered in ACUs → USD via `WHOBURNEDMORE_DEVIN_ACU_USD`, default `$2.00/ACU`, with 0 fabricated tokens); optional opt-in API support via `DEVIN_ANALYTICS_SERVICE_KEY` (exact tokens on `DOLLARS`-billed teams) or `DEVIN_API_KEY` (Enterprise v3 daily ACUs). Set `WHOBURNEDMORE_DEVIN_CLOUD=0` to disable |
 
 **Not supported:** usage that only exists in a provider's cloud — ChatGPT or Claude on the
-web or in apps, cloud agents (including Devin's hosted sessions), and Grok on the web or in X.
-There is no local record to read, and the CLI never estimates usage it can't read. Local
+web or in apps, cloud agents without a local cache or configured API key, and Grok on the web or in X.
+There is no local record to read, and the CLI never estimates token counts it can't read. Local
 model servers (LM Studio, Unsloth) and request proxies are deliberately not counted. Older Antigravity builds that kept only
 encrypted conversation logs can't be counted either.
 
