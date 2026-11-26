@@ -48,6 +48,17 @@ const MAX_CACHE_BYTES = 8 * 1024 * 1024;
 /** Cached days older than this are pruned so the cache file stays bounded. */
 const CACHE_RETENTION_DAYS = 400;
 const MAX_ENTRY_TOKENS = 1e15;
+/**
+ * Highest USD per token an uploaded row may carry. The API rejects a whole
+ * upload containing any row above $200 per million tokens; Amp's ledger can
+ * exceed that for image or audio models that bill per request but report few
+ * tokens. Cap at $150/M so rounding can never cross the server's line.
+ */
+const MAX_USD_PER_TOKEN = 150 / 1_000_000;
+
+function capCost(costUSD: number, totalTokens: number): number {
+  return Number(Math.min(costUSD, totalTokens * MAX_USD_PER_TOKEN).toFixed(6));
+}
 
 export interface AmpCachedDay {
   fetchedAt: number;
@@ -148,7 +159,7 @@ function sanitizeCachedEntries(rows: unknown[], date: string): DailyUsageEntry[]
       outputTokens,
       cacheCreationTokens,
       cacheReadTokens,
-      costUSD,
+      costUSD: capCost(costUSD, inputTokens + outputTokens + cacheCreationTokens + cacheReadTokens),
       origin: "cli",
       verified: false,
     });
@@ -315,7 +326,7 @@ export function parseAmpModelsTable(markdown: string, date: string): DailyUsageE
     // Linked provider connections (ChatGPT / Claude subscription) record $0.00
     // on Amp's ledger; estimate API-equivalent USD from the pricing table when
     // tokens are present, matching ccusage and tokscale repricing.
-    const costUSD =
+    const uncappedCost =
       recordedCost > 0
         ? recordedCost
         : totalTokens > 0
@@ -331,6 +342,7 @@ export function parseAmpModelsTable(markdown: string, date: string): DailyUsageE
     // server rejects any row with a cost but no tokens, and rejects the WHOLE
     // submission with it. Leave them out.
     if (totalTokens === 0) continue;
+    const costUSD = capCost(uncappedCost, totalTokens);
 
     const prev = byModel.get(model);
     if (prev) {
@@ -338,7 +350,10 @@ export function parseAmpModelsTable(markdown: string, date: string): DailyUsageE
       prev.outputTokens += outputTokens;
       prev.cacheCreationTokens += cacheCreationTokens;
       prev.cacheReadTokens += cacheReadTokens;
-      prev.costUSD = Number((prev.costUSD + costUSD).toFixed(6));
+      prev.costUSD = capCost(
+        prev.costUSD + costUSD,
+        prev.inputTokens + prev.outputTokens + prev.cacheCreationTokens + prev.cacheReadTokens,
+      );
     } else {
       byModel.set(model, {
         date,
@@ -348,7 +363,7 @@ export function parseAmpModelsTable(markdown: string, date: string): DailyUsageE
         outputTokens,
         cacheCreationTokens,
         cacheReadTokens,
-        costUSD: Number(costUSD.toFixed(6)),
+        costUSD,
         origin: "cli",
         verified: false,
       });
@@ -356,6 +371,21 @@ export function parseAmpModelsTable(markdown: string, date: string): DailyUsageE
   }
 
   return [...byModel.values()];
+}
+
+/**
+ * True when a day report has a `## Models` table we know how to read. A report
+ * without one (an error page, a notice, or a renamed layout in a future Amp)
+ * must not be cached as a finished day with no usage.
+ */
+export function ampModelsTableFound(markdown: string): boolean {
+  for (const line of extractMarkdownSection(markdown, "Models")) {
+    const cells = splitMarkdownRow(line);
+    if (!cells) continue;
+    const lower = cells.map((c) => c.toLowerCase());
+    if (lower.includes("model") && lower.includes("output")) return true;
+  }
+  return false;
 }
 
 /** True when a cached UTC day was fetched after that UTC day finished + grace window. */
@@ -546,6 +576,9 @@ export async function collectAmp(
         "--end",
         `${nextDate}T00:00:00.000Z`,
       ]);
+      // Unreadable report: stop here and retry on a later run instead of
+      // caching the day as final and empty.
+      if (!ampModelsTableFound(report)) break;
       const entries = parseAmpModelsTable(report, date);
       cache.days[date] = { fetchedAt: now, entries };
       dirty = true;

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   AMP_TOOL,
+  ampModelsTableFound,
   collectAmp,
   isAmpDayFinal,
   loadAmpCache,
@@ -127,6 +128,72 @@ describe("parseAmpActiveDates & parseAmpModelsTable", () => {
   });
 });
 
+describe("server limits on Amp rows", () => {
+  it("caps cost per token below the API's $200 per million ceiling", () => {
+    const report = `## Models
+| Model | Uncached input | Cache read | Cache write | Output | Tokens | Recorded cost |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| GPT-Image-2.5 Sunburst | 40 | 0 | 0 | 0 | 40 | $0.04 |
+`;
+    const [row] = parseAmpModelsTable(report, "2026-11-23");
+    expect(row).toBeDefined();
+    const tokens = row!.inputTokens + row!.outputTokens + row!.cacheCreationTokens + row!.cacheReadTokens;
+    expect(row!.costUSD).toBeGreaterThan(0);
+    expect(row!.costUSD).toBeLessThanOrEqual((tokens * 200) / 1_000_000);
+  });
+
+  it("caps cached rows written by an older build too", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wbm-amp-capcache-"));
+    const cachePath = join(dir, "amp-usage-cache.json");
+    try {
+      const row = {
+        date: "2026-11-20",
+        tool: "amp",
+        model: "gpt-image-2.5-sunburst",
+        inputTokens: 40,
+        outputTokens: 0,
+        cacheCreationTokens: 0,
+        cacheReadTokens: 0,
+        costUSD: 0.04,
+        origin: "cli",
+        verified: false,
+      };
+      writeFileSync(
+        cachePath,
+        JSON.stringify({ v: 1, lastIndexAt: NOW, activeDates: [], days: { "2026-11-20": { fetchedAt: NOW, entries: [row] } } }),
+      );
+      const res = await collectAmp({ offline: true, cachePath, now: NOW });
+      expect(res.entries[0]!.costUSD).toBeLessThanOrEqual((40 * 200) / 1_000_000);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not cache a day whose report it can't read", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wbm-amp-unreadable-"));
+    const cachePath = join(dir, "amp-usage-cache.json");
+    try {
+      expect(ampModelsTableFound(SAMPLE_DAY_REPORT)).toBe(true);
+      expect(ampModelsTableFound("Error: something went wrong")).toBe(false);
+      let readable = false;
+      const runner = vi.fn(async (args: string[]) => {
+        const start = args[args.indexOf("--start") + 1] ?? "";
+        if (start.startsWith("2026-08-")) return SAMPLE_OVERVIEW;
+        return readable ? SAMPLE_DAY_REPORT : "Error: something went wrong";
+      });
+      const first = await collectAmp({ cachePath, now: NOW, runner });
+      expect(first.entries).toEqual([]);
+      expect(Object.keys(loadAmpCache(cachePath).days)).toEqual([]);
+      // Once Amp answers properly, the same days are fetched and counted.
+      readable = true;
+      const later = await collectAmp({ cachePath, now: NOW + 20 * 60_000, runner });
+      expect(new Set(later.entries.map((e) => e.date))).toEqual(new Set(["2026-11-21", "2026-11-23"]));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("isAmpDayFinal", () => {
   it("marks past UTC days fetched after midnight + grace as final", () => {
     const dayEnd = Date.parse("2026-11-24T00:00:00.000Z");
@@ -236,7 +303,7 @@ describe("collectAmp caching, rate-limit budget, and offline behavior", () => {
         outputTokens: 5,
         cacheCreationTokens: 0,
         cacheReadTokens: 0,
-        costUSD: 0.01,
+        costUSD: 0.0001,
         origin: "cli",
         verified: false,
       };
