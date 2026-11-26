@@ -19,7 +19,6 @@ import { AMP_TOOL, collectAmp } from "./amp.js";
 import { collectAttribution } from "./attribution.js";
 import { collectContinue } from "./continue.js";
 import { collectCursor } from "./cursor.js";
-import { collectDevinCloud, DEVIN_CLOUD_TOOL } from "./devin-cloud.js";
 import {
   collectClaudeNative,
   resolveClaudeConfigRoots,
@@ -732,9 +731,9 @@ export type ProgressFn = (done: number, total: number, label: string) => void;
  * Total number of collection stages: the ccusage sources, plus the fixed extra
  * ticking tasks — sessions, blocks, cursor, attribution (4), the native
  * non-ccusage readers cline, roo, continue, devin (VSCODE_AGENTS.length + 2),
- * the tokscale pass (1), Devin Cloud (1), and modern Amp CLI/Orbs (1).
+ * the tokscale pass (1), and modern Amp CLI/Orbs (1).
  */
-export const COLLECT_STAGES = SOURCES.length + 4 + VSCODE_AGENTS.length + 2 + 1 + 1 + 1;
+export const COLLECT_STAGES = SOURCES.length + 4 + VSCODE_AGENTS.length + 2 + 1 + 1;
 
 /**
  * Modern Amp stores both local threads and cloud Orbs server-side (`amp usage`),
@@ -941,15 +940,6 @@ export async function collectAll(
       tick();
       return r;
     });
-  // Devin Cloud sessions (hosted VMs) — reads local Devin Desktop ACP caches
-  // offline, and optionally queries Devin's consumption/analytics APIs when
-  // explicitly configured via env vars.
-  const devinCloudTask = collectDevinCloud({ offline: opts?.offline })
-    .catch(() => ({ entries: [] as DailyUsageEntry[], found: false }))
-    .then((r) => {
-      tick();
-      return r;
-    });
   // Modern Amp (local threads + cloud Orbs) via cached `amp usage --details`.
   const ampTask = collectAmp({ offline: opts?.offline })
     .catch(() => ({ entries: [] as DailyUsageEntry[], found: false }))
@@ -970,7 +960,6 @@ export async function collectAll(
     continueResult,
     devinResult,
     tokscaleExtras,
-    devinCloud,
     ampResult,
   ] = await Promise.all([
     sourceTasks,
@@ -984,7 +973,6 @@ export async function collectAll(
     continueTask,
     devinTask,
     tokscaleTask,
-    devinCloudTask,
     ampTask,
   ]);
 
@@ -1055,10 +1043,6 @@ export async function collectAll(
     entries.push(...devin.tokscale);
     for (const tool of new Set(devin.tokscale.map((e) => e.tool)))
       if (!toolsFound.includes(tool)) toolsFound.push(tool);
-  }
-  if (devinCloud.found && devinCloud.entries.length > 0) {
-    entries.push(...devinCloud.entries);
-    if (!toolsFound.includes(DEVIN_CLOUD_TOOL)) toolsFound.push(DEVIN_CLOUD_TOOL);
   }
 
   const { tools, skills, agent, sessionMessages, complete } = attribution;

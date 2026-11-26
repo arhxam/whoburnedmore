@@ -14,9 +14,11 @@
  *    re-fetched.
  *  - The overview (`amp usage --details --start <90d> --end <tomorrow>`) and
  *    in-progress days revalidate at most once every 15 minutes.
- *  - Each run caps network calls (`DEFAULT_AMP_MAX_REQUESTS_PER_RUN = 25`),
+ *  - Each run caps network calls (`DEFAULT_AMP_MAX_REQUESTS_PER_RUN = 8`),
  *    fetching the newest uncached active days first and persisting progress
- *    even if rate-limited mid-run.
+ *    even if rate-limited mid-run. Four background syncs an hour therefore
+ *    spend at most 32 of the 60 lookups, leaving the rest for the user's own
+ *    `amp usage`; a 90-day backfill completes within a few hours.
  *  - In `--offline` / `--local` mode, `amp` is NEVER spawned — only previously
  *    cached days on disk are returned.
  *
@@ -36,13 +38,16 @@ const execFileAsync = promisify(execFile);
 
 export const AMP_TOOL = "amp";
 export const AMP_CACHE_VERSION = 1;
-export const DEFAULT_AMP_MAX_REQUESTS_PER_RUN = 25;
+export const DEFAULT_AMP_MAX_REQUESTS_PER_RUN = 8;
 export const DEFAULT_AMP_REVALIDATE_MS = 15 * 60_000;
 const FINALIZE_GRACE_MS = 5 * 60_000;
 const OVERVIEW_WINDOW_DAYS = 89;
 const AMP_TIMEOUT_MS = 20_000;
 const AMP_MAX_BUFFER_BYTES = 8 * 1024 * 1024;
 const MAX_CACHE_BYTES = 8 * 1024 * 1024;
+/** Cached days older than this are pruned so the cache file stays bounded. */
+const CACHE_RETENTION_DAYS = 400;
+const MAX_ENTRY_TOKENS = 1e15;
 
 export interface AmpCachedDay {
   fetchedAt: number;
@@ -84,7 +89,7 @@ export function loadAmpCache(cachePath: string): AmpUsageCache {
         Number.isFinite(val.fetchedAt) &&
         Array.isArray(val.entries)
       ) {
-        days[date] = { fetchedAt: val.fetchedAt, entries: val.entries };
+        days[date] = { fetchedAt: val.fetchedAt, entries: sanitizeCachedEntries(val.entries, date) };
       }
     }
     return {
@@ -102,7 +107,65 @@ export function loadAmpCache(cachePath: string): AmpUsageCache {
   }
 }
 
-export function saveAmpCache(cachePath: string, cache: AmpUsageCache): boolean {
+function tokenField(v: unknown): number | null {
+  return typeof v === "number" && Number.isSafeInteger(v) && v >= 0 && v <= MAX_ENTRY_TOKENS ? v : null;
+}
+
+/**
+ * Re-validate cached rows before they are submitted. The cache is our own file,
+ * but a truncated write, a hand edit, or an older build's shape must never put a
+ * malformed row into the payload (one bad row would fail the whole upload).
+ */
+function sanitizeCachedEntries(rows: unknown[], date: string): DailyUsageEntry[] {
+  const out: DailyUsageEntry[] = [];
+  for (const raw of rows) {
+    if (!raw || typeof raw !== "object") continue;
+    const r = raw as Record<string, unknown>;
+    const inputTokens = tokenField(r.inputTokens);
+    const outputTokens = tokenField(r.outputTokens);
+    const cacheCreationTokens = tokenField(r.cacheCreationTokens);
+    const cacheReadTokens = tokenField(r.cacheReadTokens);
+    const costUSD = typeof r.costUSD === "number" && Number.isFinite(r.costUSD) && r.costUSD >= 0 ? r.costUSD : null;
+    if (
+      r.date !== date ||
+      r.tool !== AMP_TOOL ||
+      typeof r.model !== "string" ||
+      !r.model ||
+      inputTokens === null ||
+      outputTokens === null ||
+      cacheCreationTokens === null ||
+      cacheReadTokens === null ||
+      costUSD === null ||
+      inputTokens + outputTokens + cacheCreationTokens + cacheReadTokens === 0
+    ) {
+      continue;
+    }
+    out.push({
+      date,
+      tool: AMP_TOOL,
+      model: r.model,
+      inputTokens,
+      outputTokens,
+      cacheCreationTokens,
+      cacheReadTokens,
+      costUSD,
+      origin: "cli",
+      verified: false,
+    });
+  }
+  return out;
+}
+
+export function saveAmpCache(
+  cachePath: string,
+  cache: AmpUsageCache,
+  now: number = Date.now(),
+): boolean {
+  const cutoff = utcDateString(now - CACHE_RETENTION_DAYS * 86_400_000);
+  for (const date of Object.keys(cache.days)) {
+    if (date < cutoff) delete cache.days[date];
+  }
+  if (cache.activeDates) cache.activeDates = cache.activeDates.filter((d) => d >= cutoff);
   return writePrivateFileAtomic(cachePath, JSON.stringify(cache), MAX_CACHE_BYTES);
 }
 
@@ -128,6 +191,12 @@ export function normalizeAmpModelName(raw: string): string {
   // "Sonnet 4.6", "Haiku 4.5"). Restore it so dashboards and pricing align.
   if (/^(opus|sonnet|haiku)(?:[-._0-9]|$)/.test(slug)) {
     slug = `claude-${slug}`;
+  }
+  // Anthropic model ids use dashes between version digits ("claude-opus-4-6"),
+  // which is how every other collector reports them. Match that so the same
+  // model isn't split across two names on dashboards.
+  if (slug.startsWith("claude-")) {
+    slug = slug.replace(/(\d)\.(?=\d)/g, "$1-");
   }
   return slug;
 }
@@ -258,7 +327,10 @@ export function parseAmpModelsTable(markdown: string, date: string): DailyUsageE
             })
           : 0;
 
-    if (totalTokens === 0 && costUSD === 0) continue;
+    // Token-less charges (transcription, tool fees) can't be uploaded: the
+    // server rejects any row with a cost but no tokens, and rejects the WHOLE
+    // submission with it. Leave them out.
+    if (totalTokens === 0) continue;
 
     const prev = byModel.get(model);
     if (prev) {
@@ -356,7 +428,9 @@ function defaultAmpRunner(bin: string, env: NodeJS.ProcessEnv): AmpRunner {
       windowsHide: true,
       timeout: AMP_TIMEOUT_MS,
       maxBuffer: AMP_MAX_BUFFER_BYTES,
-      env: { ...env, NO_COLOR: "1", NO_ANIMATION: "1" },
+      // AMP_SKIP_UPDATE_CHECK: a background usage lookup must never make Amp
+      // check for or install an update of itself.
+      env: { ...env, NO_COLOR: "1", NO_ANIMATION: "1", AMP_SKIP_UPDATE_CHECK: "1" },
     });
     return stdout;
   };
@@ -482,7 +556,7 @@ export async function collectAmp(
   }
 
   if (dirty) {
-    saveAmpCache(cachePath, cache);
+    saveAmpCache(cachePath, cache, now);
   }
 
   const entries = flattenCacheEntries(cache, now);

@@ -53,24 +53,12 @@ export function applyScope<T extends Record<string, unknown>>(
   return payload;
 }
 
-/** Parse `--acu-usd=<rate>` or `--acu-usd <rate>` for `setup-devin`. */
-export function parseAcuUsd(args: string[]): number | undefined {
-  const raw = parseValueFlag(args, "--acu-usd");
-  if (!raw) return undefined;
-  const v = Number(raw.replace(/^\$/, ""));
-  return Number.isFinite(v) && v > 0 && v <= 1000 ? v : undefined;
-}
-
 /** Flags that take a value (`--board CODE` / `--board=CODE`). */
-const VALUE_FLAGS = new Set(["--board", "--org", "--token", "--pass", "--code", "--acu-usd"]);
-
-/** Flags valid ONLY on `setup-devin`. */
-const SETUP_DEVIN_ONLY_FLAGS = new Set(["--status", "--reset", "--use-devin-cli", "--acu-usd"]);
+const VALUE_FLAGS = new Set(["--board", "--org", "--token", "--pass", "--code"]);
 
 /** Every flag the CLI understands. Anything else is a typo, not a no-op. */
 const KNOWN_FLAGS = new Set([
   ...VALUE_FLAGS,
-  ...SETUP_DEVIN_ONLY_FLAGS,
   "--dry-run",
   "--no-submit",
   "--local",
@@ -107,18 +95,10 @@ export function argumentProblem(args: string[], command: string): string | null 
     }
     if (VALUE_FLAGS.has(name)) {
       if (parseValueFlag([a, args[i + 1] ?? ""], name) === undefined) {
-        const example =
-          { "--board": "CODE", "--org": "SLUG", "--token": "TOKEN", "--acu-usd": "2.00" }[name] ??
-          "PASSWORD";
+        const example = { "--board": "CODE", "--org": "SLUG", "--token": "TOKEN" }[name] ?? "PASSWORD";
         return `${name} needs a value, for example ${name}=${example}.`;
       }
-      if (name === "--acu-usd" && parseAcuUsd([a, args[i + 1] ?? ""]) === undefined) {
-        return `--acu-usd must be a positive number up to 1000 (for example --acu-usd=2.25).`;
-      }
       if (!a.includes("=")) i++;
-    }
-    if (SETUP_DEVIN_ONLY_FLAGS.has(name) && command !== "setup-devin") {
-      return `${name} only works with \`setup-devin\`, not \`${command}\`.`;
     }
   }
   const noUpload = NO_UPLOAD_FLAGS.filter((f) => args.includes(f));

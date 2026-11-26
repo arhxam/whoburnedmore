@@ -41,18 +41,17 @@ Usage is read only from logs and databases the agents keep **on this machine**.
 | Claude Code | Native reader for `~/.claude/projects` and `~/.config/claude/projects` (or comma-separated `CLAUDE_CONFIG_DIR`) |
 | Codex CLI | ccusage's replay-aware reader for `sessions` and `archived_sessions` under `CODEX_HOME` (default `~/.codex`) |
 | Gemini CLI, GitHub Copilot CLI, OpenCode, Droid, Goose, Kimi, Qwen, Kilo, OpenClaw, Hermes, pi, Codebuff | [ccusage](https://github.com/ccusage/ccusage) |
-| Amp (local threads + cloud Orbs) | Cached `amp usage --details` via your local Amp CLI sign-in (caches finalized past days locally to stay within Amp's 60 req/hr limit; offline `--local` runs read the cache only; falls back to `ccusage` for legacy `~/.local/share/amp/threads/`). Set `WHOBURNEDMORE_AMP=0` to disable |
+| Amp (local threads and cloud Orbs) | Your local Amp sign-in, used to run `amp usage --details` for your own per-day, per-model usage (finished days are cached locally, so a sync makes at most 8 of Amp's 60 hourly usage lookups; `--local` runs read only the cache). Older installs' `~/.local/share/amp/threads` via ccusage. Set `WHOBURNEDMORE_AMP=0` to turn it off |
 | Google Antigravity (desktop, CLI, IDE), Grok Build CLI, ZCode | ccusage |
 | Zed Agent, Kiro, Crush, Augment Code, Junie, Qoder, Mux, Mistral Vibe, CodeBuddy, WorkBuddy, Command Code, MiMo Code, Jcode, OpenCodeReview, Gajae-Code, Kimchi, Reasonix, Prime Agent, Freebuff, Fx, oh-my-pi, Senpi, Muse, Aside, Proma, bb | [tokscale](https://github.com/junhoyeo/tokscale), run `--offline` and restricted to agents nothing else here reads, so no day is counted twice |
 | Cursor | Your local Cursor sign-in, used to fetch your own usage events from Cursor's dashboard API (the session token goes only to Cursor, never to whoburnedmore) |
 | Cline, Roo Code | Native reader for VS Code / Cursor extension task logs |
 | Continue | Native reader for `~/.continue` |
-| Devin (CLI, and Desktop's local sessions) | Native reader for `~/.local/share/devin/cli/sessions/*/log.jsonl` (Windows: `%APPDATA%\devin\cli`); `sessions.db` via tokscale |
-| Devin Cloud | Local Devin Desktop session caches (`User/acp-messages/*.db`, metered in ACUs → USD via `WHOBURNEDMORE_DEVIN_ACU_USD`, default `$2.00/ACU`, with 0 fabricated tokens); run `npx whoburnedmore setup-devin` once to link your Devin CLI login (`credentials.toml`), a Devin PAT/Service User key (`cog_…`), or a Devin Analytics v2alpha Service Key (exact per-model tokens on `DOLLARS`-billed teams) in `~/.config/whoburnedmore/devin-cloud.json` (mode `0600`) so background sync picks it up automatically. Set `WHOBURNEDMORE_DEVIN_CLOUD=0` to disable |
+| Devin (CLI, and Desktop's local sessions) | Native reader for `~/.local/share/devin/cli/sessions/*/log.jsonl` (Windows: `%APPDATA%\devin\cli`); older installs' `sessions.db` via tokscale |
 
 **Not supported:** usage that only exists in a provider's cloud — ChatGPT or Claude on the
-web or in apps, cloud agents without a local cache or configured API key, and Grok on the web or in X.
-There is no local record to read, and the CLI never estimates token counts it can't read. Local
+web or in apps, cloud agents (including Devin's hosted sessions), and Grok on the web or in X.
+There is no local record to read, and the CLI never estimates usage it can't read. Local
 model servers (LM Studio, Unsloth) and request proxies are deliberately not counted. Older Antigravity builds that kept only
 encrypted conversation logs can't be counted either.
 
@@ -78,7 +77,6 @@ npx whoburnedmore public         put it back
 npx whoburnedmore remove         delete your dashboard and its data
 npx whoburnedmore verify         delisted? re-verify your usage to get back on
 npx whoburnedmore status         check background-sync health (last sync, staleness)
-npx whoburnedmore setup-devin    configure Devin Cloud usage tracking (--status / --reset / --use-devin-cli / --acu-usd=RATE)
 npx whoburnedmore install-sync     turn on 15-minute background sync
 npx whoburnedmore uninstall-sync   turn off the background sync
 ```

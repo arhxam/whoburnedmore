@@ -56,9 +56,11 @@ Sorted by recorded cost. Uncached input, cache read, cache write, and output tok
 
 describe("normalizeAmpModelName", () => {
   it("normalizes Amp display names to clean wire-safe identifiers", () => {
-    expect(normalizeAmpModelName("Opus 5.5")).toBe("claude-opus-5.5");
-    expect(normalizeAmpModelName("Sonnet 4.6")).toBe("claude-sonnet-4.6");
-    expect(normalizeAmpModelName("Haiku 4.5")).toBe("claude-haiku-4.5");
+    // Claude versions use dashes, like every other collector reports them.
+    expect(normalizeAmpModelName("Opus 5.5")).toBe("claude-opus-5-5");
+    expect(normalizeAmpModelName("Sonnet 4.6")).toBe("claude-sonnet-4-6");
+    expect(normalizeAmpModelName("Haiku 4.5")).toBe("claude-haiku-4-5");
+    expect(normalizeAmpModelName("Claude Opus 4.6")).toBe("claude-opus-4-6");
     expect(normalizeAmpModelName("GPT-6.1 Sol")).toBe("gpt-6.1-sol");
     expect(normalizeAmpModelName("Gemini 3.7 Flash")).toBe("gemini-3.7-flash");
     expect(normalizeAmpModelName("GPT-Image-2.5 Sunburst")).toBe("gpt-image-2.5-sunburst");
@@ -73,13 +75,14 @@ describe("parseAmpActiveDates & parseAmpModelsTable", () => {
 
   it("parses exact per-model token buckets, keeps recorded cost, and passes schema + wire sanitizer", () => {
     const entries = parseAmpModelsTable(SAMPLE_DAY_REPORT, "2026-11-23");
-    expect(entries).toHaveLength(4);
+    // GPT-Transcribe (cost, no tokens) and Empty Model are dropped.
+    expect(entries).toHaveLength(3);
 
-    const opus = entries.find((e) => e.model === "claude-opus-5.5")!;
+    const opus = entries.find((e) => e.model === "claude-opus-5-5")!;
     expect(opus).toEqual({
       date: "2026-11-23",
       tool: AMP_TOOL,
-      model: "claude-opus-5.5",
+      model: "claude-opus-5-5",
       inputTokens: 2068,
       outputTokens: 1687051,
       cacheCreationTokens: 8173406,
@@ -99,8 +102,11 @@ describe("parseAmpActiveDates & parseAmpModelsTable", () => {
     const gemini = entries.find((e) => e.model === "gemini-3.7-flash")!;
     expect(gemini.costUSD).toBeCloseTo(0.006, 6);
 
-    const transcribe = entries.find((e) => e.model === "gpt-transcribe")!;
-    expect(transcribe.costUSD).toBeCloseTo(0.04, 6);
+    // The server rejects a whole upload that carries a cost-but-no-tokens row.
+    expect(entries.find((e) => e.model === "gpt-transcribe")).toBeUndefined();
+    for (const e of entries) {
+      expect(e.inputTokens + e.outputTokens + e.cacheCreationTokens + e.cacheReadTokens).toBeGreaterThan(0);
+    }
 
     // Every normalized model survives sanitizeDailyEntries without hashing.
     const sanitized = sanitizeDailyEntries(entries);
@@ -147,7 +153,7 @@ describe("collectAmp caching, rate-limit budget, and offline behavior", () => {
       // Cold run: 1 overview + 2 active days = 3 calls
       const first = await collectAmp({ cachePath, now: NOW, runner });
       expect(first.found).toBe(true);
-      expect(first.entries.length).toBe(8); // 4 models × 2 days
+      expect(first.entries.length).toBe(6); // 3 token-bearing models × 2 days
       expect(runner).toHaveBeenCalledTimes(3);
 
       // Warm run within revalidate window: 0 calls
@@ -190,6 +196,96 @@ describe("collectAmp caching, rate-limit budget, and offline behavior", () => {
       expect(new Set(r2.entries.map((e) => e.date))).toEqual(new Set(["2026-11-23", "2026-11-21"]));
       expect(runner).toHaveBeenCalledTimes(3);
       expect(Object.keys(loadAmpCache(cachePath).days).sort()).toEqual(["2026-11-21", "2026-11-23"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("never spends more than the default budget of 8 Amp lookups in one run", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wbm-amp-default-budget-"));
+    const cachePath = join(dir, "amp-usage-cache.json");
+    try {
+      // 30 active days in the overview: a cold run must stop at 1 overview + 7 days.
+      const rows = Array.from({ length: 30 }, (_, i) => {
+        const d = new Date(NOW - (i + 1) * 86_400_000).toISOString().slice(0, 10);
+        return `| ${d} | 0h | $0.01 | $0.00 | $0.01 |`;
+      }).join("\n");
+      const overview = `## Daily Recorded Cost\n\n| Date (UTC) | Included orb hours | Covered | Paid | Total |\n| --- | ---: | ---: | ---: | ---: |\n${rows}\n`;
+      const runner = vi.fn(async (args: string[]) => {
+        const start = args[args.indexOf("--start") + 1] ?? "";
+        const end = args[args.indexOf("--end") + 1] ?? "";
+        const spanDays = (Date.parse(end) - Date.parse(start)) / 86_400_000;
+        return spanDays > 1 ? overview : SAMPLE_DAY_REPORT;
+      });
+      await collectAmp({ cachePath, now: NOW, runner });
+      expect(runner).toHaveBeenCalledTimes(8);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("drops malformed or token-less cached rows instead of uploading them", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wbm-amp-corrupt-"));
+    const cachePath = join(dir, "amp-usage-cache.json");
+    try {
+      const good = {
+        date: "2026-11-20",
+        tool: "amp",
+        model: "claude-opus-4-6",
+        inputTokens: 10,
+        outputTokens: 5,
+        cacheCreationTokens: 0,
+        cacheReadTokens: 0,
+        costUSD: 0.01,
+        origin: "cli",
+        verified: false,
+      };
+      writeFileSync(
+        cachePath,
+        JSON.stringify({
+          v: 1,
+          lastIndexAt: NOW,
+          activeDates: ["2026-11-20"],
+          days: {
+            "2026-11-20": {
+              fetchedAt: NOW,
+              entries: [
+                good,
+                { ...good, model: "cost-only", inputTokens: 0, outputTokens: 0, costUSD: 1 },
+                { ...good, model: "negative", inputTokens: -5 },
+                { ...good, model: "wrong-day", date: "2026-11-19" },
+                { ...good, model: "wrong-tool", tool: "claude" },
+                { ...good, model: "nan-cost", costUSD: Number.NaN },
+                "garbage",
+              ],
+            },
+          },
+        }),
+      );
+      const res = await collectAmp({ offline: true, cachePath, now: NOW });
+      expect(res.entries).toEqual([good]);
+      expect(() => SubmitPayload.parse({ cliVersion: "0.9.29", entries: res.entries })).not.toThrow();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("prunes cached days older than the retention window when it saves", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wbm-amp-prune-"));
+    const cachePath = join(dir, "amp-usage-cache.json");
+    try {
+      writeFileSync(
+        cachePath,
+        JSON.stringify({ v: 1, activeDates: ["2025-01-01"], days: { "2025-01-01": { fetchedAt: NOW, entries: [] } } }),
+      );
+      const runner = vi.fn(async (args: string[]) => {
+        const start = args[args.indexOf("--start") + 1] ?? "";
+        return start.startsWith("2026-08-") ? SAMPLE_OVERVIEW : SAMPLE_DAY_REPORT;
+      });
+      await collectAmp({ cachePath, now: NOW, runner });
+      const cache = loadAmpCache(cachePath);
+      expect(Object.keys(cache.days)).not.toContain("2025-01-01");
+      expect(cache.activeDates).not.toContain("2025-01-01");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -244,6 +340,10 @@ describe("selectAmpEntries & Pi ccusage model normalization", () => {
     expect(normalizeCcusageModelName("[pi] gpt-6-astra")).toBe("gpt-6-astra");
     expect(normalizeCcusageModelName("[pi] gemini-4-neon")).toBe("gemini-4-neon");
     expect(normalizeCcusageModelName("claude-opus-4-6")).toBe("claude-opus-4-6");
+    // OpenClaw carries the same ccusage store prefix.
+    expect(normalizeCcusageModelName("[openclaw] claude-sonnet-4-6")).toBe("claude-sonnet-4-6");
+    expect(normalizeCcusageModelName("[pi] ")).toBe("[pi]");
+    expect(normalizeCcusageModelName(undefined)).toBe("unknown");
 
     const mapped = mapCcusageDaily(
       "pi",
