@@ -48,7 +48,7 @@ Usage is read only from logs and databases the agents keep **on this machine**.
 | Cline, Roo Code | Native reader for VS Code / Cursor extension task logs |
 | Continue | Native reader for `~/.continue` |
 | Devin (CLI, and Desktop's local sessions) | Native reader for `~/.local/share/devin/cli/sessions/*/log.jsonl` (Windows: `%APPDATA%\devin\cli`); `sessions.db` via tokscale |
-| Devin Cloud | Local Devin Desktop session caches (`User/acp-messages/*.db`, metered in ACUs → USD via `WHOBURNEDMORE_DEVIN_ACU_USD`, default `$2.00/ACU`, with 0 fabricated tokens); optional opt-in API support via `DEVIN_ANALYTICS_SERVICE_KEY` (exact tokens on `DOLLARS`-billed teams) or `DEVIN_API_KEY` (Enterprise v3 daily ACUs). Set `WHOBURNEDMORE_DEVIN_CLOUD=0` to disable |
+| Devin Cloud | Local Devin Desktop session caches (`User/acp-messages/*.db`, metered in ACUs → USD via `WHOBURNEDMORE_DEVIN_ACU_USD`, default `$2.00/ACU`, with 0 fabricated tokens); run `npx whoburnedmore setup-devin` once to link your Devin CLI login (`credentials.toml`), a Devin PAT/Service User key (`cog_…`), or a Devin Analytics v2alpha Service Key (exact per-model tokens on `DOLLARS`-billed teams) in `~/.config/whoburnedmore/devin-cloud.json` (mode `0600`) so background sync picks it up automatically. Set `WHOBURNEDMORE_DEVIN_CLOUD=0` to disable |
 
 **Not supported:** usage that only exists in a provider's cloud — ChatGPT or Claude on the
 web or in apps, cloud agents without a local cache or configured API key, and Grok on the web or in X.
@@ -78,6 +78,7 @@ npx whoburnedmore public         put it back
 npx whoburnedmore remove         delete your dashboard and its data
 npx whoburnedmore verify         delisted? re-verify your usage to get back on
 npx whoburnedmore status         check background-sync health (last sync, staleness)
+npx whoburnedmore setup-devin    configure Devin Cloud usage tracking (--status / --reset / --use-devin-cli / --acu-usd=RATE)
 npx whoburnedmore install-sync     turn on 15-minute background sync
 npx whoburnedmore uninstall-sync   turn off the background sync
 ```

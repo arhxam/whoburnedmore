@@ -12,6 +12,7 @@ import {
   argumentProblem,
   confirmAnswer,
   hasUnsafeInstallTokenArg,
+  parseAcuUsd,
   parseBoard,
   parseOrg,
   parsePass,
@@ -47,6 +48,7 @@ import {
 import { printBanner } from "./banner.js";
 import { LEGACY_COMMAND, PUBLIC_PRODUCT_NAME } from "./brand.js";
 import { daemonLoop } from "./daemon.js";
+import { runDevinSetup } from "./devin-setup.js";
 import { collectAll, type ProgressFn } from "./collect.js";
 import { antigravityNoticeLines, detectAntigravity } from "./antigravity.js";
 import { collectClaudeRequests } from "./native/claude.js";
@@ -1146,6 +1148,14 @@ async function main(): Promise<void> {
       // Remember the choice so the next foreground run doesn't reinstall it.
       setAutoSyncOptOut(true);
       break;
+    case "setup-devin":
+      await runDevinSetup({
+        status: args.includes("--status"),
+        reset: args.includes("--reset"),
+        useDevinCli: args.includes("--use-devin-cli"),
+        acuUsd: parseAcuUsd(args),
+      });
+      break;
     case "help":
       printHelp();
       break;
@@ -1177,6 +1187,7 @@ function printHelp(): void {
     npx ${LEGACY_COMMAND} remove       delete your usage data and stop background sync
     npx ${LEGACY_COMMAND} verify       submit detailed usage evidence for review (never prompts or code)
     npx ${LEGACY_COMMAND} status       check background-sync health (last sync, staleness)
+    npx ${LEGACY_COMMAND} setup-devin  configure Devin Cloud usage tracking (--status / --reset / --use-devin-cli)
     npx ${LEGACY_COMMAND} uninstall-sync   turn off the background sync
     npx ${LEGACY_COMMAND} install-sync     turn it back on after uninstalling
 

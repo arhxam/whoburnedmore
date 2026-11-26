@@ -26,7 +26,7 @@
  * ACUs. Set `WHOBURNEDMORE_DEVIN_CLOUD=0` to disable this collector entirely.
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
@@ -34,6 +34,7 @@ import { readJsonResponseCapped } from "./http-bounds.js";
 import { isDevinRoutingMode } from "./native/devin.js";
 import { localUsageDate, plausibleUsageDate } from "./native/usage-date.js";
 import { estimateCostUSD } from "./pricing.js";
+import { readTextFileSyncCapped, writePrivateFileAtomic } from "./safe-local-file.js";
 import type { DailyUsageEntry } from "./shared.js";
 
 export const DEVIN_CLOUD_TOOL = "devin-cloud";
@@ -45,8 +46,146 @@ const DEFAULT_ANALYTICS_API_URL = "https://server.codeium.com";
 const DEFAULT_DEVIN_API_URL = "https://api.devin.ai";
 const MAX_API_PAGE_BYTES = 4 * 1024 * 1024;
 const MAX_ANALYTICS_PAGES = 20;
+const MAX_SESSIONS_PAGES = 20;
 const ANALYTICS_WINDOW_DAYS = 89;
 const API_TIMEOUT_MS = 20_000;
+const MAX_CONFIG_BYTES = 64 * 1024;
+
+/**
+ * Saved Devin Cloud setup (`<configDir>/devin-cloud.json`, mode 0600).
+ * Persisted so 15-minute background syncs work without shell env vars.
+ * Environment variables always take precedence over saved values.
+ */
+export interface DevinCloudConfig {
+  /** Use local `~/.local/share/devin/credentials.toml` for `/v3/organizations/{org_id}/sessions`. */
+  useLocalCliCredentials?: boolean;
+  /** Devin Personal Access Token or Service User key (`cog_...`). */
+  apiKey?: string;
+  /** Devin/Windsurf Analytics v2alpha service key (exact tokens on DOLLARS teams). */
+  analyticsServiceKey?: string;
+  /** Organization ID (`org-...`). */
+  orgId?: string;
+  /** User ID (`user-...`) to scope org session/analytics queries to this user. */
+  userId?: string;
+  /** Optional Enterprise service user ID (`service-user-...`). */
+  serviceUserId?: string;
+  /** Custom USD-per-ACU conversion rate (default $2.00/ACU). */
+  acuUsd?: number;
+  /** Custom Devin v3 API base URL. */
+  apiUrl?: string;
+  /** Custom Analytics v2alpha base URL. */
+  analyticsApiUrl?: string;
+  /** Non-secret cached display name for `setup-devin --status`. */
+  userName?: string;
+  configuredAt?: number;
+}
+
+export function devinCloudConfigPath(env: NodeJS.ProcessEnv = process.env): string {
+  const override = env.WHOBURNEDMORE_CONFIG_DIR?.trim();
+  const dir = override || join(env.HOME || env.USERPROFILE || homedir(), ".config", "whoburnedmore");
+  return join(dir, "devin-cloud.json");
+}
+
+export function loadDevinCloudConfig(
+  env: NodeJS.ProcessEnv = process.env,
+  configPath?: string,
+): DevinCloudConfig | null {
+  const file = configPath ?? devinCloudConfigPath(env);
+  if (!existsSync(file)) return null;
+  try {
+    const raw = readTextFileSyncCapped(file, MAX_CONFIG_BYTES);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    if (!parsed || typeof parsed !== "object") return null;
+    const cfg: DevinCloudConfig = {};
+    if (parsed.useLocalCliCredentials === true) cfg.useLocalCliCredentials = true;
+    if (typeof parsed.apiKey === "string" && parsed.apiKey.trim()) cfg.apiKey = parsed.apiKey.trim();
+    if (typeof parsed.analyticsServiceKey === "string" && parsed.analyticsServiceKey.trim()) {
+      cfg.analyticsServiceKey = parsed.analyticsServiceKey.trim();
+    }
+    if (typeof parsed.orgId === "string" && parsed.orgId.trim()) cfg.orgId = parsed.orgId.trim();
+    if (typeof parsed.userId === "string" && parsed.userId.trim()) cfg.userId = parsed.userId.trim();
+    if (typeof parsed.serviceUserId === "string" && parsed.serviceUserId.trim()) {
+      cfg.serviceUserId = parsed.serviceUserId.trim();
+    }
+    if (typeof parsed.acuUsd === "number" && Number.isFinite(parsed.acuUsd) && parsed.acuUsd > 0 && parsed.acuUsd <= 1000) {
+      cfg.acuUsd = parsed.acuUsd;
+    }
+    if (typeof parsed.apiUrl === "string" && parsed.apiUrl.trim()) cfg.apiUrl = parsed.apiUrl.trim();
+    if (typeof parsed.analyticsApiUrl === "string" && parsed.analyticsApiUrl.trim()) {
+      cfg.analyticsApiUrl = parsed.analyticsApiUrl.trim();
+    }
+    if (typeof parsed.userName === "string" && parsed.userName.trim()) {
+      cfg.userName = parsed.userName.trim();
+    }
+    if (typeof parsed.configuredAt === "number" && Number.isFinite(parsed.configuredAt)) {
+      cfg.configuredAt = parsed.configuredAt;
+    }
+    return Object.keys(cfg).length > 0 ? cfg : null;
+  } catch {
+    return null;
+  }
+}
+
+export function saveDevinCloudConfig(
+  config: DevinCloudConfig,
+  env: NodeJS.ProcessEnv = process.env,
+  configPath?: string,
+): boolean {
+  const file = configPath ?? devinCloudConfigPath(env);
+  return writePrivateFileAtomic(file, JSON.stringify(config, null, 2) + "\n", MAX_CONFIG_BYTES);
+}
+
+export function clearDevinCloudConfig(
+  env: NodeJS.ProcessEnv = process.env,
+  configPath?: string,
+): boolean {
+  const file = configPath ?? devinCloudConfigPath(env);
+  if (!existsSync(file)) return false;
+  try {
+    rmSync(file, { force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export interface DevinCliCredentials {
+  apiKey: string;
+  devinApiUrl: string;
+  apiServerUrl: string;
+  filePath: string;
+}
+
+/** Read Devin CLI's saved session token from `~/.local/share/devin/credentials.toml`. */
+export function readDevinCliCredentials(
+  env: NodeJS.ProcessEnv = process.env,
+): DevinCliCredentials | null {
+  const home = env.HOME || env.USERPROFILE || homedir();
+  const candidates = [
+    join(env.XDG_DATA_HOME?.trim() || join(home, ".local", "share"), "devin", "credentials.toml"),
+  ];
+  if (platform() === "win32") {
+    candidates.unshift(
+      join(env.APPDATA ?? join(home, "AppData", "Roaming"), "devin", "credentials.toml"),
+    );
+  }
+  for (const filePath of [...new Set(candidates)]) {
+    const raw = readTextFileSyncCapped(filePath, MAX_CONFIG_BYTES);
+    if (!raw) continue;
+    const keyMatch = raw.match(/^\s*windsurf_api_key\s*=\s*"([^"]+)"/m);
+    if (!keyMatch?.[1]) continue;
+    const devinApiMatch = raw.match(/^\s*devin_api_url\s*=\s*"([^"]+)"/m);
+    const serverMatch = raw.match(/^\s*api_server_url\s*=\s*"([^"]+)"/m);
+    return {
+      apiKey: keyMatch[1].trim(),
+      devinApiUrl: devinApiMatch?.[1]?.trim() || DEFAULT_DEVIN_API_URL,
+      apiServerUrl: serverMatch?.[1]?.trim() || DEFAULT_ANALYTICS_API_URL,
+      filePath,
+    };
+  }
+  return null;
+}
 
 function nonNegInt(n: unknown): number {
   const v = Math.round(Number(n));
@@ -58,12 +197,24 @@ function nonNegNum(n: unknown): number {
   return Number.isFinite(v) && v > 0 ? v : 0;
 }
 
-/** Parse `WHOBURNEDMORE_DEVIN_ACU_USD`, falling back to `DEFAULT_DEVIN_ACU_USD`. */
-export function resolveDevinAcuUsd(env: NodeJS.ProcessEnv = process.env): number {
+/** Parse `WHOBURNEDMORE_DEVIN_ACU_USD` or saved `acuUsd`, falling back to `DEFAULT_DEVIN_ACU_USD`. */
+export function resolveDevinAcuUsd(
+  env: NodeJS.ProcessEnv = process.env,
+  saved?: DevinCloudConfig | null,
+): number {
   const raw = env.WHOBURNEDMORE_DEVIN_ACU_USD?.trim();
-  if (!raw) return DEFAULT_DEVIN_ACU_USD;
-  const v = Number(raw);
-  if (Number.isFinite(v) && v > 0 && v <= 1000) return v;
+  if (raw) {
+    const v = Number(raw);
+    if (Number.isFinite(v) && v > 0 && v <= 1000) return v;
+  }
+  if (
+    saved?.acuUsd !== undefined &&
+    Number.isFinite(saved.acuUsd) &&
+    saved.acuUsd > 0 &&
+    saved.acuUsd <= 1000
+  ) {
+    return saved.acuUsd;
+  }
   return DEFAULT_DEVIN_ACU_USD;
 }
 
@@ -396,15 +547,14 @@ export function aggregateDevinCloudSessions(
   return entries;
 }
 
-/** Collect Devin Cloud usage strictly from local Devin Desktop `acp-messages/*.db` caches. */
-export function collectDevinCloudLocal(opts: {
+/** Collect Devin Cloud sessions + entries strictly from local `acp-messages/*.db` caches. */
+export function collectDevinCloudLocalSessions(opts: {
   acpMessagesDirs?: string[];
   env?: NodeJS.ProcessEnv;
   now?: number;
-} = {}): { entries: DailyUsageEntry[]; found: boolean } {
+} = {}): { sessions: ParsedDevinCloudSession[]; found: boolean } {
   const env = opts.env ?? process.env;
   const now = opts.now ?? Date.now();
-  const acuUsd = resolveDevinAcuUsd(env);
   const dirs = opts.acpMessagesDirs ?? devinAcpMessagesDirs(env);
 
   let foundCloudDb = false;
@@ -430,9 +580,22 @@ export function collectDevinCloudLocal(opts: {
     }
   }
 
+  return { sessions, found: foundCloudDb };
+}
+
+/** Collect Devin Cloud usage strictly from local Devin Desktop `acp-messages/*.db` caches. */
+export function collectDevinCloudLocal(opts: {
+  acpMessagesDirs?: string[];
+  env?: NodeJS.ProcessEnv;
+  now?: number;
+  acuUsd?: number;
+} = {}): { entries: DailyUsageEntry[]; found: boolean } {
+  const env = opts.env ?? process.env;
+  const acuUsd = opts.acuUsd ?? resolveDevinAcuUsd(env);
+  const { sessions, found } = collectDevinCloudLocalSessions(opts);
   return {
     entries: aggregateDevinCloudSessions(sessions, acuUsd),
-    found: foundCloudDb,
+    found,
   };
 }
 
@@ -708,19 +871,222 @@ export async function fetchDevinV3Consumption(
   return Array.isArray(body.consumption_by_date) ? body.consumption_by_date : [];
 }
 
+export interface DevinSelfInfo {
+  principalType: string;
+  userId?: string;
+  userName?: string;
+  orgId?: string;
+  serviceUserId?: string;
+  serviceUserName?: string;
+}
+
+/** Probe `GET /v3/self` with a Devin CLI token, PAT (`cog_`), or service user key. */
+export async function fetchDevinSelf(
+  token: string,
+  opts: { baseUrl?: string; fetchImpl?: typeof fetch } = {},
+): Promise<DevinSelfInfo> {
+  const fetchFn = opts.fetchImpl ?? fetch;
+  const baseUrl = (opts.baseUrl ?? DEFAULT_DEVIN_API_URL).replace(/\/+$/, "");
+  const res = await fetchFn(`${baseUrl}/v3/self`, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/json",
+    },
+    signal: AbortSignal.timeout(API_TIMEOUT_MS),
+    redirect: "error",
+  });
+  if (!res.ok) {
+    throw new Error(`devin /v3/self failed (HTTP ${res.status})`);
+  }
+  const body = await readJsonResponseCapped<Record<string, unknown>>(res, MAX_API_PAGE_BYTES);
+  const str = (v: unknown): string | undefined =>
+    typeof v === "string" && v.trim() ? v.trim() : undefined;
+  return {
+    principalType: str(body.principal_type) ?? "unknown",
+    userId: str(body.user_id),
+    userName: str(body.user_name),
+    orgId: str(body.devin_sessions_org_id) ?? str(body.primary_billing_org_id) ?? str(body.org_id),
+    serviceUserId: str(body.service_user_id),
+    serviceUserName: str(body.service_user_name),
+  };
+}
+
+export interface DevinV3SessionItem {
+  session_id?: string;
+  created_at?: number | string;
+  updated_at?: number | string;
+  acus_consumed?: number;
+  on_demand_usage?: number | null;
+  devin_mode?: string | null;
+  selected_devin_mode?: string | null;
+  user_id?: string | null;
+}
+
+function normalizeDevinSessionKey(sessionId: string): string {
+  const trimmed = sessionId.trim();
+  return trimmed.startsWith("devin-") ? trimmed : `devin-${trimmed}`;
+}
+
+function resolveV3SessionModel(item: DevinV3SessionItem): string {
+  const raw = (item.selected_devin_mode ?? item.devin_mode ?? "").trim();
+  if (!raw) return DEVIN_CLOUD_TOOL;
+  const lower = raw.toLowerCase();
+  if (lower === "normal" || lower === "fast" || lower === "ultra" || lower === "lite" || isDevinRoutingMode(lower)) {
+    return DEVIN_CLOUD_TOOL;
+  }
+  return raw;
+}
+
+/** Fetch paginated org sessions (`GET /v3/organizations/{org_id}/sessions`). */
+export async function fetchDevinV3Sessions(
+  token: string,
+  orgId: string,
+  opts: {
+    baseUrl?: string;
+    userId?: string;
+    maxPages?: number;
+    fetchImpl?: typeof fetch;
+  } = {},
+): Promise<DevinV3SessionItem[]> {
+  const fetchFn = opts.fetchImpl ?? fetch;
+  const baseUrl = (opts.baseUrl ?? DEFAULT_DEVIN_API_URL).replace(/\/+$/, "");
+  const maxPages = opts.maxPages ?? MAX_SESSIONS_PAGES;
+  const all: DevinV3SessionItem[] = [];
+  let after: string | null = null;
+
+  for (let page = 1; page <= maxPages; page++) {
+    const url = new URL(`${baseUrl}/v3/organizations/${encodeURIComponent(orgId)}/sessions`);
+    url.searchParams.set("first", "100");
+    if (opts.userId) url.searchParams.set("user_ids", opts.userId);
+    if (after) url.searchParams.set("after", after);
+
+    const res = await fetchFn(url, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/json",
+      },
+      signal: AbortSignal.timeout(API_TIMEOUT_MS),
+      redirect: "error",
+    });
+    if (!res.ok) {
+      throw new Error(`devin v3 sessions page ${page} failed (HTTP ${res.status})`);
+    }
+    const body = await readJsonResponseCapped<{
+      items?: DevinV3SessionItem[];
+      has_next_page?: boolean;
+      end_cursor?: string | null;
+    }>(res, MAX_API_PAGE_BYTES);
+    if (Array.isArray(body.items)) all.push(...body.items);
+    if (!body.has_next_page || !body.end_cursor) {
+      after = null;
+      break;
+    }
+    after = body.end_cursor;
+  }
+  return all;
+}
+
+/**
+ * Merge local `acp-messages/*.db` Cloud sessions with `/v3/organizations/{org_id}/sessions`
+ * at the session level so no session is double-counted and the richer source wins
+ * per session (local `acp-messages` supplies ACUs on self-serve Max/Pro where
+ * v3 reports `acus_consumed: 0`; v3 supplies ACUs / `on_demand_usage` for
+ * webapp/CLI/Slack sessions not opened in Devin Desktop).
+ */
+export function mergeDevinCloudLocalAndV3Sessions(
+  localSessions: readonly ParsedDevinCloudSession[],
+  v3Sessions: readonly DevinV3SessionItem[],
+  acuUsd: number = DEFAULT_DEVIN_ACU_USD,
+  now: number = Date.now(),
+): DailyUsageEntry[] {
+  // Normalize local session keys and keep the highest-ACU snapshot per session.
+  const localByKey = new Map<string, ParsedDevinCloudSession>();
+  for (const s of localSessions) {
+    const key = s.sessionKey.startsWith("devin-") ? s.sessionKey : s.sessionKey;
+    const prev = localByKey.get(key);
+    if (!prev || s.totalAcus > prev.totalAcus) {
+      localByKey.set(key, s);
+    }
+  }
+
+  const byDateModel = new Map<string, { date: string; model: string; costUSD: number }>();
+  const addCost = (date: string, model: string, usd: number) => {
+    if (usd <= 0) return;
+    const k = `${date}|${model}`;
+    const acc = byDateModel.get(k) ?? { date, model, costUSD: 0 };
+    acc.costUSD += usd;
+    byDateModel.set(k, acc);
+  };
+
+  const consumedLocalKeys = new Set<string>();
+
+  for (const item of v3Sessions) {
+    if (!item || typeof item.session_id !== "string" || !item.session_id.trim()) continue;
+    const key = normalizeDevinSessionKey(item.session_id);
+    const local = localByKey.get(key);
+    const apiAcuUsd = nonNegNum(item.acus_consumed) * acuUsd;
+    const apiOnDemandUsd = nonNegNum(item.on_demand_usage);
+    const apiUsd = Math.max(apiAcuUsd, apiOnDemandUsd);
+    const localUsd = local ? local.totalAcus * acuUsd : 0;
+
+    if (local && localUsd >= apiUsd) {
+      // Keep local per-day ACU deltas (more accurate date attribution & non-zero on Max/Pro).
+      continue;
+    }
+    if (apiUsd > 0) {
+      const ms = toEpochMs(item.updated_at) ?? toEpochMs(item.created_at);
+      const date = ms !== null ? localUsageDate(ms, now) : null;
+      if (!date) continue;
+      if (local) consumedLocalKeys.add(key);
+      const model = resolveV3SessionModel(item);
+      addCost(date, model, apiUsd);
+    }
+  }
+
+  for (const [key, s] of localByKey.entries()) {
+    if (consumedLocalKeys.has(key)) continue;
+    for (const [date, acus] of s.acusByDate.entries()) {
+      addCost(date, s.model, acus * acuUsd);
+    }
+  }
+
+  const entries: DailyUsageEntry[] = [];
+  for (const row of byDateModel.values()) {
+    const costUSD = Number(row.costUSD.toFixed(6));
+    if (costUSD <= 0) continue;
+    entries.push({
+      date: row.date,
+      tool: DEVIN_CLOUD_TOOL,
+      model: row.model,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheCreationTokens: 0,
+      cacheReadTokens: 0,
+      costUSD,
+      origin: "cli",
+      verified: false,
+    });
+  }
+  return entries;
+}
+
 export interface CollectDevinCloudOpts {
   offline?: boolean;
   env?: NodeJS.ProcessEnv;
   acpMessagesDirs?: string[];
+  configPath?: string;
   now?: number;
   fetchImpl?: typeof fetch;
 }
 
 /**
  * Best-effort Devin Cloud collection:
- *  1. Opt-in Analytics v2alpha API (`DEVIN_ANALYTICS_SERVICE_KEY`), when online
- *  2. Opt-in Enterprise v3 consumption API (`DEVIN_API_KEY`), when online
- *  3. Local Devin Desktop `acp-messages/*.db` cloud session caches (offline-safe)
+ *  1. Analytics v2alpha API (`DEVIN_ANALYTICS_SERVICE_KEY` or saved config), when online
+ *  2. Enterprise v3 daily consumption API (`DEVIN_API_KEY` or saved config), when online
+ *  3. Local Devin Desktop `acp-messages/*.db` cloud caches, merged with v3 org
+ *     sessions when `apiKey` or `useLocalCliCredentials` is configured and online
  */
 export async function collectDevinCloud(
   opts: CollectDevinCloudOpts = {},
@@ -730,15 +1096,23 @@ export async function collectDevinCloud(
     return { entries: [], found: false };
   }
   const now = opts.now ?? Date.now();
-  const acuUsd = resolveDevinAcuUsd(env);
+  const saved = loadDevinCloudConfig(env, opts.configPath);
+  const acuUsd = resolveDevinAcuUsd(env, saved);
+
+  const analyticsKey = env.DEVIN_ANALYTICS_SERVICE_KEY?.trim() || saved?.analyticsServiceKey;
+  const analyticsBaseUrl = env.DEVIN_ANALYTICS_API_URL?.trim() || saved?.analyticsApiUrl;
+  const devinApiKey = env.DEVIN_API_KEY?.trim() || saved?.apiKey;
+  const devinApiUrl = env.DEVIN_API_URL?.trim() || saved?.apiUrl;
+  const serviceUserId = env.DEVIN_SERVICE_USER_ID?.trim() || saved?.serviceUserId;
+  const userId = env.DEVIN_USER_ID?.trim() || saved?.userId;
+  const orgId = env.DEVIN_ORG_ID?.trim() || saved?.orgId || readDevinOrgId(env) || undefined;
 
   if (!opts.offline) {
-    const analyticsKey = env.DEVIN_ANALYTICS_SERVICE_KEY?.trim();
     if (analyticsKey) {
       try {
         const rows = await fetchDevinAnalytics(analyticsKey, {
-          baseUrl: env.DEVIN_ANALYTICS_API_URL?.trim() || undefined,
-          userId: env.DEVIN_USER_ID?.trim() || undefined,
+          baseUrl: analyticsBaseUrl || undefined,
+          userId: userId || undefined,
           now,
           fetchImpl: opts.fetchImpl,
         });
@@ -749,34 +1123,75 @@ export async function collectDevinCloud(
       }
     }
 
-    const devinApiKey = env.DEVIN_API_KEY?.trim();
-    if (devinApiKey) {
-      const serviceUserId = env.DEVIN_SERVICE_USER_ID?.trim() || undefined;
-      const orgId = serviceUserId ? undefined : readDevinOrgId(env) ?? undefined;
-      if (serviceUserId || orgId) {
-        try {
-          const items = await fetchDevinV3Consumption(devinApiKey, {
-            baseUrl: env.DEVIN_API_URL?.trim() || undefined,
-            orgId,
-            serviceUserId,
-            fetchImpl: opts.fetchImpl,
-          });
-          const entries = mapDevinV3Consumption(items, acuUsd, now);
-          if (entries.length > 0) return { entries, found: true };
-        } catch {
-          /* fall through to local cache */
-        }
+    if (devinApiKey && (serviceUserId || orgId)) {
+      try {
+        const items = await fetchDevinV3Consumption(devinApiKey, {
+          baseUrl: devinApiUrl || undefined,
+          orgId: serviceUserId ? undefined : orgId,
+          serviceUserId: serviceUserId || undefined,
+          fetchImpl: opts.fetchImpl,
+        });
+        const entries = mapDevinV3Consumption(items, acuUsd, now);
+        if (entries.length > 0) return { entries, found: true };
+      } catch {
+        /* 403 on non-Enterprise plans or transient error — fall through to sessions + local cache */
       }
     }
   }
 
+  let localSessions: ParsedDevinCloudSession[] = [];
+  let foundLocal = false;
   try {
-    return collectDevinCloudLocal({
+    const local = collectDevinCloudLocalSessions({
       acpMessagesDirs: opts.acpMessagesDirs,
       env,
       now,
     });
+    localSessions = local.sessions;
+    foundLocal = local.found;
   } catch {
-    return { entries: [], found: false };
+    /* keep going */
   }
+
+  let v3Sessions: DevinV3SessionItem[] = [];
+  if (!opts.offline) {
+    let sessionToken = devinApiKey;
+    let sessionApiUrl = devinApiUrl;
+    if (!sessionToken && saved?.useLocalCliCredentials) {
+      const cliCreds = readDevinCliCredentials(env);
+      if (cliCreds) {
+        sessionToken = cliCreds.apiKey;
+        sessionApiUrl = sessionApiUrl || cliCreds.devinApiUrl;
+      }
+    }
+    if (sessionToken) {
+      try {
+        let resolvedOrg = orgId;
+        let resolvedUser = userId;
+        if (!resolvedOrg || !resolvedUser) {
+          const self = await fetchDevinSelf(sessionToken, {
+            baseUrl: sessionApiUrl || undefined,
+            fetchImpl: opts.fetchImpl,
+          });
+          resolvedOrg = resolvedOrg || self.orgId;
+          resolvedUser = resolvedUser || self.userId;
+        }
+        if (resolvedOrg) {
+          v3Sessions = await fetchDevinV3Sessions(sessionToken, resolvedOrg, {
+            baseUrl: sessionApiUrl || undefined,
+            userId: resolvedUser || undefined,
+            fetchImpl: opts.fetchImpl,
+          });
+        }
+      } catch {
+        /* fall through to local sessions only */
+      }
+    }
+  }
+
+  const entries = mergeDevinCloudLocalAndV3Sessions(localSessions, v3Sessions, acuUsd, now);
+  return {
+    entries,
+    found: foundLocal || entries.length > 0,
+  };
 }
