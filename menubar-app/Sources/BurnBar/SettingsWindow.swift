@@ -9,16 +9,28 @@ import SwiftUI
 @MainActor
 enum SettingsWindow {
     private static var window: NSWindow?
+    private static var requestedPane: SettingsRootView.Pane?
 
-    static func show(model: AppModel, settings: SettingsStore) {
+    static let paneNotification = Notification.Name("whoburnedmore.settings.pane")
+
+    static func takeRequestedPane() -> SettingsRootView.Pane? {
+        defer { requestedPane = nil }
+        return requestedPane
+    }
+
+    static func show(model: AppModel, settings: SettingsStore, pane: SettingsRootView.Pane? = nil) {
         NSApp.activate(ignoringOtherApps: true)
         if let window {
+            if let pane {
+                requestedPane = pane
+                NotificationCenter.default.post(name: paneNotification, object: pane.rawValue)
+            }
             center(window)
             window.makeKeyAndOrderFront(nil)
             return
         }
         let updates = UpdateController.shared
-        let hosting = NSHostingController(rootView: SettingsRootView()
+        let hosting = NSHostingController(rootView: SettingsRootView(pane: pane)
             .environmentObject(model)
             .environmentObject(settings)
             .environmentObject(updates))
@@ -99,14 +111,21 @@ struct SettingsRootView: View {
     /// ImageRenderer (verification shots) can't lay out ScrollView contents —
     /// the static variant swaps it for a plain VStack.
     var renderStatic = false
-    @State private var pane: Pane = {
-        // Verification aid: preselect a pane for screenshots.
+    @State private var pane: Pane
+
+    init(renderStatic: Bool = false, pane: Pane? = nil) {
+        self.renderStatic = renderStatic
+        _pane = State(initialValue: pane ?? Self.paneFromEnvironment())
+    }
+
+    /// Verification aid: preselect a pane for screenshots.
+    private static func paneFromEnvironment() -> Pane {
         if let raw = ProcessInfo.processInfo.environment["BURNBAR_SETTINGS_PANE"],
            let p = Pane.allCases.first(where: { $0.rawValue.lowercased().replacingOccurrences(of: " ", with: "") == raw.lowercased() }) {
             return p
         }
         return .general
-    }()
+    }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -148,6 +167,17 @@ struct SettingsRootView: View {
             }
         }
         .frame(minWidth: 720, minHeight: 520)
+        .onAppear {
+            guard !renderStatic, let next = SettingsWindow.takeRequestedPane() else { return }
+            pane = next
+        }
+        .onReceive(NotificationCenter.default.publisher(for: SettingsWindow.paneNotification)) { note in
+            guard !renderStatic,
+                  let raw = note.object as? String,
+                  let next = Pane(rawValue: raw) else { return }
+            pane = next
+            _ = SettingsWindow.takeRequestedPane()
+        }
     }
 
     private var bundleVersion: BundleVersionPresentation {
@@ -486,16 +516,36 @@ struct AccountPane: View {
             case .offline(let handle):
                 Label("Connected as @\(handle) — site unreachable right now", systemImage: "wifi.slash")
                     .foregroundStyle(.secondary)
+            case .signedInSyncOff(let handle):
+                Label(WbmClient.signedInTitle(handle), systemImage: "person.crop.circle.badge.checkmark")
+                if settings.syncEnabled {
+                    Text("Leaderboard sync is on.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Leaderboard sync is off. Turn it on to show your rank.")
+                        .foregroundStyle(.secondary)
+                    Button("Turn on leaderboard sync") {
+                        model.setLeaderboardSyncEnabled(true)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.orange)
+                }
             case .noAccount:
-                Text("Not connected. whoburnedmore works fully without an account — connect to see your rank and join the public leaderboard.")
-                    .foregroundStyle(.secondary)
-                ConnectButton()
+                if model.signInCleared {
+                    Text("Your sign-in was cleared after the server rejected it. Reconnect to sync your leaderboard again.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Not connected. whoburnedmore works fully without an account — connect to see your rank and join the public leaderboard.")
+                        .foregroundStyle(.secondary)
+                }
+                ConnectButton(title: model.signInCleared ? "Reconnect" : "Connect / create account")
             }
         }
     }
 }
 
 struct ConnectButton: View {
+    var title: String = "Connect / create account"
     @EnvironmentObject private var model: AppModel
     @StateObject private var flow = DeviceFlow()
 
@@ -503,7 +553,7 @@ struct ConnectButton: View {
         VStack(alignment: .leading, spacing: 6) {
             switch flow.state {
             case .idle:
-                Button("Connect / create account") { flow.start() }
+                Button(title) { begin() }
                     .buttonStyle(.borderedProminent).tint(.orange)
             case .waiting(let code):
                 HStack(spacing: 8) {
@@ -514,12 +564,26 @@ struct ConnectButton: View {
             case .connected(let handle):
                 Label("Connected as @\(handle)", systemImage: "checkmark.circle.fill")
                     .foregroundStyle(.green)
-                    .task { await model.refreshRemote() }
+                    .task {
+                        model.setLeaderboardSyncEnabled(true)
+                        model.signInCleared = false
+                        await model.refreshRemote()
+                    }
             case .failed(let reason):
                 Label(reason, systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
-                Button("Try again") { flow.start() }
+                Button("Try again") { begin() }
             }
         }
+    }
+
+    /// A stored token is already a sign-in. Turn sync on instead of opening
+    /// another browser device flow.
+    private func begin() {
+        if WbmClient.hasCliToken() {
+            model.setLeaderboardSyncEnabled(true)
+            return
+        }
+        flow.start()
     }
 }
 

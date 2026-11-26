@@ -39,6 +39,22 @@ public enum TrustedWebURL {
         return url
     }
 
+    /// API origin for BurnBar. `WHOBURNEDMORE_API` wins when both it and
+    /// `BURNBAR_API_BASE` are set. A blank value is unset. An invalid winner
+    /// is not replaced by the other variable.
+    public static func apiOrigin(environment: [String: String]) -> String? {
+        let raw = nonempty(environment["WHOBURNEDMORE_API"])
+            ?? nonempty(environment["BURNBAR_API_BASE"])
+            ?? "https://api.whoburnedmore.com"
+        return serviceOrigin(raw)?.absoluteString
+    }
+
+    private static func nonempty(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else { return nil }
+        return trimmed
+    }
+
     private static func effectivePort(_ url: URL) -> Int? {
         if let port = url.port { return port }
         switch url.scheme?.lowercased() {

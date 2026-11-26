@@ -24,6 +24,8 @@ final class AppModel: ObservableObject {
     @Published var claudeState: ClaudeUsageState = .unavailable(reason: "starting…")
     @Published var claudeForecastHit: Date?
     @Published var wbmState: WbmState = .noAccount
+    /// A sync ended `unauthorized` after the sidecar cleared the stored sign-in.
+    @Published var signInCleared = false
     @Published var leaderboardSyncState: LeaderboardSyncState
     @Published var anthropicStatus: StatusPageState?
     @Published var openaiStatus: StatusPageState?
@@ -56,6 +58,9 @@ final class AppModel: ObservableObject {
     init(settings: SettingsStore) {
         self.settings = settings
         leaderboardSyncState = settings.syncEnabled ? .waiting : .off
+        if !settings.syncEnabled {
+            wbmState = WbmClient.accountStateForDisabledSync()
+        }
     }
 
     // MARK: derived state
@@ -401,10 +406,11 @@ final class AppModel: ObservableObject {
         refreshSyncTask()
         if enabled {
             Task { await syncLeaderboardNow() }
+            Task { await refreshLeaderboard() }
         } else {
             if activeSyncProcess?.isRunning == true { activeSyncProcess?.terminate() }
             activeSyncProcess = nil
-            wbmState = .noAccount
+            wbmState = WbmClient.accountStateForDisabledSync()
         }
     }
 
@@ -453,17 +459,26 @@ final class AppModel: ObservableObject {
     }
 
     private func refreshLeaderboard() async {
+        if signInCleared {
+            wbmState = .noAccount
+            return
+        }
         guard OutboundPrivacyPolicy.allowsLeaderboardNetwork(
             syncEnabled: settings.syncEnabled
         ) else {
-            wbmState = .noAccount
+            wbmState = WbmClient.accountStateForDisabledSync()
             return
         }
         let newWbm = await wbm.fetch()
         // A user can switch sync off while the request is in flight. Do not
         // publish that response back into the UI after consent was withdrawn.
-        guard settings.syncEnabled else {
+        // A cleared sign-in must also win over a profile fetched before clearAuth.
+        if signInCleared {
             wbmState = .noAccount
+            return
+        }
+        guard settings.syncEnabled else {
+            wbmState = WbmClient.accountStateForDisabledSync()
             return
         }
         detectOvertaken(old: wbmState, new: newWbm)
@@ -598,13 +613,20 @@ final class AppModel: ObservableObject {
         if result.ok {
             let now = Date()
             if let markingTokens { liveSyncThrottle.markSynced(tokens: markingTokens) }
+            signInCleared = false
             await refreshLeaderboardAfterSync()
             leaderboardSyncState = .synced(now)
             lastUpdatedAt = now
         } else {
-            let message = Self.syncErrorMessage(result.message)
-            leaderboardSyncState = .failed(message)
-            log.error("leaderboard sync failed: \(message)")
+            let failure = Self.syncFailure(result.message)
+            if failure.signInCleared {
+                // The sidecar already dropped the token and handle. Stop showing
+                // the previous "Connected as @handle" profile.
+                signInCleared = true
+                wbmState = .noAccount
+            }
+            leaderboardSyncState = .failed(failure.message)
+            log.error("leaderboard sync failed: \(failure.message)")
         }
     }
 
@@ -640,13 +662,19 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private static func syncErrorMessage(_ output: String?) -> String {
-        guard let output, !output.isEmpty else { return "upload failed" }
-        if output.contains("not-connected") || output.contains("unauthorized") {
-            return "connect your account"
+    private static func syncFailure(_ output: String?) -> (message: String, signInCleared: Bool) {
+        guard let output, !output.isEmpty else { return ("upload failed", false) }
+        // `unauthorized` is the sidecar's final failure: refresh already ran,
+        // then clearAuth dropped the stored sign-in. `not-connected` means
+        // there was nothing to clear.
+        if output.contains("unauthorized") {
+            return ("sign-in expired", true)
         }
-        if output.contains("no-usage") { return "no usage found" }
-        return "upload failed"
+        if output.contains("not-connected") {
+            return ("connect your account", false)
+        }
+        if output.contains("no-usage") { return ("no usage found", false) }
+        return ("upload failed", false)
     }
 
     // MARK: sidecar events

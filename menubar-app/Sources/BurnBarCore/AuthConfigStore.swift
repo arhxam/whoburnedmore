@@ -13,24 +13,7 @@ public enum AuthConfigStore {
         refreshToken: String,
         handle: String
     ) throws -> String {
-        let fm = FileManager.default
-        let directory = url.deletingLastPathComponent()
-        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
-        try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
-
-        var object: [String: Any] = [:]
-        if fm.fileExists(atPath: url.path) {
-            let values = try url.resourceValues(forKeys: [.isSymbolicLinkKey, .fileSizeKey])
-            guard values.isSymbolicLink != true else {
-                throw CocoaError(.fileWriteNoPermission)
-            }
-            guard (values.fileSize ?? 0) <= maximumExistingBytes else {
-                throw CocoaError(.fileReadTooLarge)
-            }
-            object = (try? JSONSerialization.jsonObject(with: Data(contentsOf: url)))
-                as? [String: Any] ?? [:]
-        }
-
+        var object = try readMergingObject(at: url)
         object["cliToken"] = token
         object["refreshToken"] = refreshToken
         object["handle"] = handle
@@ -43,7 +26,42 @@ public enum AuthConfigStore {
             }.joined()
             object["anonKey"] = anonKey
         }
+        try writePrivateObject(object, at: url)
+        return anonKey
+    }
 
+    /// Stamp `deviceBoundAt` after `/v1/me/devices/bind` returns a definitive
+    /// answer. The value is epoch milliseconds, matching the CLI's `recordDeviceBound`.
+    public static func recordDeviceBound(
+        url: URL,
+        when: Int = Int(Date().timeIntervalSince1970 * 1000)
+    ) throws {
+        var object = try readMergingObject(at: url)
+        object["deviceBoundAt"] = NSNumber(value: when)
+        try writePrivateObject(object, at: url)
+    }
+
+    private static func readMergingObject(at url: URL) throws -> [String: Any] {
+        let fm = FileManager.default
+        let directory = url.deletingLastPathComponent()
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+        guard fm.fileExists(atPath: url.path) else { return [:] }
+
+        let values = try url.resourceValues(forKeys: [.isSymbolicLinkKey, .fileSizeKey])
+        guard values.isSymbolicLink != true else {
+            throw CocoaError(.fileWriteNoPermission)
+        }
+        guard (values.fileSize ?? 0) <= maximumExistingBytes else {
+            throw CocoaError(.fileReadTooLarge)
+        }
+        return (try? JSONSerialization.jsonObject(with: Data(contentsOf: url)))
+            as? [String: Any] ?? [:]
+    }
+
+    private static func writePrivateObject(_ object: [String: Any], at url: URL) throws {
+        let fm = FileManager.default
+        let directory = url.deletingLastPathComponent()
         let data = try JSONSerialization.data(
             withJSONObject: object,
             options: [.prettyPrinted, .sortedKeys]
@@ -70,6 +88,5 @@ public enum AuthConfigStore {
         // Defense in depth for unusual filesystems that do not preserve the
         // staged inode's mode exactly across replacement.
         try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-        return anonKey
     }
 }

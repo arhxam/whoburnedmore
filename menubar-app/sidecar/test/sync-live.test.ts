@@ -19,8 +19,53 @@ describe("live leaderboard sync", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    process.exitCode = undefined;
     for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
   });
+
+  function writeSyncFixture(prefix: string, config: Record<string, unknown>) {
+    const root = mkdtempSync(join(tmpdir(), prefix));
+    roots.push(root);
+    const configDir = join(root, "config");
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(join(configDir, "config.json"), JSON.stringify(config));
+    const fakeCcusage = join(root, "ccusage");
+    writeFileSync(
+      fakeCcusage,
+      `#!/bin/sh
+printf '{"daily":[{"date":"2026-08-10","models":{"gpt-5.6-codex":{"inputTokens":10,"outputTokens":2,"cacheCreationTokens":0,"cacheReadTokens":0}},"totalCost":0}]}'
+`,
+    );
+    chmodSync(fakeCcusage, 0o755);
+    return {
+      configDir,
+      env: {
+        ...process.env,
+        HOME: root,
+        CLAUDE_CONFIG_DIR: join(root, "claude"),
+        CODEX_HOME: join(root, "codex"),
+        BURNBAR_CACHE_DIR: join(root, "cache"),
+        BURNBAR_CCUSAGE: fakeCcusage,
+        BURNBAR_CODEX_MIN_INTERVAL_MS: "0",
+        WHOBURNEDMORE_CONFIG_DIR: configDir,
+      },
+    };
+  }
+
+  async function runSyncCaptured(env: NodeJS.ProcessEnv) {
+    const logs: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((message?: unknown) => {
+      logs.push(String(message));
+    });
+    const previousExitCode = process.exitCode;
+    process.exitCode = undefined;
+    try {
+      await runSync({ nativeOnly: true, env });
+      return { logs, exitCode: process.exitCode };
+    } finally {
+      process.exitCode = previousExitCode;
+    }
+  }
 
   it("persists refreshed auth and last-sync time in the overridden config directory", async () => {
     const root = mkdtempSync(join(tmpdir(), "bb-sync-config-"));
@@ -233,5 +278,219 @@ printf '{"daily":[{"date":"2026-08-10","models":{"gpt-5.6-codex":{"inputTokens":
 
     expect(payload.codexReplayTombstoneDates).toBeUndefined();
     expect(payload.codexReplayPriorScopes).toBeUndefined();
+  });
+
+  it("mints an access token from a stored refresh token before syncing", async () => {
+    const refreshToken = "r".repeat(64);
+    const { configDir, env } = writeSyncFixture("bb-sync-refresh-only-", {
+      handle: "stale",
+      anonKey: "machine-secret",
+      refreshToken,
+    });
+    let submits = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/v1/auth/cli/refresh")) {
+        return new Response(JSON.stringify({ token: "fresh", handle: "burner" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.endsWith("/v1/submit")) {
+        submits += 1;
+        return new Response(
+          JSON.stringify({
+            rank: 4,
+            totalTokens: 12,
+            totalCostUSD: 0,
+            profileUrl: "https://example.test/u/burner",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      throw new Error(`unexpected URL ${url}`);
+    });
+
+    const { logs, exitCode } = await runSyncCaptured(env);
+
+    expect(submits).toBe(1);
+    expect(exitCode).toBeUndefined();
+    expect(logs.some((line) => line.includes("not-connected"))).toBe(false);
+    expect(JSON.parse(logs.at(-1) ?? "")).toMatchObject({
+      rank: 4,
+      totalTokens: 12,
+      profileUrl: "https://example.test/u/burner",
+    });
+    expect(loadConfig(configDir)).toMatchObject({
+      cliToken: "fresh",
+      handle: "burner",
+      anonKey: "machine-secret",
+      refreshToken,
+    });
+    expect(loadConfig(configDir)?.lastSyncAt).toEqual(expect.any(Number));
+  });
+
+  it("reports not-connected when a stored refresh token cannot mint an access token", async () => {
+    const stored = {
+      handle: "burner",
+      anonKey: "machine-secret",
+      refreshToken: "r".repeat(64),
+    };
+    const { configDir, env } = writeSyncFixture("bb-sync-refresh-fail-", stored);
+    let refreshes = 0;
+    let submits = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/v1/auth/cli/refresh")) {
+        refreshes += 1;
+        return new Response(JSON.stringify({ error: "expired" }), {
+          status: 401,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.endsWith("/v1/submit")) {
+        submits += 1;
+        return new Response(JSON.stringify({ error: "expired" }), {
+          status: 401,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      throw new Error(`unexpected URL ${url}`);
+    });
+
+    const { logs, exitCode } = await runSyncCaptured(env);
+
+    expect(refreshes).toBe(1);
+    expect(submits).toBe(0);
+    expect(exitCode).toBe(3);
+    expect(logs).toEqual([JSON.stringify({ error: "not-connected" })]);
+    expect(loadConfig(configDir)).toEqual(stored);
+  });
+
+  it("clears the stored sign-in when an unauthorized submit cannot be refreshed", async () => {
+    const refreshToken = "r".repeat(64);
+    const { configDir, env } = writeSyncFixture("bb-sync-unauthorized-", {
+      cliToken: "expired",
+      handle: "burner",
+      anonKey: "machine-secret",
+      refreshToken,
+      lastSyncAt: 111,
+    });
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/v1/auth/cli/refresh") || url.endsWith("/v1/submit")) {
+        return new Response(JSON.stringify({ error: "expired" }), {
+          status: 401,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      throw new Error(`unexpected URL ${url}`);
+    });
+
+    const { logs, exitCode } = await runSyncCaptured(env);
+
+    expect(exitCode).toBe(3);
+    expect(logs).toEqual([JSON.stringify({ error: "unauthorized" })]);
+    expect(loadConfig(configDir)).toEqual({
+      anonKey: "machine-secret",
+      refreshToken,
+      lastSyncAt: 111,
+    });
+  });
+
+  it("clears a refreshed token when the retried submit is still unauthorized", async () => {
+    const refreshToken = "r".repeat(64);
+    const { configDir, env } = writeSyncFixture("bb-sync-retry-unauthorized-", {
+      cliToken: "expired",
+      handle: "burner",
+      anonKey: "machine-secret",
+      refreshToken,
+      lastSyncAt: 111,
+    });
+    let submits = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/v1/auth/cli/refresh")) {
+        return new Response(JSON.stringify({ token: "fresh", handle: "burner" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.endsWith("/v1/submit")) {
+        submits += 1;
+        return new Response(JSON.stringify({ error: "expired" }), {
+          status: 401,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      throw new Error(`unexpected URL ${url}`);
+    });
+
+    const { logs, exitCode } = await runSyncCaptured(env);
+
+    expect(submits).toBe(2);
+    expect(exitCode).toBe(3);
+    expect(logs).toEqual([JSON.stringify({ error: "unauthorized" })]);
+    expect(loadConfig(configDir)).toEqual({
+      anonKey: "machine-secret",
+      refreshToken,
+      lastSyncAt: 111,
+    });
+  });
+
+  it("clears a dead access token when there is no refresh token", async () => {
+    const { configDir, env } = writeSyncFixture("bb-sync-no-refresh-", {
+      cliToken: "expired",
+      handle: "burner",
+      anonKey: "machine-secret",
+    });
+    let refreshes = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/v1/auth/cli/refresh")) {
+        refreshes += 1;
+        return new Response("{}", { status: 200 });
+      }
+      if (url.endsWith("/v1/submit")) {
+        return new Response(JSON.stringify({ error: "expired" }), {
+          status: 401,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      throw new Error(`unexpected URL ${url}`);
+    });
+
+    const { logs, exitCode } = await runSyncCaptured(env);
+
+    expect(refreshes).toBe(0);
+    expect(exitCode).toBe(3);
+    expect(logs).toEqual([JSON.stringify({ error: "unauthorized" })]);
+    expect(loadConfig(configDir)).toEqual({ anonKey: "machine-secret" });
+  });
+
+  it("keeps the stored sign-in when submit fails for a reason other than unauthorized", async () => {
+    const stored = {
+      cliToken: "still-good",
+      handle: "burner",
+      anonKey: "machine-secret",
+      refreshToken: "r".repeat(64),
+    };
+    const { configDir, env } = writeSyncFixture("bb-sync-other-error-", stored);
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/v1/submit")) {
+        return new Response(JSON.stringify({ error: "overloaded" }), {
+          status: 503,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      throw new Error(`unexpected URL ${url}`);
+    });
+
+    const { logs, exitCode } = await runSyncCaptured(env);
+
+    expect(exitCode).toBe(1);
+    expect(logs).toEqual([JSON.stringify({ error: "overloaded" })]);
+    expect(loadConfig(configDir)).toEqual(stored);
   });
 });
