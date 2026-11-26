@@ -15,6 +15,7 @@ import type {
   SkillStat,
   ToolStat,
 } from "./shared.js";
+import { AMP_TOOL, collectAmp } from "./amp.js";
 import { collectAttribution } from "./attribution.js";
 import { collectContinue } from "./continue.js";
 import { collectCursor } from "./cursor.js";
@@ -176,6 +177,17 @@ export function repriceCcusageCost(
 }
 
 /**
+ * Strip ccusage's optional `[store] ` display prefix (e.g. `"[pi] gpt-6-astra"`
+ * → `"gpt-6-astra"`) so model names match pricing lookups and pass wire label
+ * sanitization instead of being pseudonymized as opaque hashes.
+ */
+export function normalizeCcusageModelName(raw: unknown): string {
+  if (typeof raw !== "string") return "unknown";
+  const cleaned = raw.trim().replace(/^\[[^\]]+\]\s+/, "").trim();
+  return cleaned || "unknown";
+}
+
+/**
  * Map one ccusage daily report (per-source `date` or aggregate `period`
  * variant) to leaderboard entries: one entry per day per model.
  */
@@ -212,7 +224,7 @@ export function mapCcusageDaily(
     }>;
     if (breakdowns.length > 0) {
       candidates = breakdowns.map((b) => ({
-        model: typeof b.modelName === "string" ? b.modelName : "unknown",
+        model: normalizeCcusageModelName(b.modelName),
         inputTokens: norm(b.inputTokens),
         outputTokens: norm(b.outputTokens),
         cacheCreationTokens: norm(b.cacheCreationTokens),
@@ -223,7 +235,7 @@ export function mapCcusageDaily(
       // Codex-style: per-model tokens with only a day-level cost.
       // Attribute the cost proportionally to each model's tokens.
       const partial = Object.entries(modelsMap).map(([model, m]) => ({
-        model,
+        model: normalizeCcusageModelName(model),
         inputTokens: norm(m.inputTokens),
         outputTokens: norm(m.outputTokens),
         cacheCreationTokens: norm(m.cacheCreationTokens),
@@ -255,7 +267,7 @@ export function mapCcusageDaily(
         : [];
       candidates = [
         {
-          model: modelsUsed.length === 1 ? modelsUsed[0] : "unknown",
+          model: modelsUsed.length === 1 ? normalizeCcusageModelName(modelsUsed[0]) : "unknown",
           inputTokens: norm(day.inputTokens),
           outputTokens: norm(day.outputTokens),
           cacheCreationTokens: norm(day.cacheCreationTokens),
@@ -720,9 +732,23 @@ export type ProgressFn = (done: number, total: number, label: string) => void;
  * Total number of collection stages: the ccusage sources, plus the fixed extra
  * ticking tasks — sessions, blocks, cursor, attribution (4), the native
  * non-ccusage readers cline, roo, continue, devin (VSCODE_AGENTS.length + 2),
- * the tokscale pass for agents nothing else reads (1), and Devin Cloud (1).
+ * the tokscale pass (1), Devin Cloud (1), and modern Amp CLI/Orbs (1).
  */
-export const COLLECT_STAGES = SOURCES.length + 4 + VSCODE_AGENTS.length + 2 + 1 + 1;
+export const COLLECT_STAGES = SOURCES.length + 4 + VSCODE_AGENTS.length + 2 + 1 + 1 + 1;
+
+/**
+ * Modern Amp stores both local threads and cloud Orbs server-side (`amp usage`),
+ * whereas `ccusage amp` only reads legacy `~/.local/share/amp/threads/*.json`.
+ * Prefer the Amp CLI/cache collector whenever it finds usage so the two stores
+ * never double-count; keep `ccusage amp` as fallback for legacy offline installs.
+ */
+export function selectAmpEntries(
+  ampCli: { found: boolean; entries: DailyUsageEntry[] },
+  ccusageAmpEntries: DailyUsageEntry[],
+): DailyUsageEntry[] {
+  if (ampCli.found && ampCli.entries.length > 0) return ampCli.entries;
+  return ccusageAmpEntries;
+}
 
 /**
  * Devin has two local stores: current per-session `log.jsonl` files (our native
@@ -924,6 +950,13 @@ export async function collectAll(
       tick();
       return r;
     });
+  // Modern Amp (local threads + cloud Orbs) via cached `amp usage --details`.
+  const ampTask = collectAmp({ offline: opts?.offline })
+    .catch(() => ({ entries: [] as DailyUsageEntry[], found: false }))
+    .then((r) => {
+      tick();
+      return r;
+    });
 
   const [
     sourceResults,
@@ -938,6 +971,7 @@ export async function collectAll(
     devinResult,
     tokscaleExtras,
     devinCloud,
+    ampResult,
   ] = await Promise.all([
     sourceTasks,
     sessionTask,
@@ -951,6 +985,7 @@ export async function collectAll(
     devinTask,
     tokscaleTask,
     devinCloudTask,
+    ampTask,
   ]);
 
   const native = { claude: nativeClaude, codex: nativeCodex };
@@ -985,7 +1020,10 @@ export async function collectAll(
   // Claude prefers native, Codex prefers replay-aware ccusage, and every other
   // source keeps ccusage's mapped entries (see selectSourceEntries).
   for (const { source, mapped } of sourceResults) {
-    const chosen = selectSourceEntries(source, fallbacks.get(source) ?? mapped, native);
+    const chosen =
+      source === AMP_TOOL
+        ? selectAmpEntries(ampResult, mapped)
+        : selectSourceEntries(source, fallbacks.get(source) ?? mapped, native);
     if (chosen.length > 0) {
       entries.push(...chosen);
       toolsFound.push(source);
