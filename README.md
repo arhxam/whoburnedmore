@@ -40,7 +40,8 @@ Usage is read only from logs and databases the agents keep **on this machine**.
 |---|---|
 | Claude Code | Native reader for `~/.claude/projects` and `~/.config/claude/projects` (or comma-separated `CLAUDE_CONFIG_DIR`) |
 | Codex CLI | ccusage's replay-aware reader for `sessions` and `archived_sessions` under `CODEX_HOME` (default `~/.codex`) |
-| Gemini CLI, GitHub Copilot CLI, OpenCode, Amp, Droid, Goose, Kimi, Qwen, Kilo, OpenClaw, Hermes, pi, Codebuff | [ccusage](https://github.com/ccusage/ccusage) |
+| Gemini CLI, GitHub Copilot CLI, OpenCode, Droid, Goose, Kimi, Qwen, Kilo, OpenClaw, Hermes, pi, Codebuff | [ccusage](https://github.com/ccusage/ccusage) |
+| Amp (local threads and cloud Orbs) | Your local Amp sign-in, used to run `amp usage --details` for your own per-day, per-model usage (finished days are cached locally, so a sync makes at most 8 of Amp's 60 hourly usage lookups; `--local` runs read only the cache). Older installs' `~/.local/share/amp/threads` via ccusage. Set `WHOBURNEDMORE_AMP=0` to turn it off |
 | Google Antigravity (desktop, CLI, IDE), Grok Build CLI, ZCode | ccusage |
 | Zed Agent, Kiro, Crush, Augment Code, Junie, Qoder, Mux, Mistral Vibe, CodeBuddy, WorkBuddy, Command Code, MiMo Code, Jcode, OpenCodeReview, Gajae-Code, Kimchi, Reasonix, Prime Agent, Freebuff, Fx, oh-my-pi, Senpi, Muse, Aside, Proma, bb | [tokscale](https://github.com/junhoyeo/tokscale), run `--offline` and restricted to agents nothing else here reads, so no day is counted twice |
 | Cursor | Your local Cursor sign-in, used to fetch your own usage events from Cursor's dashboard API (the session token goes only to Cursor, never to whoburnedmore) |
