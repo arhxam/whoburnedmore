@@ -26,8 +26,15 @@ export type { PriceRow } from "./pricing-data.generated.js";
 export interface ModelPrice {
   in: number;
   out: number;
+  /** Cache write at the default (5-minute) TTL. */
   cacheWrite: number;
   cacheRead: number;
+  /**
+   * Cache write at the 1-hour TTL (2x input on Anthropic, vs 1.25x for 5m).
+   * Claude Code writes almost all of its cache at the 1h TTL. Equals
+   * `cacheWrite` when the table carries no separate 1h rate.
+   */
+  cacheWrite1h: number;
 }
 
 export interface PricingTokenCounts {
@@ -35,7 +42,20 @@ export interface PricingTokenCounts {
   outputTokens: number;
   cacheCreationTokens: number;
   cacheReadTokens: number;
+  /**
+   * The part of `cacheCreationTokens` written at the 1-hour TTL (Anthropic's
+   * `usage.cache_creation.ephemeral_1h_input_tokens`). Optional: when absent,
+   * every cache write is priced at the 5-minute rate.
+   */
+  cacheCreation1hTokens?: number;
 }
+
+/**
+ * Highest blended USD per 1M tokens the API accepts on one uploaded row; a
+ * single row above it rejects the WHOLE upload. Shared so the CLI can keep
+ * its rows under the same line the server enforces.
+ */
+export const MAX_USD_PER_MTOK = 200;
 
 /** The raw LiteLLM pricing JSON that ccusage also consumes. */
 export const LITELLM_PRICING_URL =
@@ -144,8 +164,12 @@ export function litellmToTable(raw: unknown): Record<string, PriceRow> {
     if (input === 0 && output === 0) continue;
     const cacheWrite = perM(m.cache_creation_input_token_cost) || input;
     const cacheRead = perM(m.cache_read_input_token_cost);
+    const cacheWrite1h = perM(m.cache_creation_input_token_cost_above_1hr);
     const k = normalizeModelKey(key);
-    const row: PriceRow = [input, output, cacheWrite, cacheRead];
+    const row: PriceRow =
+      cacheWrite1h > 0
+        ? [input, output, cacheWrite, cacheRead, cacheWrite1h]
+        : [input, output, cacheWrite, cacheRead];
     const next = { rank: providerRank(m.litellm_provider), canonical: key === k };
 
     const cur = meta.get(k);
@@ -163,11 +187,17 @@ export function litellmToTable(raw: unknown): Record<string, PriceRow> {
         row[2] = out[k][2];
         row[3] = out[k][3];
       }
+      if (sameListPrice && row[4] === undefined && out[k][4] !== undefined) {
+        row[4] = out[k][4];
+      }
       meta.set(k, next);
       out[k] = row;
-    } else if (sameListPrice && out[k][3] === 0 && cacheRead > 0) {
-      out[k][2] = cacheWrite;
-      out[k][3] = cacheRead;
+    } else if (sameListPrice) {
+      if (out[k][3] === 0 && cacheRead > 0) {
+        out[k][2] = cacheWrite;
+        out[k][3] = cacheRead;
+      }
+      if (out[k][4] === undefined && cacheWrite1h > 0) out[k][4] = cacheWrite1h;
     }
   }
   return out;
@@ -207,11 +237,26 @@ function lookup(key: string): PriceRow | undefined {
  * Memoized per raw model string (cleared when live pricing changes).
  */
 export function resolveModelPrice(model: string): ModelPrice | null {
-  const hit = resolveCache.get(model);
+  return resolveCached(model, false);
+}
+
+/**
+ * Like `resolveModelPrice`, but only from the price TABLE (exact id, date
+ * suffix, or tail-trimmed variant) — never the family-tier guess. Use this
+ * where a price is going to override a number someone else computed: a guess
+ * must never raise a recorded cost.
+ */
+export function resolveModelPriceStrict(model: string): ModelPrice | null {
+  return resolveCached(model, true);
+}
+
+function resolveCached(model: string, strict: boolean): ModelPrice | null {
+  const cacheKey = strict ? `\u0000strict\u0000${model}` : model;
+  const hit = resolveCache.get(cacheKey);
   if (hit !== undefined) return hit;
-  const resolved = resolveModelPriceUncached(model);
+  const resolved = resolveModelPriceUncached(model, strict);
   if (resolveCache.size >= RESOLVE_CACHE_MAX) resolveCache.clear();
-  resolveCache.set(model, resolved);
+  resolveCache.set(cacheKey, resolved);
   return resolved;
 }
 
@@ -235,7 +280,7 @@ function lookupExact(model: string): PriceRow | undefined {
   return undefined;
 }
 
-function resolveModelPriceUncached(model: string): ModelPrice | null {
+function resolveModelPriceUncached(model: string, strict: boolean): ModelPrice | null {
   const { dateless } = exactCandidates(model);
   let row: PriceRow | undefined = lookupExact(model);
   if (!row) {
@@ -253,22 +298,72 @@ function resolveModelPriceUncached(model: string): ModelPrice | null {
       row = lookup(base);
     }
   }
-  if (!row) row = FALLBACK_TIERS.find((t) => t.match.test(model))?.row;
+  if (!row && !strict) row = FALLBACK_TIERS.find((t) => t.match.test(model))?.row;
   if (!row) return null;
-  return { in: row[0], out: row[1], cacheWrite: row[2], cacheRead: row[3] };
+  const cacheWrite1h = Number(row[4]) > 0 ? Number(row[4]) : row[2];
+  return { in: row[0], out: row[1], cacheWrite: row[2], cacheRead: row[3], cacheWrite1h };
+}
+
+function priceTokens(p: ModelPrice, t: PricingTokenCounts): number {
+  const cacheWrite = Math.max(0, t.cacheCreationTokens);
+  const write1h = Math.min(cacheWrite, Math.max(0, Number(t.cacheCreation1hTokens) || 0));
+  const usd =
+    (t.inputTokens * p.in +
+      t.outputTokens * p.out +
+      (cacheWrite - write1h) * p.cacheWrite +
+      write1h * p.cacheWrite1h +
+      t.cacheReadTokens * p.cacheRead) /
+    1_000_000;
+  return usd > 0 ? Math.round(usd * 1e6) / 1e6 : 0;
 }
 
 /** Estimate USD cost for a model + token counts. Unknown models → 0. */
 export function estimateCostUSD(model: string, t: PricingTokenCounts): number {
   const p = resolveModelPrice(model);
-  if (!p) return 0;
-  const usd =
-    (t.inputTokens * p.in +
-      t.outputTokens * p.out +
-      t.cacheCreationTokens * p.cacheWrite +
-      t.cacheReadTokens * p.cacheRead) /
-    1_000_000;
-  return usd > 0 ? Math.round(usd * 1e6) / 1e6 : 0;
+  return p ? priceTokens(p, t) : 0;
+}
+
+/**
+ * List-price cost from the price TABLE only (no family guess), or null when
+ * the table doesn't know the model. See `resolveModelPriceStrict`.
+ */
+export function tableCostUSD(model: string, t: PricingTokenCounts): number | null {
+  const p = resolveModelPriceStrict(model);
+  return p ? priceTokens(p, t) : null;
+}
+
+/**
+ * Tools whose cost is, by construction, token counts × a public price table
+ * (Claude Code, Codex): nothing they run is cheaper than list price. For
+ * these, a recorded cost BELOW the table's list price is a pricing failure —
+ * an old CLI or ccusage bundle that predates the model ($0), or a day cost
+ * split across models by token share — never a real discount. Tools that
+ * record the vendor's actual charge (OpenCode, Cursor, Amp...) can be
+ * legitimately free or discounted and are excluded.
+ */
+export const LIST_PRICE_TOOLS: ReadonlySet<string> = new Set(["claude", "codex"]);
+
+/**
+ * Raise a list-price tool's recorded cost to at least the table's list price
+ * for its tokens. A HIGHER recorded cost is kept: per-request premiums the
+ * daily totals can't reproduce (long-context tiers, priority/fast mode) only
+ * ever add. Unknown models, guessed (family-tier) prices and other tools pass
+ * through unchanged. The result never exceeds the server's $/token ceiling.
+ */
+export function floorCostAtListPrice(
+  tool: string,
+  model: string,
+  t: PricingTokenCounts,
+  recordedCostUSD: number,
+): number {
+  const recorded = Number.isFinite(recordedCostUSD) && recordedCostUSD > 0 ? recordedCostUSD : 0;
+  if (!LIST_PRICE_TOOLS.has(tool)) return recorded;
+  const table = tableCostUSD(model, t);
+  if (table === null || table <= recorded) return recorded;
+  const tokens = t.inputTokens + t.outputTokens + t.cacheCreationTokens + t.cacheReadTokens;
+  // Stay a hair under the server's ceiling so rounding can never cross it.
+  const ceiling = (tokens * MAX_USD_PER_MTOK * 0.99) / 1_000_000;
+  return Math.max(recorded, Math.min(table, ceiling));
 }
 
 /**

@@ -592,7 +592,9 @@ describe("mapCcusageDaily", () => {
     expect(opencode[0].costUSD).toBe(0);
   });
 
-  it("does not replace a nonzero ccusage cost with an estimate", () => {
+  it("raises a Codex cost below the table's list price to list price", () => {
+    // ccusage's bundled price list predates a model or splits a day across
+    // models by tokens: $0.50 for 1M gpt-5.3-codex input is under its $1.75/M.
     const entries = mapCcusageDaily("codex", {
       daily: [
         {
@@ -602,7 +604,77 @@ describe("mapCcusageDaily", () => {
         },
       ],
     });
-    expect(entries[0].costUSD).toBeCloseTo(0.5, 6);
+    expect(entries[0].costUSD).toBeCloseTo(1.75, 6);
+  });
+
+  it("keeps a Codex cost above list price (per-request long-context premiums)", () => {
+    const entries = mapCcusageDaily("codex", {
+      daily: [
+        {
+          date: "2026-02-05",
+          costUSD: 3.5,
+          models: { "gpt-5.3-codex": { inputTokens: 1_000_000, outputTokens: 0 } },
+        },
+      ],
+    });
+    expect(entries[0].costUSD).toBeCloseTo(3.5, 6);
+  });
+
+  it("splits a mixed Codex day by each model's price, not its token count", () => {
+    // gpt-5.5 lists at $5/M input, gpt-5-mini at $0.25/M. Equal tokens, so a
+    // token split would hand the mini half of the day's dollars.
+    const entries = mapCcusageDaily("codex", {
+      daily: [
+        {
+          date: "2026-02-06",
+          costUSD: 5.25,
+          models: {
+            "gpt-5.5": { inputTokens: 1_000_000, outputTokens: 0 },
+            "gpt-5-mini": { inputTokens: 1_000_000, outputTokens: 0 },
+          },
+        },
+      ],
+    });
+    const big = entries.find((e) => e.model === "gpt-5.5")!;
+    const mini = entries.find((e) => e.model === "gpt-5-mini")!;
+    expect(big.costUSD).toBeCloseTo(5, 6);
+    expect(mini.costUSD).toBeCloseTo(0.25, 6);
+  });
+
+  it("prices a model ccusage's bundle didn't know instead of leaving it at a token share", () => {
+    // ccusage priced only gpt-5-mini ($0.25); gpt-5.5 came back at $0 inside
+    // the day total. The old token split gave each model $0.125.
+    const entries = mapCcusageDaily("codex", {
+      daily: [
+        {
+          date: "2026-02-07",
+          costUSD: 0.25,
+          models: {
+            "gpt-5.5": { inputTokens: 1_000_000, outputTokens: 0 },
+            "gpt-5-mini": { inputTokens: 1_000_000, outputTokens: 0 },
+          },
+        },
+      ],
+    });
+    expect(entries.find((e) => e.model === "gpt-5.5")!.costUSD).toBeCloseTo(5, 6);
+    expect(entries.find((e) => e.model === "gpt-5-mini")!.costUSD).toBeCloseTo(0.25, 6);
+  });
+
+  it("scales list prices by the day's premium when ccusage priced the day higher", () => {
+    const entries = mapCcusageDaily("codex", {
+      daily: [
+        {
+          date: "2026-02-08",
+          costUSD: 10.5, // 2x list (e.g. every request above the 272k tier)
+          models: {
+            "gpt-5.5": { inputTokens: 1_000_000, outputTokens: 0 },
+            "gpt-5-mini": { inputTokens: 1_000_000, outputTokens: 0 },
+          },
+        },
+      ],
+    });
+    expect(entries.find((e) => e.model === "gpt-5.5")!.costUSD).toBeCloseTo(10, 6);
+    expect(entries.find((e) => e.model === "gpt-5-mini")!.costUSD).toBeCloseTo(0.5, 6);
   });
 
   it("splits day-level cost across the models map proportionally to tokens", () => {

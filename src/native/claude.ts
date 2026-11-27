@@ -51,6 +51,13 @@ export interface ParsedRequest {
   outputTokens: number;
   cacheCreationTokens: number;
   cacheReadTokens: number;
+  /**
+   * The part of `cacheCreationTokens` written at the 1-hour cache TTL
+   * (`usage.cache_creation.ephemeral_1h_input_tokens`). Claude Code writes
+   * nearly all of its cache at 1h, which bills at 2x input instead of the
+   * 5-minute TTL's 1.25x, so pricing every write at the 5m rate under-counts.
+   */
+  cacheCreation1hTokens: number;
 }
 
 function num(n: unknown): number {
@@ -125,7 +132,16 @@ export function parseClaudeLine(raw: string): ParsedRequest | null {
     outputTokens: num(usage.output_tokens),
     cacheCreationTokens: num(usage.cache_creation_input_tokens),
     cacheReadTokens: num(usage.cache_read_input_tokens),
+    cacheCreation1hTokens: oneHourCacheWrites(usage),
   };
+}
+
+/** 1h-TTL cache writes from `usage.cache_creation`, never above the total. */
+function oneHourCacheWrites(usage: Record<string, unknown>): number {
+  const total = num(usage.cache_creation_input_tokens);
+  const breakdown = usage.cache_creation as Record<string, unknown> | undefined;
+  if (!breakdown || typeof breakdown !== "object") return 0;
+  return Math.min(total, num(breakdown.ephemeral_1h_input_tokens));
 }
 
 /** The running dedup state: the maximal-token request per (message.id,requestId). */
@@ -180,6 +196,7 @@ export function finalizeClaudeEntries(acc: ClaudeAccumulator): DailyUsageEntry[]
     outputTokens: number;
     cacheCreationTokens: number;
     cacheReadTokens: number;
+    cacheCreation1hTokens: number;
     requestCount: number;
   }
   const byDayModel = new Map<string, Bucket>();
@@ -194,6 +211,7 @@ export function finalizeClaudeEntries(acc: ClaudeAccumulator): DailyUsageEntry[]
         outputTokens: 0,
         cacheCreationTokens: 0,
         cacheReadTokens: 0,
+        cacheCreation1hTokens: 0,
         requestCount: 0,
       };
       byDayModel.set(k, b);
@@ -202,6 +220,7 @@ export function finalizeClaudeEntries(acc: ClaudeAccumulator): DailyUsageEntry[]
     b.outputTokens += r.outputTokens;
     b.cacheCreationTokens += r.cacheCreationTokens;
     b.cacheReadTokens += r.cacheReadTokens;
+    b.cacheCreation1hTokens += r.cacheCreation1hTokens;
     // Only real provider ids count toward the fingerprint — a synthetic-keyed
     // line (no ids) is NOT evidence of a real request.
     if (r.hasRealId) b.requestCount += 1;
@@ -220,6 +239,9 @@ export function finalizeClaudeEntries(acc: ClaudeAccumulator): DailyUsageEntry[]
       outputTokens: b.outputTokens,
       cacheCreationTokens: b.cacheCreationTokens,
       cacheReadTokens: b.cacheReadTokens,
+      ...(b.cacheCreation1hTokens > 0
+        ? { cacheCreation1hTokens: b.cacheCreation1hTokens }
+        : {}),
       costUSD: estimateCostUSD(b.model, b),
       origin: "cli",
       verified: false,
@@ -308,13 +330,15 @@ export interface NativeCollectResult {
 export const NATIVE_READ_BUDGET_MS = 45_000;
 
 /** Bump when parse/dedup semantics change — invalidates the per-file cache. */
-export const CLAUDE_CACHE_VERSION = 3;
+// v4: rows carry the 1h-TTL cache-write count (priced at the 1h rate).
+export const CLAUDE_CACHE_VERSION = 4;
 
 /**
  * Compact per-file cache row: [key, hasRealId, date, model, in, out, cacheCreate,
- * cacheRead]. Tuples (not objects) keep the on-disk cache several times smaller.
+ * cacheRead, cacheCreate1h]. Tuples (not objects) keep the on-disk cache several
+ * times smaller.
  */
-type CachedRequest = [string, 0 | 1, string, string, number, number, number, number];
+type CachedRequest = [string, 0 | 1, string, string, number, number, number, number, number?];
 
 function toCached(r: ParsedRequest): CachedRequest {
   return [
@@ -326,6 +350,7 @@ function toCached(r: ParsedRequest): CachedRequest {
     r.outputTokens,
     r.cacheCreationTokens,
     r.cacheReadTokens,
+    r.cacheCreation1hTokens,
   ];
 }
 
@@ -340,6 +365,7 @@ function fromCached(t: CachedRequest): ParsedRequest {
     outputTokens: t[5],
     cacheCreationTokens: t[6],
     cacheReadTokens: t[7],
+    cacheCreation1hTokens: Math.min(t[6], Number(t[8]) || 0),
   };
 }
 
