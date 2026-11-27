@@ -810,13 +810,14 @@ export function selectAmpEntries(
 }
 
 /**
- * Devin has two local stores: current per-session `log.jsonl` files (our native
- * reader) and the legacy `sessions.db` (tokscale). The same session can exist
- * in both after an upgrade, and the two can't be de-duplicated against each
- * other here, so exactly ONE store is used: the native reader whenever it finds
- * any session log — even if it timed out, because then sending nothing keeps
- * the server's last good day rather than overwriting it with a legacy-only
- * undercount — and tokscale's legacy rows only on machines with no session logs.
+ * Devin has two local stores: the default `sessions.db` (SQLite, read by
+ * tokscale) and the opt-in `session_store: "files"` per-session `log.jsonl`
+ * files (our native reader). Switching to files imports the SQLite sessions,
+ * so the same session can exist in both, and the two can't be de-duplicated
+ * against each other here. Exactly ONE store is used: the native reader
+ * whenever it finds any session log — even if it timed out, because then
+ * sending nothing keeps the server's last good day rather than overwriting it
+ * with an undercount — and tokscale's SQLite rows on machines with no logs.
  */
 export function selectDevinEntries(
   native: Pick<NativeCollectResult, "found" | "timedOut" | "entries">,

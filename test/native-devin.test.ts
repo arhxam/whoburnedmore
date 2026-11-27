@@ -160,6 +160,15 @@ describe("devinCliRoots", () => {
     expect(devinCliRoots({ HOME: "/h" })).toContain(join("/h", ".local", "share", "devin", "cli"));
     expect(devinCliRoots({ HOME: "/h", XDG_DATA_HOME: "/x" })).toContain(join("/x", "devin", "cli"));
   });
+
+  it("uses only DEVIN_SESSIONS_DIR/cli when the override is set", () => {
+    expect(devinCliRoots({ HOME: "/h", XDG_DATA_HOME: "/x", DEVIN_SESSIONS_DIR: "/net/devin" })).toEqual([
+      join("/net/devin", "cli"),
+    ]);
+    expect(devinCliRoots({ HOME: "/h", DEVIN_SESSIONS_DIR: "  " })).toContain(
+      join("/h", ".local", "share", "devin", "cli"),
+    );
+  });
 });
 
 describe("collectDevinNative", () => {

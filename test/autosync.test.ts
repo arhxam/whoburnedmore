@@ -138,9 +138,11 @@ describe("syncEnv (identity/endpoint env propagation)", () => {
         WHOBURNEDMORE_CONFIG_DIR: "/home/u/.wbm",
         WHOBURNEDMORE_API: "https://api.example.com",
         CLAUDE_CONFIG_DIR: "/home/u/.claude-alt",
+        DEVIN_SESSIONS_DIR: "/net/devin",
       },
     });
     const map = Object.fromEntries(pairs);
+    expect(map.DEVIN_SESSIONS_DIR).toBe("/net/devin");
     expect(map.WHOBURNEDMORE_CONFIG_DIR).toBe("/home/u/.wbm");
     expect(map.WHOBURNEDMORE_API).toBe("https://api.example.com");
     expect(map.CLAUDE_CONFIG_DIR).toBe("/home/u/.claude-alt");

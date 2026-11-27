@@ -2,17 +2,30 @@
  * Native reader for Devin (Cognition) — the CLI and the desktop app's local
  * sessions.
  *
- * Current Devin builds keep one directory per session under the CLI root:
- * `<cli_root>/sessions/<session-id>/{meta.json, log.jsonl}`. `log.jsonl` is an
- * append-only event stream; `kind:"node"` records carry chat nodes, and an
- * assistant node's `message.metadata` holds the request's exact usage:
+ * Devin keeps local sessions in one of two stores, chosen by `session_store` in
+ * `~/.config/devin/config.json` (verified against Devin CLI 3000.15.14 by
+ * driving the real binary, 2026-11-28):
  *
- *   { "kind":"node", "at":1793846478, "node": { "id":12, "message": {
- *       "role":"assistant", "metadata": { "request_id":"…",
- *       "generation_model":"claude-opus-5-5-medium",
- *       "created_at":"2026-11-05T02:41:18Z",
- *       "metrics": { "input_tokens":355, "output_tokens":229,
- *                    "cache_read_tokens":13933, "cache_creation_tokens":11563 } } } } }
+ *  - `"sqlite"` (the default): `<cli_root>/sessions.db`, table `message_nodes`
+ *    (one JSON `chat_message` per row). Read through tokscale (collect.ts),
+ *    which de-duplicates repeated request ids and is repriced by our table.
+ *  - `"files"`: one directory per session, `<cli_root>/sessions/<id>/
+ *    {meta.json, log.jsonl, window_tools.json}`. Read here. Switching to files
+ *    imports the SQLite sessions into this store, so the two never need merging.
+ *
+ * `<cli_root>` is `$DEVIN_SESSIONS_DIR/cli` when that override is set, else
+ * `$XDG_DATA_HOME/devin/cli` (default `~/.local/share/devin/cli`, macOS too).
+ *
+ * `log.jsonl` is an append-only event stream; `kind:"node"` records carry chat
+ * nodes, and an assistant node's `message.metadata` holds the request's exact
+ * usage (the same JSON the SQLite store keeps in `chat_message`):
+ *
+ *   { "kind":"node", "at":1793846478, "node": { "id":12, "parent_id":11,
+ *     "metadata":{…}, "message": { "message_id":"…", "role":"assistant",
+ *       "metadata": { "request_id":"…", "generation_model":"claude-opus-5-5-medium",
+ *         "created_at":"2026-11-05T02:41:18Z",
+ *         "metrics": { "input_tokens":355, "output_tokens":229,
+ *                      "cache_read_tokens":13933, "cache_creation_tokens":11563 } } } } }
  *
  * `input_tokens` excludes cache reads/writes (they sum to
  * `context_input_tokens`), matching our schema directly. Devin Desktop runs its
@@ -22,15 +35,10 @@
  * Two duplication traps, both handled per file (one file = one session):
  *  - the same `node.id` is re-appended as the node updates → the LAST record
  *    for an id wins;
- *  - distinct node ids can repeat one API request → each `request_id` counts
- *    once (node id is the key only when a record has no request id).
- *
- * Older Devin builds used a single `sessions.db` SQLite database instead; that
- * legacy store is read through tokscale (see collect.ts — it is only used when
- * this reader finds no session logs, so the two stores never double count).
- *
- * Format verified against tokscale's parser (crates/tokscale-core/src/sessions/
- * devin.rs, PR #1651) and the field report in tokscale issue #1625.
+ *  - Devin copies whole message chains under NEW node ids when the system
+ *    prefix changes (`compact/prior_node_ids`), so distinct node ids repeat one
+ *    API request → each `request_id` counts once (node id is the key only when a
+ *    record has no request id).
  */
 import { lstat, readdir } from "node:fs/promises";
 import { homedir, platform } from "node:os";
@@ -197,8 +205,15 @@ export function parseDevinSessionLog(content: string, now: number = Date.now()):
   return aggregateDevinSession(records);
 }
 
-/** Devin CLI roots for this user (any may be missing). */
+/**
+ * Devin CLI roots for this user (any may be missing). `DEVIN_SESSIONS_DIR`
+ * replaces the data root outright (Devin then writes `<dir>/cli/…` and nothing
+ * under the default), so it is the only root when set — the same sessions
+ * Devin itself sees. autosync forwards it to the background job.
+ */
 export function devinCliRoots(env: NodeJS.ProcessEnv = process.env): string[] {
+  const override = env.DEVIN_SESSIONS_DIR?.trim();
+  if (override) return [join(override, "cli")];
   const home = env.HOME || env.USERPROFILE || homedir();
   const roots = [
     join(env.XDG_DATA_HOME?.trim() || join(home, ".local", "share"), "devin", "cli"),

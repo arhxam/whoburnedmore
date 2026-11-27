@@ -114,6 +114,7 @@ const FORWARDED_ENV_VARS = [
   "WHOBURNEDMORE_WEB", // dashboard URL shown to the user
   "XDG_CONFIG_HOME", // base for the default config dir
   "CLAUDE_CONFIG_DIR", // a primary usage-collection source
+  "DEVIN_SESSIONS_DIR", // Devin's data root override (native/devin.ts)
   // Usage is bucketed by local calendar day and the native parse caches record
   // the zone: a shell TZ that differs from the system zone must reach the
   // background job too, or the two runs bucket differently and keep

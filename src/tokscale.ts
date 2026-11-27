@@ -23,9 +23,9 @@ const execFileAsync = promisify(execFile);
  * tokscale's local Cursor cache (populated only if the user ran `tokscale cursor
  * sync` themselves) is read through the same graph call.
  *
- * Devin is special: its current per-session logs are read natively
- * (native/devin.ts); tokscale's devin clients only cover the legacy
- * `sessions.db` store, and collect.ts uses them only when no session logs exist.
+ * Devin is special: its default store, `sessions.db`, is read here, while its
+ * opt-in per-session `log.jsonl` store is read natively (native/devin.ts);
+ * collect.ts uses tokscale's devin rows only when no session logs exist.
  *
  * Always run with `--offline`: local data + cached pricing, no network request.
  */
