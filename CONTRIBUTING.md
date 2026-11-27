@@ -23,10 +23,16 @@ Use `--dry-run` or `--local` while developing. Point a test run at your own serv
 
 ## How the CLI handles data
 
-The CLI reads local agent logs and, on a normal run, **uploads daily aggregate numbers**
-(date, tool, model, token counts, estimated cost, plus optional per-session and per-tool
-rollups) to whoburnedmore.com. It never uploads prompts, code, file contents or file paths.
-`--local` makes no network calls at all. See the [README](./README.md) for the full list.
+Normal runs and background sync upload daily usage totals and optional time-window,
+tool/skill and main-agent/subagent aggregates, along with sync metadata. Per-session
+rollups and project names stay local. Opt-in verification (`verify`, also offered after
+some interactive syncs) instead sends a bounded Claude Code per-request breakdown with
+timestamps, token counts and hashed request identifiers. Neither flow uploads prompts,
+code, file contents or file paths.
+
+`--dry-run` previews the normal usage payload without submitting it. `--local` collects
+and renders offline; decline its optional publish prompt to keep it offline. See
+[SECURITY.md](./SECURITY.md#what-leaves-your-machine) for the fields and source links.
 
 ## Ground rules
 
