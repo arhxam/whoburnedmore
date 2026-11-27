@@ -33,10 +33,8 @@ import { collectTokscaleExtras } from "./tokscale.js";
 import { loadLivePricing } from "./pricing-live.js";
 import { estimateCostUSD, resolveModelPrice } from "./pricing.js";
 import {
-  loadProvenanceStore,
   provenanceStorePath,
-  reconcileProvenance,
-  saveProvenanceStore,
+  reconcileAndSaveProvenance,
 } from "./provenance-store.js";
 import {
   sanitizeAgentStat,
@@ -1078,14 +1076,13 @@ export async function collectAll(
     devinResult,
   );
   const storePath = provenanceStorePath();
-  const reconciled = reconcileProvenance(
+  const reconciled = await reconcileAndSaveProvenance(
+    storePath,
     dedupeDaily(boundaryEntries),
     boundaryAgent,
     scanComplete,
-    loadProvenanceStore(storePath),
   );
   const reconciledEntries = sanitizeDailyEntries(reconciled.entries);
-  saveProvenanceStore(storePath, reconciled.store);
 
   const cappedEntries = capByTokens(reconciledEntries, 20000, entryTokens);
   // A capped payload is not a full Codex scope. Never pair it with destructive

@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -54,6 +54,18 @@ afterEach(async () => {
 });
 
 describe("collectAll resilience", () => {
+  it("does not persist a provenance snapshot while another transaction owns the store", async () => {
+    const config = join(root, "cfg");
+    const path = join(config, "native-cache-provenance.json");
+    await mkdir(`${path}.lock`, { recursive: true });
+    await writeFile(join(`${path}.lock`, `${process.pid}.${"a".repeat(32)}`), "");
+    const original = JSON.stringify({ v: 1, req: {} });
+    await writeFile(path, original);
+    const result = await collectAll(undefined, { offline: true });
+    expect(result.entries.some((e) => e.tool === "claude" && e.requestCount === 1)).toBe(true);
+    expect(await readFile(path, "utf8")).toBe(original);
+  }, 60_000);
+
   it("still returns other tools' usage when an optional reader throws", async () => {
     const result = await collectAll(undefined, { offline: true });
     expect(result.toolsFound).toContain("claude");
