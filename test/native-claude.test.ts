@@ -278,3 +278,54 @@ describe("resolveClaudeProjectDirs", () => {
     expect(dirs).toEqual([join("/a/one", "projects"), join("/b/two", "projects")]);
   });
 });
+
+describe("1-hour cache writes", () => {
+  const line = (oneHour: number | undefined, msgId: string) =>
+    JSON.stringify({
+      type: "assistant",
+      timestamp: "2026-06-10T12:00:00.000Z",
+      requestId: `req_${msgId}`,
+      message: {
+        role: "assistant",
+        id: msgId,
+        model: "claude-opus-4-8",
+        usage: {
+          input_tokens: 0,
+          output_tokens: 0,
+          cache_creation_input_tokens: 1_000_000,
+          cache_read_input_tokens: 0,
+          ...(oneHour === undefined
+            ? {}
+            : {
+                cache_creation: {
+                  ephemeral_5m_input_tokens: 1_000_000 - oneHour,
+                  ephemeral_1h_input_tokens: oneHour,
+                },
+              }),
+        },
+      },
+    });
+
+  it("reads usage.cache_creation.ephemeral_1h_input_tokens (clamped to total writes)", () => {
+    expect(parseClaudeLine(line(600_000, "m1"))?.cacheCreation1hTokens).toBe(600_000);
+    expect(parseClaudeLine(line(undefined, "m2"))?.cacheCreation1hTokens).toBe(0);
+    expect(parseClaudeLine(line(9_000_000, "m3"))?.cacheCreation1hTokens).toBe(1_000_000);
+  });
+
+  it("prices 1h writes at the 1h rate (2x input) and 5m writes at 1.25x", () => {
+    // Opus 4.8: input $5/M → 5m write $6.25/M, 1h write $10/M.
+    const [all1h] = aggregateClaudeLines([line(1_000_000, "a")]);
+    expect(all1h.cacheCreation1hTokens).toBe(1_000_000);
+    expect(all1h.costUSD).toBeCloseTo(10, 6);
+    const [all5m] = aggregateClaudeLines([line(0, "b")]);
+    expect(all5m).not.toHaveProperty("cacheCreation1hTokens");
+    expect(all5m.costUSD).toBeCloseTo(6.25, 6);
+  });
+
+  it("sums the 1h share across a day's requests", () => {
+    const [day] = aggregateClaudeLines([line(1_000_000, "c"), line(0, "d")]);
+    expect(day.cacheCreationTokens).toBe(2_000_000);
+    expect(day.cacheCreation1hTokens).toBe(1_000_000);
+    expect(day.costUSD).toBeCloseTo(16.25, 6);
+  });
+});

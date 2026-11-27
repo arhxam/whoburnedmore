@@ -14,7 +14,7 @@ describe("local-to-cloud semantic boundary", () => {
     outputTokens: 5,
     cacheCreationTokens: 0,
     cacheReadTokens: 0,
-    costUSD: 0.1,
+    costUSD: 0.000175,
     origin: "cli" as const,
     verified: false,
   };
@@ -47,5 +47,32 @@ describe("local-to-cloud semantic boundary", () => {
     expect(sanitizeSkillStats([{ name: "release-check", count: 1 }])).toEqual([
       { name: "release-check", count: 1 },
     ]);
+  });
+
+  it("clamps a vendor charge above the server's $/token ceiling instead of sinking the upload", () => {
+    const [row] = sanitizeDailyEntries([
+      { ...base, tool: "cursor", inputTokens: 300, outputTokens: 0, costUSD: 5 },
+    ]);
+    // 300 tokens × $200/M × 0.99 = $0.0594
+    expect(row.costUSD).toBeCloseTo(0.0594, 9);
+    expect(row.costUSD).toBeLessThan((300 * 200) / 1e6);
+  });
+
+  it("drops a cost-only row with no tokens (the server rejects the whole upload for it)", () => {
+    expect(
+      sanitizeDailyEntries([
+        base,
+        { ...base, model: "gpt-5.5", inputTokens: 0, outputTokens: 0, costUSD: 0.04 },
+      ]),
+    ).toEqual([base]);
+  });
+
+  it("keeps the 1h cache-write count, never above total cache writes", () => {
+    const [row] = sanitizeDailyEntries([
+      { ...base, cacheCreationTokens: 100, cacheCreation1hTokens: 250 },
+    ]);
+    expect(row.cacheCreation1hTokens).toBe(100);
+    const [none] = sanitizeDailyEntries([{ ...base, cacheCreation1hTokens: 0 }]);
+    expect(none).not.toHaveProperty("cacheCreation1hTokens");
   });
 });

@@ -31,7 +31,12 @@ import { plausibleUsageDate } from "./native/usage-date.js";
 import { collectVscodeAgent, VSCODE_AGENTS } from "./native/vscode-agents.js";
 import { collectTokscaleExtras } from "./tokscale.js";
 import { loadLivePricing } from "./pricing-live.js";
-import { estimateCostUSD, resolveModelPrice } from "./pricing.js";
+import {
+  estimateCostUSD,
+  floorCostAtListPrice,
+  resolveModelPrice,
+  tableCostUSD,
+} from "./pricing.js";
 import {
   loadProvenanceStore,
   provenanceStorePath,
@@ -155,11 +160,14 @@ function normCost(n: unknown): number {
 const PRICE_TABLE_COST_SOURCES: ReadonlySet<string> = new Set(["claude", "codex"]);
 
 /**
- * Fill a $0 ccusage cost from the CLI's freshly loaded price table. ccusage
+ * Correct a ccusage cost with the CLI's freshly loaded price table. ccusage
  * runs `--offline` with the price list bundled in its release, so a model newer
- * than that bundle comes back as $0. Only price-table sources (Claude, Codex)
- * are filled; a positive cost is always kept, matching CLI 0.9.25 so the same
- * day prices identically whichever version synced it.
+ * than that bundle comes back as $0 (or, inside a mixed Codex day, as a token-
+ * share of the other models' cost). For price-table sources (Claude, Codex)
+ * the cost is raised to at least the table's list price for the tokens; a
+ * HIGHER ccusage cost is kept, because ccusage prices each request and can
+ * apply long-context premiums a daily total can't. Other sources keep their
+ * recorded cost (it may be the provider's real, possibly free, charge).
  */
 export function repriceCcusageCost(
   tool: string,
@@ -167,12 +175,14 @@ export function repriceCcusageCost(
   tokens: PricingTokenCounts,
   ccusageCostUSD: number,
 ): number {
-  if (ccusageCostUSD > 0) return ccusageCostUSD;
   const known = model.length > 0 && model !== "unknown";
-  if (known && PRICE_TABLE_COST_SOURCES.has(tool) && resolveModelPrice(model)) {
-    return estimateCostUSD(model, tokens);
+  if (!known || !PRICE_TABLE_COST_SOURCES.has(tool)) {
+    return ccusageCostUSD > 0 ? ccusageCostUSD : 0;
   }
-  return 0;
+  const floored = floorCostAtListPrice(tool, model, tokens, ccusageCostUSD);
+  if (floored > 0) return floored;
+  // Not in the table: keep the old family-tier estimate for a $0 cost.
+  return resolveModelPrice(model) ? estimateCostUSD(model, tokens) : 0;
 }
 
 /**
@@ -184,6 +194,59 @@ export function normalizeCcusageModelName(raw: unknown): string {
   if (typeof raw !== "string") return "unknown";
   const cleaned = raw.trim().replace(/^\[[^\]]+\]\s+/, "").trim();
   return cleaned || "unknown";
+}
+
+/**
+ * Split a day-level cost (Codex: ccusage reports per-model tokens but only a
+ * day total) across models by what each model's tokens COST, not by token
+ * count. A token-count split hands a cheap model the expensive model's dollars
+ * (gpt-*-luna came out ~5x over list price, gpt-*-astra ~4x under).
+ *
+ * Models the price table knows get their list price scaled by the day's
+ * premium (cost ÷ Σ list price, when ccusage's per-request tiers made the day
+ * dearer); models it doesn't know share the remainder by tokens. When the
+ * table knows nothing, this is the old token split.
+ */
+export function splitDayCostByPrice<
+  T extends {
+    model: string;
+    inputTokens: number;
+    outputTokens: number;
+    cacheCreationTokens: number;
+    cacheReadTokens: number;
+  },
+>(parts: T[], dayCost: number, tokenSum: number): Array<T & { costUSD: number }> {
+  const tokensOf = (c: T) =>
+    c.inputTokens + c.outputTokens + c.cacheCreationTokens + c.cacheReadTokens;
+  const list = parts.map((c) =>
+    c.model && c.model !== "unknown" ? tableCostUSD(c.model, c) : null,
+  );
+  const knownList = list.reduce<number>((s, v) => s + (v ?? 0), 0);
+  if (knownList <= 0) {
+    return parts.map((c) => ({
+      ...c,
+      costUSD: tokenSum > 0 ? (dayCost * tokensOf(c)) / tokenSum : 0,
+    }));
+  }
+  const unknownTokens = parts.reduce(
+    (s, c, i) => s + (list[i] === null ? tokensOf(c) : 0),
+    0,
+  );
+  // Unknown models keep their token share of the day; known models split the
+  // rest in proportion to list price (never below list price — repricing
+  // floors them afterwards anyway).
+  const unknownCost = tokenSum > 0 ? (dayCost * unknownTokens) / tokenSum : 0;
+  const premium = Math.max(1, Math.max(0, dayCost - unknownCost) / knownList);
+  return parts.map((c, i) => {
+    const l = list[i];
+    const costUSD =
+      l === null
+        ? unknownTokens > 0
+          ? (unknownCost * tokensOf(c)) / unknownTokens
+          : 0
+        : l * premium;
+    return { ...c, costUSD: Number(costUSD.toFixed(6)) };
+  });
 }
 
 /**
@@ -245,14 +308,7 @@ export function mapCcusageDaily(
           s + c.inputTokens + c.outputTokens + c.cacheCreationTokens + c.cacheReadTokens,
         0,
       );
-      candidates = partial.map((c) => {
-        const tokens =
-          c.inputTokens + c.outputTokens + c.cacheCreationTokens + c.cacheReadTokens;
-        return {
-          ...c,
-          costUSD: tokenSum > 0 ? (dayCost * tokens) / tokenSum : 0,
-        };
-      });
+      candidates = splitDayCostByPrice(partial, dayCost, tokenSum);
     } else {
       // Sources like droid and opencode report only day-level tokens plus a
       // `modelsUsed` list — there is no per-model breakdown to split the tokens
@@ -523,6 +579,10 @@ export function dedupeDaily(entries: DailyUsageEntry[]): DailyUsageEntry[] {
     prev.outputTokens += e.outputTokens;
     prev.cacheCreationTokens += e.cacheCreationTokens;
     prev.cacheReadTokens += e.cacheReadTokens;
+    if (e.cacheCreation1hTokens !== undefined || prev.cacheCreation1hTokens !== undefined) {
+      prev.cacheCreation1hTokens =
+        (prev.cacheCreation1hTokens ?? 0) + (e.cacheCreation1hTokens ?? 0);
+    }
     prev.costUSD = Number((prev.costUSD + e.costUSD).toFixed(6));
     prev.verified = prev.verified && e.verified;
     // Sum the request-id fingerprint too (only present on native-reader rows);

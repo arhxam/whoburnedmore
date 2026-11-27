@@ -64,6 +64,13 @@ export const DailyUsageEntry = z.object({
   outputTokens: tokenCount,
   cacheCreationTokens: tokenCount,
   cacheReadTokens: tokenCount,
+  /**
+   * Optional subset of `cacheCreationTokens` written at the 1-hour cache TTL
+   * (billed at 2x input on Anthropic, vs 1.25x for the 5-minute TTL). Lets the
+   * server price cache writes correctly; never counted as extra tokens. Older
+   * CLIs omit it; older servers strip it.
+   */
+  cacheCreation1hTokens: tokenCount.optional(),
   /** Estimated cost in USD for this entry. */
   costUSD,
   /** Where this entry came from. Defaults to the local CLI for back-compat. */

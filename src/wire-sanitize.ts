@@ -4,6 +4,7 @@ import {
   BlockEntry as BlockEntrySchema,
   CodexReplayPriorScope as CodexReplayPriorScopeSchema,
   DailyUsageEntry as DailyUsageEntrySchema,
+  MAX_USD_PER_MTOK,
   SessionEntry as SessionEntrySchema,
   SkillStat as SkillStatSchema,
   ToolStat as ToolStatSchema,
@@ -39,11 +40,48 @@ export function sanitizeMachineLabel(
   return `${kind}-${digest}`;
 }
 
+/** Non-negative finite number, else 0 (cost/token arithmetic only). */
+function finiteNonNeg(v: unknown): number {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+/**
+ * Keep one row's cost inside the server's per-row plausibility checks. The API
+ * rejects the WHOLE upload — every agent, every day — when any single row has
+ * a cost but no tokens, or costs more than $200 per million tokens. Vendor-
+ * recorded charges (Cursor, Cline, tokscale, opencode/OpenRouter per-request
+ * fees) can legitimately land there, so clamp instead of letting one row sink
+ * the sync. Returns null for a cost-only row (no tokens at all): it cannot be
+ * represented on the wire.
+ */
+export function boundRowCost(row: Record<string, unknown>): Record<string, unknown> | null {
+  const tokens =
+    finiteNonNeg(row.inputTokens) +
+    finiteNonNeg(row.outputTokens) +
+    finiteNonNeg(row.cacheCreationTokens) +
+    finiteNonNeg(row.cacheReadTokens);
+  if (tokens === 0) return null;
+  const cost = finiteNonNeg(row.costUSD);
+  // 1% under the line so float rounding on either side can never cross it.
+  const ceiling = (tokens * MAX_USD_PER_MTOK * 0.99) / 1_000_000;
+  const bounded = cost > ceiling ? Number(ceiling.toFixed(6)) : cost;
+  const out: Record<string, unknown> = { ...row, costUSD: bounded };
+  if (row.cacheCreation1hTokens !== undefined) {
+    const oneHour = Math.round(finiteNonNeg(row.cacheCreation1hTokens));
+    const writes = Math.round(finiteNonNeg(row.cacheCreationTokens));
+    if (oneHour > 0) out.cacheCreation1hTokens = Math.min(oneHour, writes);
+    else delete out.cacheCreation1hTokens;
+  }
+  return out;
+}
+
 export function sanitizeDailyEntries(rows: readonly unknown[]): DailyUsageEntry[] {
   const safe: DailyUsageEntry[] = [];
   for (const raw of rows) {
     if (!raw || typeof raw !== "object") continue;
-    const row = raw as Record<string, unknown>;
+    const row = boundRowCost(raw as Record<string, unknown>);
+    if (!row) continue;
     const parsed = DailyUsageEntrySchema.safeParse({
       ...row,
       tool: sanitizeMachineLabel(row.tool, "agent", 64),
