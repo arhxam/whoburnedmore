@@ -208,8 +208,8 @@ export function parseDevinSessionLog(content: string, now: number = Date.now()):
 /**
  * Devin CLI roots for this user (any may be missing). `DEVIN_SESSIONS_DIR`
  * replaces the data root outright (Devin then writes `<dir>/cli/…` and nothing
- * under the default), so it is the only root when set. It only reaches us when
- * the variable is in this process's environment, i.e. interactive runs.
+ * under the default), so it is the only root when set — the same sessions
+ * Devin itself sees. autosync forwards it to the background job.
  */
 export function devinCliRoots(env: NodeJS.ProcessEnv = process.env): string[] {
   const override = env.DEVIN_SESSIONS_DIR?.trim();
